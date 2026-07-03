@@ -32,7 +32,7 @@ def create_app():
     from fastapi import Body, FastAPI, Query
     from fastapi.responses import FileResponse, JSONResponse, HTMLResponse
 
-    from .. import audit, constants, ruleset, settings
+    from .. import attach, audit, constants, ruleset, settings
     from ..config import load_guardian_config
     from ..dkg_client import DkgClient, extract_binding
 
@@ -246,6 +246,37 @@ def create_app():
             logger.debug("guardian dashboard: agents query failed: %s", exc)
 
         return {"agents": list(found.values())}
+
+    @app.get("/api/attach-targets")
+    def attach_targets() -> Any:
+        """Discover local agent configs the dashboard can attach Guardian to."""
+        targets: List[Dict[str, Any]] = []
+        try:
+            for row in attach.attach_all(openclaw=False, dry_run=True).get("hermes", []):
+                targets.append(row)
+            for row in attach.attach_all(hermes=False, dry_run=True).get("openclaw", []):
+                targets.append(row)
+        except Exception as exc:  # pragma: no cover - fail open
+            logger.debug("guardian dashboard: attach target discovery failed: %s", exc)
+        return {"targets": targets}
+
+    @app.post("/api/attach")
+    def attach_selected(payload: Dict[str, Any] = Body(...)) -> Any:
+        """Attach Guardian to selected local targets."""
+        rows: List[Dict[str, Any]] = []
+        for item in payload.get("targets") or []:
+            if not isinstance(item, dict):
+                continue
+            kind = str(item.get("kind") or "").lower()
+            target = str(item.get("target") or "").strip()
+            if not target:
+                continue
+            if kind == "hermes":
+                rows.append(attach.attach_hermes(Path(target)))
+            elif kind == "openclaw":
+                rows.append(attach.attach_openclaw(Path(target)))
+        ok = all(row.get("ok") for row in rows) if rows else False
+        return JSONResponse({"ok": ok, "targets": rows}, status_code=200 if ok else 400)
 
     def _tier_view(tier: str, default: str = "public") -> tuple:
         """Map a UI tier name to a DKG SPARQL view.

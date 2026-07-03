@@ -331,6 +331,15 @@
     margin-top: 3px;
   }
   .agent-reports strong { color: var(--text); font-weight: 600; }
+  .attach-box { width: 100%; display: flex; justify-content: center; padding: 10px 0 2px; }
+  .attach-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; width: 100%; padding: 9px 11px; border: 1px solid var(--border); border-radius: 8px; background: rgba(255,255,255,0.025); }
+  .attach-list { display: flex; flex-direction: column; gap: 8px; }
+  .attach-path { min-width: 0; font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace; font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .attach-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .attach-actions.center { justify-content: center; }
+  .attach-btn { font: inherit; font-size: 12px; font-weight: 600; border-radius: 8px; padding: 7px 13px; cursor: pointer; border: 1px solid var(--border); color: var(--text); background: rgba(255,255,255,0.04); }
+  .attach-btn.primary { color: #0D0D0D; background: var(--mint); border-color: var(--mint); }
+  .attach-note { font-size: 12px; color: var(--muted); }
 
   /* ---------- Tabs ---------- */
   .tabs {
@@ -678,6 +687,7 @@
   /* ---------- Settings panel (reuses .modal-overlay / .modal) ---------- */
   /* Wider than the threat modal — the policy form needs the room. */
   .modal.settings-modal { max-width: 640px; border-top: 1px solid var(--border); }
+  .modal.attach-modal { max-width: 520px; }
   .set-head {
     display: flex; align-items: center; gap: 13px;
     padding: 22px 52px 16px 22px;
@@ -1239,6 +1249,8 @@
   // ---------- Connected agents ----------
   // Per-agent report counts are hidden for now; flip to true to show them again.
   var SHOW_AGENT_REPORTS = false;
+  var attachTargets = [];
+  var attachWaiting = false;
   function renderAgents(data) {
     var list = asList(data);
     var strip = $("agents-strip");
@@ -1249,7 +1261,11 @@
     if (!list.length) {
       strip.innerHTML = '<div class="empty" style="padding:28px 20px; width:100%;">' +
         '<svg class="e-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="7" r="4"/><path d="M5.5 21a6.5 6.5 0 0 1 13 0"/></svg>' +
-        '<strong>No agents connected yet.</strong></div>';
+        '<strong>' + (attachWaiting ? 'Waiting for activity' : 'No active agents yet.') + '</strong>' +
+        (attachWaiting ? '<span class="attach-note">Send a message in Hermes to verify Guardian.</span>' : '') +
+        '<div class="attach-box" id="attach-box">' +
+          '<button type="button" class="attach-btn primary" id="attach-open">Manage local agents</button>' +
+        '</div></div>';
       return;
     }
 
@@ -1268,6 +1284,75 @@
         '</div>' +
       '</div>';
     }).join("");
+  }
+
+  function renderAttachTargets(targets, note) {
+    var box = $("attach-list");
+    var status = $("attach-status");
+    if (!box) return;
+    attachTargets = targets || [];
+    if (!attachTargets.length) {
+      box.innerHTML = '<div class="modal-empty">' + esc(note || "No local agents found.") + '</div>';
+      if (status) status.textContent = "";
+      return;
+    }
+    box.innerHTML = attachTargets.map(function (t, i) {
+      var label = fwLabel(t.kind || "agent");
+      return '<div class="attach-row">' +
+        '<span style="display:flex;align-items:center;gap:10px;min-width:0;">' +
+          '<span class="agent-avatar" style="--fw:' + fwColor(t.kind) + '">' + fwIcon(t.kind) + '</span>' +
+          '<span class="agent-info"><span class="agent-fw">' + esc(label) + '</span>' +
+          '<span class="attach-path" title="' + esc(t.target || "") + '">' + esc(t.target || "") + '</span></span>' +
+        '</span>' +
+        '<label class="set-toggle"><input type="checkbox" class="attach-enabled" data-i="' + i + '" checked aria-label="Attach ' + esc(label) + '" /><span class="set-track"></span></label>' +
+      '</div>';
+    }).join("");
+    if (status) status.textContent = note || "Changes apply after agent restart.";
+  }
+
+  function scanAttachTargets() {
+    var box = $("attach-list");
+    var status = $("attach-status");
+    if (box) box.innerHTML = '<div class="modal-empty">Scanning local agents...</div>';
+    if (status) status.textContent = "";
+    getJSON("/api/attach-targets")
+      .then(function (d) { renderAttachTargets(d.targets || [], "Select agents to protect."); })
+      .catch(function () { renderAttachTargets([], "Could not scan local agents."); });
+  }
+
+  function attachSelected() {
+    var checks = document.querySelectorAll(".attach-enabled:checked");
+    var targets = Array.prototype.map.call(checks, function (c) {
+      return attachTargets[Number(c.getAttribute("data-i"))];
+    }).filter(Boolean);
+    var note = $("attach-status");
+    if (note) note.textContent = targets.length ? "Attaching..." : "Select at least one agent.";
+    if (!targets.length) return;
+    postJSON("/api/attach", { targets: targets }).then(function (res) {
+      if (res.ok) {
+        attachWaiting = true;
+        closeAttachModal();
+        renderAgents({ agents: [] });
+      } else if (note) {
+        note.textContent = "Attach failed.";
+      }
+    }).catch(function () {
+      if (note) note.textContent = "Attach failed.";
+    });
+  }
+
+  function openAttachModal() {
+    var overlay = $("attach-modal");
+    if (!overlay) return;
+    overlay.classList.add("open");
+    overlay.setAttribute("aria-hidden", "false");
+    scanAttachTargets();
+  }
+  function closeAttachModal() {
+    var overlay = $("attach-modal");
+    if (!overlay) return;
+    overlay.classList.remove("open");
+    overlay.setAttribute("aria-hidden", "true");
   }
 
   // ---------- Threat graph (force-directed) ----------
@@ -2636,6 +2721,14 @@
   }
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", wireSettings);
   else wireSettings();
+  document.addEventListener("click", function (e) {
+    if (e.target && e.target.id === "attach-open") openAttachModal();
+    if (e.target && e.target.id === "attach-close") closeAttachModal();
+    if (e.target && e.target.id === "attach-cancel") closeAttachModal();
+    if (e.target && e.target.id === "attach-scan") scanAttachTargets();
+    if (e.target && e.target.id === "attach-apply") attachSelected();
+    if (e.target && e.target.id === "attach-modal") closeAttachModal();
+  });
   // warm the settings once at startup so the first open is instant (best-effort)
   loadSettings(false);
 
@@ -2660,6 +2753,33 @@
       <button class="modal-copy" id="tm-copy">Copy</button>
     </div>
     <div class="modal-body" id="tm-body"></div>
+  </div>
+</div>
+
+<!-- Attach local agents -->
+<div class="modal-overlay" id="attach-modal" aria-hidden="true">
+  <div class="modal settings-modal attach-modal" role="dialog" aria-modal="true" aria-labelledby="attach-title">
+    <button class="modal-close" id="attach-close" aria-label="Close attach agents">&#10005;</button>
+    <div class="set-head">
+      <div class="set-ico" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="7" r="4"/><path d="M5.5 21a6.5 6.5 0 0 1 13 0"/></svg>
+      </div>
+      <div class="set-htext">
+        <div class="set-title" id="attach-title">Local agents</div>
+        <div class="set-sub">Select which local agents Guardian should protect.</div>
+      </div>
+    </div>
+    <div class="set-body">
+      <div class="set-group">
+        <div class="attach-list" id="attach-list"></div>
+      </div>
+    </div>
+    <div class="set-foot">
+      <span class="set-status" id="attach-status"></span>
+      <button type="button" class="set-cancel" id="attach-scan">Scan again</button>
+      <button type="button" class="set-cancel" id="attach-cancel">Cancel</button>
+      <button type="button" class="set-save" id="attach-apply">Attach selected</button>
+    </div>
   </div>
 </div>
 
