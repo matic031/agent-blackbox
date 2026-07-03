@@ -81,7 +81,7 @@
     min-width: 0;
   }
   .brand-logo {
-    height: 78px;
+    height: 64px;
     width: auto;
     /* invert black wordmark to white for dark bg */
     filter: invert(1);
@@ -542,10 +542,18 @@
     .stats { grid-template-columns: repeat(2, 1fr); }
     .agent-card { min-width: 0; flex: 1 1 100%; }
     .brand-logo { height: 58px; }
+    .section-head.graph-head { align-items: stretch; flex-direction: column; }
+    .tabs { width: 100%; }
+    .tab { flex: 1 1 0; justify-content: center; padding: 7px 10px; }
     /* keep the gear reachable on narrow screens; only the text pills collapse */
     .status-pills .status-pill { display: none; }
   }
   @media (max-width: 520px) {
+    .wrap, .header-inner, .banner { padding-left: 16px; padding-right: 16px; }
+    .section { margin-top: 26px; }
+    .section-head { align-items: flex-start; }
+    .graph-stage { height: 360px; }
+    thead th, tbody td { padding-left: 12px; padding-right: 12px; }
     .stats { grid-template-columns: 1fr; }
     .brand-sub { display: none; }
     .brand-logo { height: 46px; }
@@ -855,7 +863,10 @@
   @media (max-width: 560px) {
     .set-row { flex-wrap: wrap; }
     .cat-row { flex-wrap: wrap; }
-    .cat-ctrl { padding-left: 43px; }
+    .set-body { padding-bottom: 88px; }
+    .set-foot { position: static; flex-wrap: wrap; background: var(--panel); border-top: 1px solid var(--border); }
+    .set-foot .set-status { flex-basis: 100%; }
+    .set-cancel, .set-save { flex: 1 1 0; }
   }
 
   /* ---------- Findings rows (Live findings + Audit trail) ---------- */
