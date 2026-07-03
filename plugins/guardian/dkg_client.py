@@ -227,12 +227,21 @@ class DkgClient:
 
     # -- query -------------------------------------------------------------
 
-    def query(self, sparql: str, cg_id: str, view: str = constants.VIEW_SHARED_WORKING_MEMORY) -> List[Dict[str, Any]]:
+    def query(
+        self,
+        sparql: str,
+        cg_id: str,
+        view: str = constants.VIEW_SHARED_WORKING_MEMORY,
+        on_error: Any = None,
+    ) -> List[Dict[str, Any]]:
         """Run a SPARQL SELECT and return normalized bindings.
 
         Each binding is a ``{var: value}`` dict of plain strings (literals and
-        IRIs already unwrapped — see :func:`extract_binding`). Returns ``[]``
-        on transport error rather than raising, since read paths fail open.
+        IRIs already unwrapped — see :func:`extract_binding`). On transport
+        error it returns *on_error* (default ``[]``) rather than raising, since
+        read paths fail open. A caller that must tell a genuine *empty* result
+        (``[]``) apart from a *failure* passes a sentinel (e.g. ``on_error=None``
+        won't collide with a successful empty ``[]``).
         """
         try:
             result = self._request(
@@ -243,7 +252,7 @@ class DkgClient:
             )
         except DkgError as exc:
             logger.debug("guardian: query failed: %s", exc)
-            return []
+            return [] if on_error is None else on_error
         return normalize_bindings(result)
 
     def register_agent(self, name: str, framework: str = "hermes") -> Dict[str, Any]:

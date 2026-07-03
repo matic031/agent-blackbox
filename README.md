@@ -142,6 +142,7 @@ In the default audit mode every one is flagged and logged, nothing is stopped. S
 - **Prompt injection** - hidden instructions in web pages, files, or tool output that try to hijack your agent.
 - **Dangerous commands** - shell commands that pipe remote scripts, exfiltrate data, or damage your system.
 - **Sensitive file access** - reads of SSH keys, credentials, and other secrets.
+- **Secret exposure** - a real API key, token, or private key the agent handles or tries to send off-box.
 - **Suspicious skills** - newly installed skills with malicious behavior.
 
 ## The public threat graph

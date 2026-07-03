@@ -135,6 +135,27 @@ rule, so they behave differently from graph/heuristic findings:
 - they are **never** shared to the community pool — `_report_and_audit` skips
   SWM/private-KA for `source=="custom"` and audits locally only.
 
+### The audit trail (visibility, separate from flagging)
+
+Guardian keeps a **complete local audit trail** independent of whether anything
+flags — the "what did the agent do" record an operator wants, separate from the
+threat feed. Every tool call is recorded to `audit.jsonl`; on top of that, the
+`on_pre_tool_call` hook logs structured visibility for **both** the dedicated
+file tools **and** the shell channel (`hooks._record_activity` →
+`quads.parse_shell_reads` / `parse_downloads` / `parse_dependency_installs`):
+
+- `file_access.jsonl` — every file read/written (incl. `cat`/`head`/… via a
+  shell tool) and every download URL (`mode="download"`).
+- `dependencies.jsonl` — a structured record of **every** package install
+  (`ecosystem`, `name`, `version`) regardless of threat status — the enterprise
+  lib inventory.
+
+These are local-only and never shared to SWM. Threat *findings* are the tighter
+overlay: built-in heuristics are deliberately narrow (a routine `rm -rf
+node_modules`, `.env` template, `curl -k localhost`, or a skill that shells out
+does not raise a threat), so the shared community graph stays high-signal while
+the audit trail stays complete.
+
 ### Optional LLM reviewer
 
 An opt-in `llm` subtree adds an LLM second opinion on prompt injection over the

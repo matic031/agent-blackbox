@@ -86,22 +86,24 @@ def _report_and_audit(cfg: GuardianConfig, event: str, findings: List[detection.
     except Exception:
         client = None
     for finding in finding_dicts:
-        # Custom (user-configured) rules and LLM second-opinions are personal:
-        # they are audited in the local JSONL logs above but never leave this
-        # machine — no private WM KA, no community sighting. The LLM verdict is
-        # a soft signal, not a verified threat, so it must not seed the graph.
-        if finding.get("source") in ("custom", "llm"):
+        # Custom rules, LLM opinions, and secret-value findings are personal:
+        # audited in the local JSONL logs above but never leaving this machine —
+        # no private WM KA, no community sighting. Secret findings especially
+        # must stay local (the value must never risk reaching the shared graph).
+        if finding.get("source") in ("custom", "llm", "secret"):
             continue
         identifier = str(finding.get("identifier") or "")
         # Per-threat cooldown: a re-fire of the same identifier within the
         # window adds no signal — skip both the private KA and the sighting.
         if audit.recently_reported(identifier):
             continue
-        # Private WM audit KA (observed evidence stays local).
+        # Private WM audit KA (observed evidence stays local). Stamp the cooldown
+        # here so it bounds the KA independently of whether a sighting is sent.
         if client is not None:
+            audit.mark_reported(identifier)
             audit.write_private_audit_ka(client, cfg.context_graph_id, event, finding)
         # Outbound SWM sighting (never carries observed prompt/command text).
-        if cfg.report and client is not None and audit.allow_report(cfg.daily_report_limit, identifier):
+        if cfg.report and client is not None and audit.allow_report(cfg.daily_report_limit):
             _share_sighting(client, cfg, finding)
 
 
@@ -180,7 +182,7 @@ def on_pre_tool_call(
         cfg = _config()
         rs = ruleset.get(cfg)
         # Visibility: log every file-access tool call (best-effort).
-        _record_file_access(tool_name, args)
+        _record_activity(tool_name, args)
         raw = detection.detect_all(tool_name, args, rs, discover=cfg.discover)
         raw += detection.detect_custom_fileaccess(tool_name, args, cfg.protected_paths)
         findings = _flag_worthy(cfg, raw)
@@ -203,7 +205,7 @@ def on_pre_tool_call(
             # working) — only active ``malware`` is stopped.
             blocking = [
                 f for f in findings
-                if (f.confirmed or f.source == "custom")
+                if (f.confirmed or f.source in ("custom", "secret"))
                 and getattr(f, "kind", None) != constants.KIND_VULNERABILITY
                 and cfg.meets_block_threshold(f.severity)
             ]
@@ -215,14 +217,34 @@ def on_pre_tool_call(
         return None
 
 
-def _record_file_access(tool_name: str, args: Any) -> None:
-    """Log a file-access tool call to the visibility log (fail-open)."""
+def _record_activity(tool_name: str, args: Any) -> None:
+    """Log what the agent touched to the visibility trail (fail-open).
+
+    Covers BOTH the dedicated file tools AND the shell channel, so the audit
+    trail is complete: a `cat ~/.ssh/id_rsa`, a `curl` download, and every
+    `npm/pip install` run through a shell tool are all recorded (as file reads,
+    downloads, and structured dependency-install records) — not just left as an
+    opaque command string. This is visibility, not detection: everything is
+    logged regardless of whether it flags.
+    """
     try:
         access = quads.file_access_arg(tool_name, args)
         if access:
             audit.record_file_access(access["tool"], access["path"], access["mode"])
+            return
+        if (tool_name or "").strip().lower() not in quads._SHELL_TOOLS:
+            return
+        command = quads._command_from_args(tool_name, args)
+        if not command:
+            return
+        for path in quads.parse_shell_reads(command):
+            audit.record_file_access("shell", path, "read")
+        for url in quads.parse_downloads(command):
+            audit.record_file_access("shell", url, "download")
+        for dep in quads.parse_dependency_installs(command):
+            audit.record_dependency(dep["ecosystem"], dep["name"], dep.get("version", ""), "shell")
     except Exception as exc:  # pragma: no cover - fail open
-        logger.debug("guardian: file-access visibility log failed: %s", exc)
+        logger.debug("guardian: activity visibility log failed: %s", exc)
 
 
 def _spawn_osv_discovery(cfg: GuardianConfig, rs: Any, tool_name: str, args: Any) -> None:

@@ -17,7 +17,7 @@ from typing import Any, Dict, Mapping, Tuple
 from . import constants
 
 #: The five detection categories a user can tune individually.
-DETECTION_CATEGORIES = ("injection", "escalation", "dependency", "fileaccess", "skill")
+DETECTION_CATEGORIES = ("injection", "escalation", "dependency", "fileaccess", "skill", "secret")
 
 logger = logging.getLogger(__name__)
 

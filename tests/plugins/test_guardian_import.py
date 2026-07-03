@@ -37,11 +37,20 @@ def test_seed_entries_dedups_and_dry_run_spends_nothing():
         {"type": "dependency", "ecosystem": "npm", "name": "seen", "version": "9.0.0"},  # in ledger
     ]
     already = {"dep:npm:seen@9.0.0"}
+    # A real seed publishes on-chain: dry-run previews exactly which ids would be
+    # published (the ledger/TRAC set) without spending anything.
     seeded, skipped, errors, new_ids = cli._seed_entries(
-        None, None, entries, publish=False, already=already, dry_run=True
+        None, None, entries, publish=True, already=already, dry_run=True
     )
     assert (seeded, skipped, errors) == (2, 2, 0)
     assert new_ids == ["dep:npm:evil@1.0.0", "dep:npm:evil@2.0.0"]
+
+    # A --no-publish (SWM-only) run records NOTHING in the ledger, so it can
+    # never make a later real publish skip these ids as "already published".
+    _, _, _, no_pub_ids = cli._seed_entries(
+        None, None, entries, publish=False, already={"dep:npm:seen@9.0.0"}, dry_run=True
+    )
+    assert no_pub_ids == []
 
 
 # A small bumblebee-shaped catalog: one package, three malicious versions.

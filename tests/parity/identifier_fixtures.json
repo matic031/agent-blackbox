@@ -147,7 +147,7 @@
       "args": {
         "command": "chmod -R 777 /tmp/x"
       },
-      "shape": "chmod-world-writable"
+      "shape": null
     },
     {
       "tool": "terminal",

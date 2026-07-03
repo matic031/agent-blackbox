@@ -54,6 +54,7 @@ def read_settings() -> Dict[str, Any]:
             "dependency": "Vulnerable dependencies",
             "fileaccess": "Sensitive file access",
             "skill": "Suspicious skills",
+            "secret": "Secret exposure",
         },
     }
 

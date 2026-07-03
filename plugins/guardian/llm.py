@@ -44,7 +44,11 @@ DEFAULT_MODELS = {
 # Redact obvious secrets from text before it leaves the machine. Mirrors the
 # audit-log redaction so an injected prompt full of keys isn't forwarded raw.
 _SECRET_RES = (
-    re.compile(r"sk-[A-Za-z0-9_-]{16,}"),
+    re.compile(r"sk-[A-Za-z0-9_-]{16,}"),                         # OpenAI-style keys
+    re.compile(r"\b(?:gh[pousr]|github_pat)_[A-Za-z0-9_]{16,}"),  # GitHub tokens
+    re.compile(r"\bAKIA[0-9A-Z]{16}\b"),                          # AWS access-key id
+    re.compile(r"\bey[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}"),  # JWT
+    re.compile(r"\bBearer\s+[A-Za-z0-9._~+/-]{12,}=*", re.IGNORECASE),               # bearer tokens
     re.compile(r"\b[A-Za-z0-9_-]*(?:api[_-]?key|token|secret|password)[\"'\s:=]+[A-Za-z0-9._-]{8,}", re.IGNORECASE),
 )
 
@@ -85,7 +89,9 @@ def review_injection(text: str, cfg: Any) -> Optional[Dict[str, Any]]:
     """
     if not text or not available(cfg):
         return None
-    payload_text = _redact(text[:_MAX_REVIEW_CHARS])
+    # Redact BEFORE truncating: a secret straddling the cutoff must not survive
+    # as a partial. Redact a small margin past the cap, then truncate.
+    payload_text = _redact(text[: _MAX_REVIEW_CHARS + 256])[:_MAX_REVIEW_CHARS]
     try:
         provider = cfg.llm_provider.strip().lower()
         if provider == "openai":

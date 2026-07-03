@@ -214,13 +214,13 @@ detection light up batch by batch.
 hermes guardian setup-graph --network mainnet-base
 
 # 1. DRY RUN first — see how many are NEW after dedup. Spends no TRAC.
-hermes guardian curate import --file batch-01.json --osv-enrich --dry-run
+hermes guardian curate import --file catalogs/starter.json --osv-enrich --dry-run
 #   → "Dry run: 4,812 NEW threats would publish, 188 skipped as duplicates, 0 errors."
 
 # 2. publish the batch to mainnet. Dedup skips anything already seeded, so this
 #    only pays TRAC for new identifiers. Re-running a batch is safe — never
 #    double-publishes.
-hermes guardian curate import --file batch-01.json --osv-enrich
+hermes guardian curate import --file catalogs/starter.json --osv-enrich
 
 # 3. (optional) also skip anything already on-chain — authoritative dedup if the
 #    local ledger was lost or you seed from a second machine.
@@ -253,7 +253,7 @@ unless renewed. `curate import` defaults to `--epochs 1` (cheapest), but a
 your storage horizon up front:
 
 ```bash
-hermes guardian curate import --file batch-01.json --epochs 12   # ~longer on-chain life, more TRAC
+hermes guardian curate import --file catalogs/starter.json --epochs 12   # ~longer on-chain life, more TRAC
 ```
 
 Higher epochs = longer life = more TRAC per asset, so at 100k assets this is your
@@ -304,8 +304,9 @@ reserved production name.
 - Local DKG node on **mainnet-base**, reachable: `dkg hermes setup --network mainnet-base`
   → `curl -s http://127.0.0.1:9200/api/status`.
 - `hermes guardian status` runs.
-- A **small** first batch (`batch-01.json`, 20–50 known-bad packages) — enough to
-  prove detection. Save the 100k for production.
+- A **small** first batch. A ready-made one ships at `catalogs/starter.json`
+  (6 real, confirmed-malicious npm releases) — enough to prove detection. Swap in
+  your own catalog and save the 100k for production.
 
 **1. Isolated staging shell** — set the two env vars above; confirm the graph name.
 
@@ -316,13 +317,13 @@ hermes guardian setup-graph --network mainnet-base
 
 **3. Dry-run** (spends nothing — prints the TRAC bill):
 ```bash
-hermes guardian curate import --file batch-01.json --osv-enrich --dry-run
+hermes guardian curate import --file catalogs/starter.json --osv-enrich --dry-run
 ```
 Fix any `errors` first; zero errors + a sane new-count → proceed.
 
 **4. Publish the batch:**
 ```bash
-hermes guardian curate import --file batch-01.json --osv-enrich --epochs 1
+hermes guardian curate import --file catalogs/starter.json --osv-enrich --epochs 1
 ```
 Re-running is safe — the ledger skips anything already published.
 

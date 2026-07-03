@@ -205,16 +205,23 @@ def test_flag_worthy_keeps_graph_findings_regardless_of_severity():
     assert kept == findings
 
 
-# --- audit.allow_report per-identifier cooldown --------------------------------
+# --- per-identifier cooldown (mark_reported / recently_reported) ---------------
 
 
-def test_allow_report_cooldown_dedupes_same_identifier():
+def test_mark_reported_cooldown_dedupes_same_identifier():
     # HERMES_HOME is a per-test tmpdir (root conftest) → fresh rate state.
-    assert audit.allow_report(9999, "id-x") is True
-    assert audit.allow_report(9999, "id-x") is False  # within REPORT_COOLDOWN_SECS
-    assert audit.allow_report(9999, "id-y") is True  # different identifier unaffected
-    assert audit.recently_reported("id-x") is True
-    assert audit.recently_reported("id-y") is True
+    assert audit.recently_reported("id-x") is False
+    audit.mark_reported("id-x")
+    assert audit.recently_reported("id-x") is True   # within REPORT_COOLDOWN_SECS
+    assert audit.recently_reported("id-y") is False  # different identifier unaffected
+
+
+def test_allow_report_daily_counter_independent_of_cooldown():
+    # allow_report is now purely the daily cap; the same id twice both pass the
+    # counter (the per-threat cooldown is enforced separately at the call site).
+    assert audit.allow_report(2) is True
+    assert audit.allow_report(2) is True
+    assert audit.allow_report(2) is False  # third exceeds the cap of 2
     assert audit.recently_reported("id-never-reported") is False
 
 

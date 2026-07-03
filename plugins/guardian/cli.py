@@ -67,6 +67,10 @@ def setup_cli(parser: argparse.ArgumentParser) -> None:
     report.add_argument("--name", help="dependency: package name (or threat display name)")
     report.add_argument("--version", help="dependency: package version")
     report.add_argument("--advisory-id", dest="advisory_id", help="dependency: advisory id")
+    report.add_argument(
+        "--kind", choices=[constants.KIND_MALWARE, constants.KIND_VULNERABILITY],
+        help="dependency: malware (blocks) or vulnerability (flags only)",
+    )
     report.add_argument("--category", help="fileaccess: sensitive-path category (e.g. ssh-private-key)")
     report.add_argument("--skill-name", dest="skill_name", help="skill: skill name")
     report.add_argument("--skill-version", dest="skill_version", help="skill: known-bad version")
@@ -348,9 +352,12 @@ LIMIT 200
     if not rows:
         print("No community reports found (empty graph or node unreachable).")
         return 0
+    rejected = _load_rejected()  # locally-rejected candidates stay hidden
     print(f"{'reporters':>9}  {'sev':<8}  {'curated':<7}  identifier")
     for row in rows:
         ident = extract_binding(row.get("identifier"))
+        if ident in rejected:
+            continue
         reporters = extract_binding(row.get("reporters")) or "0"
         sev = extract_binding(row.get("sev")) or "-"
         curated = extract_binding(row.get("cur")).lower() == "true"
@@ -364,7 +371,7 @@ def _cmd_curate_show(args: argparse.Namespace) -> int:
     cfg = load_guardian_config()
     client = DkgClient(url=cfg.dkg_url)
     ident = args.identifier
-    esc = ident.replace('"', '\\"')
+    esc = ident.replace("\\", "\\\\").replace('"', '\\"')
     sparql = f"""
 PREFIX g: <http://umanitek.ai/ontology/guardian/>
 SELECT ?reporter ?severity ?framework WHERE {{
@@ -394,7 +401,16 @@ def _cmd_curate_approve(args: argparse.Namespace) -> int:
     if category is None:
         print(f"error: could not resolve threat fields for {ident} from reports.")
         return 2
-    severity = args.severity or fields.get("severity") or "high"
+    # An injection id is a hash of its regex, so the pattern can't be recovered
+    # from the identifier — without it in a report, approval would mint a rule
+    # that can never match. Refuse rather than publish a dead (paid) rule.
+    if category == "injection" and not fields.get("pattern"):
+        print(f"error: no injection regex recoverable for {ident}; a report must carry --pattern first.")
+        return 2
+    kind = fields.get("kind")
+    # Malware must block; force critical if a report under-stated it (see
+    # constants.severity_for_kind). Curator --severity still wins when given.
+    severity = args.severity or constants.severity_for_kind(kind, fields.get("severity"))
     name = args.name or fields.get("name") or ident
     description = args.description or fields.get("description") or f"Curated threat {ident}"
     q = quads.build_threat_quads(
@@ -404,6 +420,7 @@ def _cmd_curate_approve(args: argparse.Namespace) -> int:
         name=name,
         description=description,
         curated=True,
+        kind=kind,
         pattern=fields.get("pattern"),
         owasp_category=fields.get("owasp_category"),
         tool_name=fields.get("tool_name"),
@@ -426,6 +443,8 @@ def _cmd_curate_approve(args: argparse.Namespace) -> int:
             ual = result.get("ual") if isinstance(result, dict) else None
             tx = result.get("txHash") if isinstance(result, dict) else None
             print(f"Published to VM. UAL={ual} txHash={tx}")
+            # Record the on-chain publish so a later `import` never re-pays for it.
+            _append_seeded_ledger([ident])
     except DkgError as exc:
         print(f"error: {exc}")
         return 1
@@ -435,20 +454,15 @@ def _cmd_curate_approve(args: argparse.Namespace) -> int:
 def _cmd_curate_reject(args: argparse.Namespace) -> int:
     cfg = load_guardian_config()
     ident = args.identifier
-    # Local rejection: append to a rejects file so `list` can hide it if desired.
+    # Local rejection: append to the rejects file so `curate list` hides it.
     try:
-        home = constants.guardian_home()
-        home.mkdir(parents=True, exist_ok=True)
-        rejects = home / "rejected.json"
-        data = []
-        if rejects.exists():
-            data = json.loads(rejects.read_text(encoding="utf-8"))
-        if ident not in data:
-            data.append(ident)
+        rejects = _rejected_path()
+        rejects.parent.mkdir(parents=True, exist_ok=True)
+        data = sorted(_load_rejected() | {ident})
         rejects.write_text(json.dumps(data), encoding="utf-8")
     except Exception as exc:
         print(f"warning: could not persist local rejection: {exc}")
-    print(f"Marked {ident} rejected locally (its reports will TTL-expire from SWM).")
+    print(f"Marked {ident} rejected locally (hidden from `curate list`; its reports TTL-expire from SWM).")
     if args.dispute:
         client = DkgClient(url=cfg.dkg_url)
         reporter = _resolve_reporter(client)
@@ -546,6 +560,20 @@ def _resolve_import_paths(args: argparse.Namespace) -> Optional[List[Path]]:
     return sorted(p for p in directory.glob("*.json") if p.is_file())
 
 
+def _rejected_path() -> Path:
+    """Curator-local record of identifiers rejected via ``curate reject``."""
+    return constants.guardian_home() / "rejected.json"
+
+
+def _load_rejected() -> set:
+    """Identifiers a curator has locally rejected (hidden from ``curate list``)."""
+    try:
+        data = json.loads(_rejected_path().read_text(encoding="utf-8"))
+        return {str(x) for x in data} if isinstance(data, list) else set()
+    except Exception:
+        return set()
+
+
 def _seeded_ledger_path() -> Path:
     """Curator-local record of every identifier already published (dedup)."""
     return constants.guardian_home() / "seeded_identifiers.txt"
@@ -620,7 +648,8 @@ def _seed_entries(
         already.add(ident)  # never publish the same identifier twice in one run
         if dry_run:
             seeded += 1
-            new_ids.append(ident)
+            if publish:  # the ledger tracks on-chain publishes only
+                new_ids.append(ident)
             continue
         q = quads.build_threat_quads(
             category=category,
@@ -650,7 +679,8 @@ def _seed_entries(
             if publish:
                 client.publish(cfg.context_graph_id, ka_name, epochs=epochs)
             seeded += 1
-            new_ids.append(ident)
+            if publish:  # only on-chain publishes belong in the seeded ledger;
+                new_ids.append(ident)  # a --no-publish (SWM-only) run must not poison it
         except DkgError:
             errors += 1
     return seeded, skipped, errors, new_ids
@@ -847,9 +877,10 @@ def _build_candidate(args: argparse.Namespace) -> tuple:
         ident = quads.dependency_identifier(args.ecosystem, args.name, args.version)
         return ident, {
             "ecosystem": args.ecosystem.lower(),
-            "package_name": args.name,
+            "package_name": quads.canonical_package_name(args.ecosystem, args.name),
             "package_version": args.version,
             "advisory_id": args.advisory_id,
+            "kind": getattr(args, "kind", None),
         }
     if args.type == "fileaccess":
         if not (args.tool and args.category):
@@ -897,7 +928,7 @@ def _threat_fields_from_reports(client: DkgClient, cfg: GuardianConfig, identifi
 PREFIX g: <http://umanitek.ai/ontology/guardian/>
 PREFIX schema: <http://schema.org/>
 SELECT ?severity ?pattern ?owasp ?toolName ?argShape
-       ?packageName ?packageVersion ?packageEcosystem ?advisoryId
+       ?packageName ?packageVersion ?packageEcosystem ?advisoryId ?kind
        ?category ?skillName ?skillVersion ?dangerShape WHERE {{
   ?report a g:ThreatReport .
   ?report g:identifier "{esc}" .
@@ -910,6 +941,7 @@ SELECT ?severity ?pattern ?owasp ?toolName ?argShape
   OPTIONAL {{ ?report g:packageVersion ?packageVersion . }}
   OPTIONAL {{ ?report g:packageEcosystem ?packageEcosystem . }}
   OPTIONAL {{ ?report schema:identifier ?advisoryId . }}
+  OPTIONAL {{ ?report g:kind ?kind . }}
   OPTIONAL {{ ?report g:category ?category . }}
   OPTIONAL {{ ?report g:skillName ?skillName . }}
   OPTIONAL {{ ?report g:skillVersion ?skillVersion . }}
@@ -924,7 +956,7 @@ LIMIT 50
             ("severity", "severity"), ("pattern", "pattern"), ("owasp", "owasp_category"),
             ("toolName", "tool_name"), ("argShape", "arg_shape"),
             ("packageName", "package_name"), ("packageVersion", "package_version"),
-            ("packageEcosystem", "ecosystem"), ("advisoryId", "advisory_id"),
+            ("packageEcosystem", "ecosystem"), ("advisoryId", "advisory_id"), ("kind", "kind"),
             ("category", "file_category"), ("skillName", "skill_name"),
             ("skillVersion", "skill_version"), ("dangerShape", "danger_shape"),
         ):
@@ -1111,9 +1143,12 @@ def _entry_to_threat(entry: Dict[str, Any]) -> tuple:
         if name.startswith("@"):
             name = "@" + name.lstrip("@")
         ident = quads.dependency_identifier(eco, name, ver)
-        kind = str(entry.get("kind") or "").strip().lower() or None
+        raw_kind = str(entry.get("kind") or "").strip().lower()
+        kind = raw_kind if raw_kind in (constants.KIND_MALWARE, constants.KIND_VULNERABILITY) else None
         return "dependency", ident, {
-            "severity": constants.normalize_severity(entry.get("severity"), "high"),
+            # Malware floors to critical so it blocks under the default policy,
+            # even when the source catalog omits an explicit severity.
+            "severity": constants.severity_for_kind(kind, entry.get("severity")),
             "name": entry.get("title") or entry.get("name") or f"{name}@{ver}",
             "description": entry.get("summary") or entry.get("description") or "",
             "ecosystem": eco.lower(),
@@ -1121,7 +1156,7 @@ def _entry_to_threat(entry: Dict[str, Any]) -> tuple:
             "package_version": ver,
             "advisory_id": entry.get("advisoryId") or entry.get("advisory_id"),
             "references": entry.get("references") or [],
-            "kind": kind if kind in (constants.KIND_MALWARE, constants.KIND_VULNERABILITY) else None,
+            "kind": kind,
         }
     if ctype == "fileaccess":
         tool = str(entry.get("toolName") or entry.get("tool") or entry.get("tool_name") or "").strip()

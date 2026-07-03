@@ -74,9 +74,33 @@ def report_uri(identifier: str, agent_address: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+def canonical_package_name(ecosystem: str, name: str) -> str:
+    """Canonicalize a package name so the same package always maps to one key.
+
+    PyPI treats names case- AND separator-insensitively (PEP 503): ``Foo.Bar``,
+    ``foo-bar`` and ``foo_bar`` are the same project, so runs of ``-_.`` collapse
+    to a single ``-``. Every other ecosystem is only lowercased (npm is
+    case-insensitive; RubyGems/cargo/go names are separator-*sensitive*, so
+    collapsing there would wrongly merge distinct packages).
+    """
+    canon = name.strip().lower()
+    if ecosystem.strip().lower() == "pypi":
+        canon = re.sub(r"[-_.]+", "-", canon)
+    return canon
+
+
+def dependency_key(ecosystem: str, name: str, version: str) -> str:
+    """The ruleset lookup key ``{ecosystem}:{canonical-name}@{version}``.
+
+    Shared by the detector and the ruleset builder so a seeded id and a live
+    lookup are byte-identical for any spelling of the same package.
+    """
+    return f"{ecosystem.strip().lower()}:{canonical_package_name(ecosystem, name)}@{version.strip()}"
+
+
 def dependency_identifier(ecosystem: str, name: str, version: str) -> str:
-    """``dep:{ecosystem}:{name}@{version}`` (ecosystem + name lowercased)."""
-    return f"dep:{ecosystem.strip().lower()}:{name.strip().lower()}@{version.strip()}"
+    """``dep:{ecosystem}:{canonical-name}@{version}`` (see :func:`dependency_key`)."""
+    return f"dep:{dependency_key(ecosystem, name, version)}"
 
 
 def injection_identifier(pattern: str) -> str:
@@ -88,10 +112,11 @@ def escalation_identifier(tool_name: str, arg_shape: str) -> str:
     """``escalation:{tool}:{argShape}`` — the human-readable escalation id.
 
     The shape is kept literal (not hashed) so the id is legible, e.g.
-    ``escalation:shell:remote-script-pipe``. *arg_shape* is expected to already
-    be a normalized slug from :func:`normalize_arg_shape`.
+    ``escalation:shell:remote-script-pipe``. The detector emits lowercase
+    hyphenated slugs, so both tool and shape are lowercased here — a
+    curator-authored rule that differs only in case still matches.
     """
-    return f"escalation:{tool_name.strip().lower()}:{arg_shape.strip()}"
+    return f"escalation:{tool_name.strip().lower()}:{arg_shape.strip().lower()}"
 
 
 def fileaccess_identifier(tool_name: str, category: str) -> str:
@@ -122,19 +147,52 @@ REMOTE_SCRIPT_RE = re.compile(
     r"\b(?:curl|wget)\b[\s\S]{0,500}\|\s*(?:sh|bash|zsh|python|python3|node)\b",
     re.IGNORECASE,
 )
-# `rm -rf` against system / home roots.
+# `rm -rf` against DANGEROUS roots only. Matches the short combined/split forms
+# (`-rf`, `-fr`, `-r -f`) and the long forms (`--recursive --force`). The target
+# arm is deliberately narrow: whole-system roots, a bare `/`, a whole-home wipe
+# (`~`, `~/`, `$HOME`), or a security-sensitive home dir (`~/.ssh` etc.). Routine
+# cleanup — `rm -rf node_modules`, `~/.cache`, `~/build`, `/var/tmp/...` — does
+# NOT match, so ordinary dev work stays quiet.
 RM_RF_SYSTEM_RE = re.compile(
-    r"\brm\s+(?:-[a-z]*r[a-z]*f|-[a-z]*f[a-z]*r|-r\s+-f|-f\s+-r)\b[\s\S]{0,200}"
-    r"(?:\s/(?:etc|var|usr|bin|sbin|opt|private|System|Library)\b|\s~/?|\s/\s*$|\s\$HOME\b)",
+    r"\brm\s+(?:-[a-z]*r[a-z]*f|-[a-z]*f[a-z]*r|-r\s+-f|-f\s+-r|"
+    r"--recursive\s+--force|--force\s+--recursive|-r\s+--force|--recursive\s+-f)\b[\s\S]{0,200}"
+    r"(?:"
+    r"\s/(?:etc|usr|bin|sbin|opt|private|System|Library)\b"          # system roots
+    r"|\s/var(?!/(?:tmp|folders))\b"                                 # /var but not temp
+    r"|\s/\s*(?=[;&|]|$)"                                            # bare / (root)
+    r"|\s(?:~|\$HOME)/?(?=\s|[;&|]|$)"                               # whole home wipe
+    r"|\s(?:~|\$HOME)/\.(?:ssh|aws|gnupg|gpg|kube|docker|password-store)\b"  # sensitive home dirs
+    r")",
     re.IGNORECASE,
 )
-# `chmod 777` / world-writable perms.
-CHMOD_WORLD_RE = re.compile(r"\bchmod\s+(?:-R\s+)?0?777\b", re.IGNORECASE)
+# `chmod 777` against a SENSITIVE target (system root or security dir). World-
+# writable perms on a scratch/build/public dir are common and harmless, so a
+# bare `chmod 777 ./public` no longer fires.
+CHMOD_WORLD_RE = re.compile(
+    r"\bchmod\s+(?:-R\s+)?0?777\b[\s\S]{0,200}"
+    r"(?:\s/(?:etc|usr|bin|sbin|var|opt|private|System|Library)\b|\s/\s*(?=[;&|]|$)"
+    r"|\s(?:~|\$HOME)/?\.?(?:ssh|aws|gnupg))",
+    re.IGNORECASE,
+)
 # Piping a fetched payload straight into eval.
 CURL_EVAL_RE = re.compile(r"\b(?:curl|wget)\b[\s\S]{0,300}\|\s*eval\b", re.IGNORECASE)
-# Disabling TLS verification on a network fetch.
+# Disabling TLS verification on a network fetch. `-k`/`--insecure` mean "skip
+# cert check" for curl only; for wget `-k` is `--convert-links` (benign), whose
+# insecure flag is `--no-check-certificate`. Keep them ecosystem-specific so a
+# routine `wget -k` mirror isn't misflagged.
 INSECURE_FETCH_RE = re.compile(
-    r"\b(?:curl|wget)\b[\s\S]{0,200}(?:--insecure|-k\b|--no-check-certificate)",
+    # curl: --insecure, --no-check-certificate, or a short-flag group containing
+    # `k` (`-k`, `-sk`, `-ks`, `-fsSLk`). Kept as a plain char class (no inline
+    # case flags) so the TS port stays byte-identical for parity.
+    r"\bcurl\b[\s\S]{0,200}(?:--insecure|--no-check-certificate|\s-[a-z]*k[a-z]*\b)"
+    r"|\bwget\b[\s\S]{0,200}--no-check-certificate",
+    re.IGNORECASE,
+)
+# A local/private/dev host — an insecure TLS fetch against one of these is
+# routine (self-signed dev servers, internal endpoints), not a threat.
+_LOCAL_HOST_RE = re.compile(
+    r"(?:localhost|127\.0\.0\.\d+|0\.0\.0\.0|\[::1\]|\b10\.\d+\.\d+\.\d+"
+    r"|\b192\.168\.\d+\.\d+|\b172\.(?:1[6-9]|2\d|3[01])\.\d+\.\d+|\.local\b|\.internal\b)",
     re.IGNORECASE,
 )
 
@@ -192,6 +250,10 @@ def normalize_arg_shape(tool_name: str, args: Any) -> Optional[str]:
     for shape, pattern in _SHELL_SHAPE_RULES:
         try:
             if pattern.search(command):
+                # Insecure TLS against a localhost / private / .local host is
+                # routine dev work, not a threat — skip it (other shapes still win).
+                if shape == "insecure-tls-fetch" and _LOCAL_HOST_RE.search(command):
+                    continue
                 return shape
         except re.error:  # pragma: no cover - static patterns
             continue
@@ -218,8 +280,7 @@ _INJECTION_HEURISTICS = (
         r"(?:previous|prior|above|earlier|preceding|prior\s+)\s*"
         r"(?:instruction|message|prompt|rule|context|direction|directive|command|guideline)s?",
         re.IGNORECASE)),
-    # Exfiltrate the system prompt / instructions: reveal/show/give/tell/send/
-    # output/what-is + (within 40 chars) system prompt | your instructions | ...
+    # Disclose the system prompt / instructions (prompt-extraction recon).
     ("high", "LLM06", re.compile(
         r"(?:reveal|show|print|repeat|disclose|give|tell|share|send|output|expose|leak|"
         r"what(?:'s|\s+is|\s+are)?|display)\b[\s\S]{0,40}\b"
@@ -228,7 +289,13 @@ _INJECTION_HEURISTICS = (
         re.IGNORECASE)),
     ("high", "LLM01", re.compile(r"you\s+are\s+now\b[\s\S]{0,40}\b(?:DAN|developer\s+mode|jailbroken|unrestricted)", re.IGNORECASE)),
     ("high", "LLM01", re.compile(r"(?:pretend|act\s+as|roleplay|imagine)\s+(?:to\s+be\s+|you(?:'re|\s+are)\s+|as\s+)?[\s\S]{0,40}\b(?:no\s+restrictions|unrestricted|without\s+rules|no\s+rules|jailbroken|DAN\b)", re.IGNORECASE)),
-    ("high", "LLM06", re.compile(r"(?:exfiltrate|leak|send|upload|post|email|give\s+me|show\s+me)\b[\s\S]{0,40}\b(?:api\s*key|secret|token|credentials|password|env(?:ironment)?\s+variables?|\.env)", re.IGNORECASE)),
+    # Exfiltrate a secret. Two shapes so precision stays high:
+    #   (a) unambiguous verbs (exfiltrate/exfil/smuggle) within 40 chars of a secret;
+    #   (b) ambiguous verbs (leak/upload/steal/send/post) only when they DIRECTLY
+    #       govern the secret — so "leak-proof the token" and "memory leak … token
+    #       bucket" don't fire, but "leak the api key" does.
+    ("high", "LLM06", re.compile(r"(?:exfiltrate|exfil|smuggle)\b[\s\S]{0,40}\b(?:api\s*key|secret|token|credentials|password|env(?:ironment)?\s+variables?|\.env)", re.IGNORECASE)),
+    ("high", "LLM06", re.compile(r"\b(?:leak|upload|steal|send|post)(?:s|ing|ed)?\s+(?:the\s+|my\s+|our\s+|your\s+|all\s+(?:the\s+)?)?(?:api\s*key|secret|token|credentials|password|env(?:ironment)?\s+variables?|\.env)", re.IGNORECASE)),
 )
 
 #: Truncation cap for the matched dangerous phrase carried on a candidate.
@@ -237,11 +304,14 @@ _MAX_INJECTION_SCAN = 50_000
 
 
 def scan_injection_heuristics(text: str) -> List[Dict[str, str]]:
-    """Return built-in injection matches as ``[{pattern, severity, owasp}]``.
+    """Return built-in injection matches as ``[{pattern, phrase, severity, owasp}]``.
 
-    ``pattern`` is the matched dangerous substring (truncated to ~120 chars) —
-    NEVER the surrounding prompt. Deterministic and pure; used by detection to
-    nominate candidate injection threats not yet in the graph.
+    ``pattern`` is the built-in heuristic's own regex *source* — a fixed,
+    non-sensitive signature safe to share to the community graph and stable
+    across users (so identical attacks dedupe to one identifier). ``phrase`` is
+    the matched substring of the observed text (truncated to ~120 chars); it is
+    kept for LOCAL evidence only and must never leave the machine. Deterministic
+    and pure; used by detection to nominate candidate injection threats.
     """
     if not text:
         return []
@@ -255,11 +325,15 @@ def scan_injection_heuristics(text: str) -> List[Dict[str, str]]:
             continue
         if not m:
             continue
-        phrase = m.group(0)[:_INJECTION_PHRASE_CAP]
-        if phrase in seen:
+        if pattern.pattern in seen:
             continue
-        seen.add(phrase)
-        out.append({"pattern": phrase, "severity": severity, "owasp": owasp})
+        seen.add(pattern.pattern)
+        out.append({
+            "pattern": pattern.pattern,                      # shareable signature
+            "phrase": m.group(0)[:_INJECTION_PHRASE_CAP],    # local evidence only
+            "severity": severity,
+            "owasp": owasp,
+        })
     return out
 
 
@@ -270,14 +344,25 @@ def scan_injection_heuristics(text: str) -> List[Dict[str, str]]:
 # (category, severity, compiled-path-regex). Matched against the accessed path
 # only; the candidate carries ONLY the category + tool — never the exact path.
 _SENSITIVE_PATH_RULES = (
-    ("ssh-private-key", "critical", re.compile(r"(?:^|/)\.ssh(?:/|$)|(?:^|/)id_(?:rsa|ed25519|ecdsa|dsa)\b", re.IGNORECASE)),
-    ("env-file", "high", re.compile(r"(?:^|/)\.env(?:\.[\w.-]+)?$", re.IGNORECASE)),
+    # A file under ~/.ssh that is a key (id_*, or any non-public file) — but NOT
+    # the routine non-secret files (config, known_hosts, authorized_keys, *.pub).
+    ("ssh-private-key", "critical", re.compile(
+        r"(?:^|/)\.ssh/(?!(?:config|known_hosts|authorized_keys)$)(?!.*\.pub$).+"
+        r"|(?:^|/)id_(?:rsa|ed25519|ecdsa|dsa)\b(?!\.pub)", re.IGNORECASE)),
+    # A real .env — but NOT the committed, secret-free templates (.example etc.).
+    ("env-file", "high", re.compile(
+        r"(?:^|/)\.env(?:\.[\w.-]+)?$(?<!\.example)(?<!\.sample)(?<!\.template)(?<!\.dist)(?<!\.default)",
+        re.IGNORECASE)),
     ("credentials", "critical", re.compile(
         r"(?:^|/)\.aws/credentials$|(?:^|/)\.netrc$|(?:^|/)\.npmrc$|(?:^|/)\.docker/config\.json$"
         r"|(?:^|/)\.kube/config$|(?:^|/)\.config/gcloud(?:/|$)", re.IGNORECASE)),
     ("password-store", "critical", re.compile(r"(?:^|/)\.password-store(?:/|$)|(?:^|/)\.pgpass$", re.IGNORECASE)),
+    # Real browser credential stores only — anchored to a browser profile dir so
+    # a project file literally named `Cookies` / `Login Data` isn't misflagged.
     ("browser-cookies", "high", re.compile(
-        r"(?:Cookies|Login Data)$|(?:^|/)Library/Keychains(?:/|$)|(?:^|/)login\.keychain", re.IGNORECASE)),
+        r"(?:Chrome|Chromium|Brave|Edge|Opera|Vivaldi|BraveSoftware)[\s\S]{0,120}/(?:Cookies|Login Data)$"
+        r"|(?:^|/)cookies\.sqlite$|(?:^|/)Cookies\.binarycookies$"
+        r"|(?:^|/)Library/Keychains(?:/|$)|(?:^|/)login\.keychain", re.IGNORECASE)),
     ("system-shadow", "critical", re.compile(r"^/etc/(?:shadow|passwd|sudoers)$", re.IGNORECASE)),
 )
 
@@ -340,7 +425,9 @@ def sensitive_path_category(path: str, args: Any = None) -> Optional[Dict[str, s
         return None
     p = path.strip()
     if p.endswith(".npmrc"):
-        return {"category": "credentials", "severity": "high"} if _npmrc_has_token(args) else None
+        # A token-bearing .npmrc is a credential store, so match the rest of the
+        # `credentials` category at `critical` (not `high`).
+        return {"category": "credentials", "severity": "critical"} if _npmrc_has_token(args) else None
     for category, severity, pattern in _SENSITIVE_PATH_RULES:
         try:
             if pattern.search(p):
@@ -351,12 +438,83 @@ def sensitive_path_category(path: str, args: Any = None) -> Optional[Dict[str, s
 
 
 # ---------------------------------------------------------------------------
+# Secret VALUE detection — an actual key/token/private-key present in tool args.
+# This is the "the agent is handling/leaking a real secret" signal, distinct
+# from touching a secret FILE. Format-anchored so only unambiguous secret shapes
+# match (a legit `Authorization: Bearer <opaque>` API call is NOT flagged, but a
+# recognizable provider key or a private-key block is).
+# ---------------------------------------------------------------------------
+
+_SECRET_VALUE_RULES = (
+    ("private-key", "critical", re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH |DSA |PGP )?PRIVATE KEY-----")),
+    ("aws-access-key", "high", re.compile(r"\bAKIA[0-9A-Z]{16}\b")),
+    ("anthropic-api-key", "high", re.compile(r"\bsk-ant-[A-Za-z0-9_-]{20,}")),
+    ("openai-api-key", "high", re.compile(r"\bsk-(?!ant-)(?:proj-)?[A-Za-z0-9_-]{20,}")),
+    ("github-token", "high", re.compile(r"\b(?:gh[pousr]|github_pat)_[A-Za-z0-9_]{20,}")),
+    ("slack-token", "high", re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}")),
+    ("google-api-key", "high", re.compile(r"\bAIza[0-9A-Za-z_-]{35}\b")),
+    ("stripe-key", "high", re.compile(r"\b(?:sk|rk)_live_[0-9a-zA-Z]{20,}")),
+    ("gcp-service-account-key", "high", re.compile(r'"type"\s*:\s*"service_account"')),
+    ("jwt", "medium", re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}")),
+)
+
+# Commands that SEND data off-box — a secret value alongside one of these is
+# exfiltration (critical/block), not routine handling.
+_EGRESS_RE = re.compile(
+    r"\b(?:nc|ncat|netcat|telnet|sendmail)\b"
+    r"|\b(?:curl|wget)\b[\s\S]{0,300}(?:\s-d\b|--data|--data-binary|--data-raw|\s-F\b|--form|\s-T\b|--upload-file)"
+    r"|\|\s*(?:nc|ncat|curl|wget)\b",
+    re.IGNORECASE,
+)
+
+
+def scan_secret_values(text: str) -> List[Dict[str, str]]:
+    """Return recognizable secret VALUES present in *text* as ``[{type, severity}]``.
+
+    Deterministic; the caller carries only the secret TYPE off-box, NEVER the
+    value (see :func:`redact_secret_values`).
+    """
+    if not text:
+        return []
+    scan = text[:_MAX_INJECTION_SCAN]
+    out: List[Dict[str, str]] = []
+    seen: set = set()
+    for typ, severity, pattern in _SECRET_VALUE_RULES:
+        if typ in seen:
+            continue
+        try:
+            if pattern.search(scan):
+                seen.add(typ)
+                out.append({"type": typ, "severity": severity})
+        except re.error:  # pragma: no cover - static patterns
+            continue
+    return out
+
+
+def looks_like_egress(text: str) -> bool:
+    """True when *text* contains a command that sends data off the machine."""
+    return bool(text and _EGRESS_RE.search(text))
+
+
+def redact_secret_values(text: str) -> str:
+    """Replace every recognizable secret value in *text* with a typed marker."""
+    out = str(text)
+    for typ, _severity, pattern in _SECRET_VALUE_RULES:
+        out = pattern.sub(f"[REDACTED_{typ.upper().replace('-', '_')}]", out)
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Suspicious-skill danger-shape scanning (discovery layer)
 # ---------------------------------------------------------------------------
 
 # (dangerShape, severity, compiled-regex) over the skill's declared code/content.
 _SKILL_CODE_RULES = (
-    ("shell-exec", "high", re.compile(
+    # Bare shell-out is normal for legit skills (formatters, test runners, build
+    # tools), so it is only a LOW informational signal — it stays in the local
+    # audit but is below the default report floor, so it doesn't nominate to the
+    # community graph. The genuinely dangerous shapes below keep their severity.
+    ("shell-exec", "low", re.compile(
         r"\b(?:os\.system|subprocess\.(?:run|call|Popen|check_output)|child_process|exec(?:Sync)?\s*\(|spawn(?:Sync)?\s*\()", re.IGNORECASE)),
     ("remote-script-pipe", "critical", REMOTE_SCRIPT_RE),
     ("credential-exfil", "critical", re.compile(
@@ -517,6 +675,47 @@ _MANAGER_SPECS = {
     ("gem", "install"): ("rubygems", 2),
     ("brew", "install"): ("homebrew", 2),
 }
+
+
+#: cat-family commands whose following path args are file reads.
+_SHELL_READ_CMDS = {"cat", "less", "more", "head", "tail", "bat", "xxd", "hexdump", "strings", "od", "nl"}
+
+
+def _looks_like_path(token: str) -> bool:
+    return "/" in token or token.startswith("~") or token.startswith(".") or "." in token
+
+
+def parse_shell_reads(command: str) -> List[str]:
+    """Best-effort list of file paths a cat-family command in *command* reads.
+
+    Completes the audit trail for the shell channel: ``cat ~/.ssh/id_rsa`` is a
+    file read that the dedicated file tools would log, but a raw shell tool would
+    otherwise miss. Pure/deterministic; used for visibility logging only.
+    """
+    if not command or not any(f" {c} " in f" {command} " for c in _SHELL_READ_CMDS):
+        return []
+    tokens = _tokenize_shell(command)
+    out: List[str] = []
+    i = 0
+    while i < len(tokens):
+        if tokens[i].lower() in _SHELL_READ_CMDS:
+            j = i + 1
+            while j < len(tokens) and tokens[j] not in (";", "&&", "||", "|", ">", ">>", "<"):
+                tok = tokens[j]
+                if not tok.startswith("-") and _looks_like_path(tok):
+                    out.append(tok)
+                j += 1
+            i = j
+        else:
+            i += 1
+    return list(dict.fromkeys(out))
+
+
+def parse_downloads(command: str) -> List[str]:
+    """URLs fetched by a curl/wget in *command* (for the download audit trail)."""
+    if not command or not re.search(r"\b(?:curl|wget)\b", command, re.IGNORECASE):
+        return []
+    return list(dict.fromkeys(re.findall(r"https?://[^\s;'\"|&>]+", command)))
 
 
 def parse_dependency_installs(command: str) -> List[Dict[str, str]]:
@@ -731,6 +930,7 @@ def build_report_quads(
     skill_name: Optional[str] = None,
     skill_version: Optional[str] = None,
     danger_shape: Optional[str] = None,
+    kind: Optional[str] = None,
 ) -> List[Quad]:
     """Build a sighting/report for SWM.
 
@@ -768,6 +968,10 @@ def build_report_quads(
             out.append(_q(subj, constants.PACKAGE_ECOSYSTEM_PRED, literal(ecosystem)))
         if advisory_id:
             out.append(_q(subj, constants.SCHEMA_IDENTIFIER_PRED, literal(advisory_id)))
+        # kind (malware|vulnerability) must survive to SWM so a curator can
+        # promote the candidate with its block policy intact.
+        if kind:
+            out.append(_q(subj, constants.KIND_PRED, literal(kind)))
     elif category == "fileaccess":
         if tool_name:
             out.append(_q(subj, constants.TOOL_NAME_PRED, literal(tool_name)))

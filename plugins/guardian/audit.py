@@ -22,7 +22,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from . import constants
+from . import constants, quads
 
 logger = logging.getLogger(__name__)
 
@@ -38,17 +38,17 @@ _SECRET_KEY_RE = re.compile(
     re.IGNORECASE,
 )
 _BEARER_RE = re.compile(r"Bearer\s+[A-Za-z0-9._~+/=-]+", re.IGNORECASE)
-_OPENAI_RE = re.compile(r"sk-[A-Za-z0-9]{16,}")
-_GITHUB_RE = re.compile(r"gh[pousr]_[A-Za-z0-9_]{20,}")
-_AWS_RE = re.compile(r"AKIA[0-9A-Z]{16}")
 
 
 def sanitize_text(value: str, max_len: int = _MAX_TEXT) -> str:
-    """Redact common secret shapes from *value* and truncate to *max_len*."""
+    """Redact common secret shapes from *value* and truncate to *max_len*.
+
+    Uses the single canonical secret-value patterns from :mod:`quads`
+    (openai/anthropic/aws/github/slack/gcp/stripe/private-key/jwt) plus opaque
+    ``Bearer`` tokens, so a secret never lands raw in the audit log.
+    """
     text = _BEARER_RE.sub("Bearer [REDACTED]", str(value))
-    text = _OPENAI_RE.sub("[REDACTED_API_KEY]", text)
-    text = _GITHUB_RE.sub("[REDACTED_GITHUB_TOKEN]", text)
-    text = _AWS_RE.sub("[REDACTED_AWS_KEY]", text)
+    text = quads.redact_secret_values(text)
     if len(text) > max_len:
         return text[:max_len] + "...[truncated]"
     return text
@@ -294,6 +294,27 @@ def record_file_access(tool: str, path: str, mode: str) -> None:
         logger.debug("guardian: file access record failed: %s", exc)
 
 
+def record_dependency(ecosystem: str, name: str, version: str, tool: str = "") -> None:
+    """Append a structured 'a dependency was installed' record.
+
+    This is the enterprise lib-inventory trail: EVERY install is recorded here
+    (not only threats), so an operator can see every package an agent pulled in.
+    Local-only visibility log, never shared to SWM; best-effort and fail-open.
+    """
+    try:
+        now = time.time()
+        _append_jsonl(_home() / "dependencies.jsonl", {
+            "ts": now,
+            "iso": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now)),
+            "ecosystem": str(ecosystem or "")[:40],
+            "name": str(name or "")[:200],
+            "version": str(version or "")[:80],
+            "tool": str(tool or "")[:120],
+        })
+    except Exception as exc:  # pragma: no cover - fail open
+        logger.debug("guardian: dependency record failed: %s", exc)
+
+
 def read_file_access(limit: int = 100, offset: int = 0) -> List[Dict[str, Any]]:
     """Return file-access visibility records newest-first, paged."""
     path = _home() / "file_access.jsonl"
@@ -382,41 +403,50 @@ def recently_reported(identifier: str, cooldown: int = REPORT_COOLDOWN_SECS) -> 
         return False
 
 
-def allow_report(daily_limit: int, identifier: str = "") -> bool:
-    """Return True if another outbound SWM report is within today's cap.
+def mark_reported(identifier: str) -> None:
+    """Stamp *identifier* as handled now (per-threat cooldown), pruning expired.
 
-    Increments a small date-keyed counter in ``report_rate.json``. When an
-    *identifier* is given, the report is also skipped if that identifier was
-    already reported within :data:`REPORT_COOLDOWN_SECS` (per-threat dedup),
-    and a fresh timestamp is stamped on success. Fail-open: if the state file
-    cannot be read/written, allow the report.
+    Decoupled from :func:`allow_report` so the cooldown also covers the private
+    WM audit KA — otherwise, with reporting off or the daily cap hit, the stamp
+    would never be set and the private KA would rewrite on every event.
     """
-    today = time.strftime("%Y-%m-%d", time.gmtime())
-    path = _rate_state_path()
+    if not identifier:
+        return
     try:
         with _lock:
             state = _read_rate_state()
             stamps = state.get("reported")
             stamps = dict(stamps) if isinstance(stamps, dict) else {}
             now = time.time()
-            if identifier:
-                ts = float(stamps.get(identifier, 0) or 0)
-                if (now - ts) < REPORT_COOLDOWN_SECS:
-                    logger.debug("guardian: report cooldown active for %s", identifier)
-                    return False
-            if state.get("date") != today:
-                state = {"date": today, "count": 0}
-            if daily_limit > 0 and int(state.get("count", 0)) >= daily_limit:
-                logger.debug("guardian: daily report limit %s reached", daily_limit)
-                return False
-            state["count"] = int(state.get("count", 0)) + 1
-            if identifier:
-                stamps[identifier] = now
-            # Prune expired stamps so the state file stays small.
+            stamps[identifier] = now
             state["reported"] = {
                 k: v for k, v in stamps.items()
                 if isinstance(v, (int, float)) and (now - v) < REPORT_COOLDOWN_SECS
             }
+            _rate_state_path().write_text(json.dumps(state), encoding="utf-8")
+    except Exception as exc:  # pragma: no cover - fail open
+        logger.debug("guardian: mark_reported failed (%s)", exc)
+
+
+def allow_report(daily_limit: int) -> bool:
+    """Return True if another outbound SWM report is within today's cap.
+
+    Only the date-keyed daily counter — the per-threat cooldown is enforced by
+    :func:`recently_reported` / :func:`mark_reported` at the call site. Fail-open:
+    if the state file cannot be read/written, allow the report.
+    """
+    today = time.strftime("%Y-%m-%d", time.gmtime())
+    path = _rate_state_path()
+    try:
+        with _lock:
+            state = _read_rate_state()
+            if state.get("date") != today:
+                # New day: reset the counter but preserve the cooldown stamps.
+                state = {"date": today, "count": 0, "reported": state.get("reported", {})}
+            if daily_limit > 0 and int(state.get("count", 0)) >= daily_limit:
+                logger.debug("guardian: daily report limit %s reached", daily_limit)
+                return False
+            state["count"] = int(state.get("count", 0)) + 1
             path.write_text(json.dumps(state), encoding="utf-8")
             return True
     except Exception as exc:  # pragma: no cover - fail open

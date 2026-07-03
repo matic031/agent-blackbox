@@ -152,8 +152,11 @@ def test_redaction_removes_secrets():
 
 
 def test_sanitize_text_patterns():
-    assert "[REDACTED_API_KEY]" in audit.sanitize_text("token sk-abcdefghijklmnop1234")
-    assert "[REDACTED_GITHUB_TOKEN]" in audit.sanitize_text("ghp_" + "a" * 30)
+    # The raw secret must be gone; marker names are now provider-specific.
+    out = audit.sanitize_text("token sk-abcdefghijklmnop1234")
+    assert "sk-abcdefghijklmnop1234" not in out and "REDACTED_OPENAI_API_KEY" in out
+    assert "REDACTED_GITHUB_TOKEN" in audit.sanitize_text("ghp_" + "a" * 30)
+    assert "AKIAIOSFODNN7EXAMPLE" not in audit.sanitize_text("key AKIAIOSFODNN7EXAMPLE")
     assert "Bearer [REDACTED]" in audit.sanitize_text("Authorization: Bearer abc.def-ghi")
 
 

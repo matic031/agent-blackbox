@@ -8,9 +8,9 @@ the people who do that approving. If you just want to protect your agents, the
 
 There are two graphs:
 
-- **Local graph (SWM)** — free, per-machine. Every Guardian writes here: findings
-  it logs, and anonymized *candidate* threats its agent discovered. Anyone can
-  write; nothing here is trusted by others automatically.
+- **Community graph (SWM)** — free, shared pool. Every Guardian writes here the
+  anonymized *candidate* threats its agent discovered. Anyone can write; nothing
+  here is trusted by others automatically, and it only ever flags, never blocks.
 - **Public graph (VM)** — the shared, on-chain curated threat database every
   Guardian reads. Writing to it is **restricted to the Umanitek curator wallet**,
   enforced on-chain (`publishPolicy: curated`). This is what makes a threat
@@ -35,8 +35,15 @@ agent discovers something suspicious
 every Guardian syncs it and starts blocking/flagging it
 ```
 
-A candidate that many independent agents report is a strong signal — `curate list`
+A candidate that many independent agents report is a strong signal - `curate list`
 groups by distinct reporters so you can see corroboration before approving.
+
+**You decide what gets merged.** Nothing is auto-promoted. The community graph
+(SWM) is an open pool anyone can write to; it only ever *flags*, never blocks. A
+threat becomes public (and blockable) only when a curator runs `curate approve`
+on it - that is the one and only path from the community graph into the curated
+public graph. `curate reject` hides a candidate from `curate list` locally so it
+stops resurfacing.
 
 ## One-time setup
 
@@ -69,6 +76,21 @@ hermes guardian curate approve <identifier> --no-publish
 # Reject a candidate; optionally publish a false-positive note so others down-rank it
 hermes guardian curate reject <identifier> --dispute
 ```
+
+### Malware vs vulnerability (what `approve` carries)
+
+Dependency threats carry a `kind`: **malware** (a compromised/malicious package)
+or **vulnerability** (a legit package with an open CVE). It drives the block
+policy - malware is floored to `critical` and **blocks** in block mode;
+vulnerability **flags only** and never auto-blocks, so a widely-used package with
+a CVE keeps working. The `kind` now flows all the way through: report it with
+`--kind`, and `approve` preserves it (you can still override with `--severity`).
+When in doubt, prefer `vulnerability` - a false block is worse than a missed flag.
+
+Publishing is deduped by a local ledger so you never pay TRAC twice: both
+`approve` and `import` record every on-chain publish, and a `--no-publish`
+(SWM-only) run never touches the ledger, so it can't make a later real publish
+skip those threats.
 
 ### Seeding in bulk
 

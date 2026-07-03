@@ -150,10 +150,21 @@ def _load_yaml(path: Path) -> Dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
-def _dump_yaml(path: Path, data: Dict[str, Any]) -> None:
+def _atomic_write(path: Path, text: str) -> None:
+    """Write *text* via a temp file + rename so a reader never sees a torn file.
+
+    A concurrent auto-attach sweep (or the dashboard reading a config) can race a
+    write; ``os.replace`` is atomic on the same filesystem, so readers always see
+    either the old or the new complete file, never a half-written one.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
-    text = yaml.safe_dump(data, default_flow_style=False, sort_keys=False)
-    path.write_text(text, encoding="utf-8")
+    tmp = path.with_name(f"{path.name}.tmp.{os.getpid()}")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def _dump_yaml(path: Path, data: Dict[str, Any]) -> None:
+    _atomic_write(path, yaml.safe_dump(data, default_flow_style=False, sort_keys=False))
 
 
 def _enabled_list_has(data: Dict[str, Any], name: str) -> bool:
@@ -186,10 +197,23 @@ def _installed_plugin_version(dest: Path) -> Optional[str]:
 
 
 def _needs_copy(dest: Path) -> bool:
-    """True when the plugin should be (re)copied: missing or version mismatch."""
-    if not (dest / "__init__.py").exists():
+    """True when the plugin should be (re)copied: missing, version bump, or a
+    same-version in-place source edit (so dev iteration propagates without a
+    manual version bump)."""
+    init = dest / "__init__.py"
+    if not init.exists():
         return True
-    return _installed_plugin_version(dest) != constants.__version__
+    if _installed_plugin_version(dest) != constants.__version__:
+        return True
+    try:
+        src_dir = Path(__file__).resolve().parent
+        installed_at = init.stat().st_mtime
+        newest_src = max(
+            p.stat().st_mtime for p in src_dir.rglob("*.py") if "__pycache__" not in p.parts
+        )
+        return newest_src > installed_at
+    except Exception:  # pragma: no cover - best effort
+        return False
 
 
 def _copy_plugin_tree(src: Path, dest: Path) -> None:
@@ -374,9 +398,11 @@ def attach_openclaw(workspace: Path, *, dry_run: bool = False) -> Dict[str, Any]
                 backup = config_path.with_suffix(".json.guardian.bak")
                 shutil.copy2(config_path, backup)
                 report["backed_up"] = True
-            config_path.parent.mkdir(parents=True, exist_ok=True)
-            config_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-        report["ok"] = True
+            _atomic_write(config_path, json.dumps(data, indent=2) + "\n")
+        # Honest status: without a load path the guardian block is recorded but
+        # OpenClaw won't actually load the hook, so this workspace isn't protected.
+        report["protected"] = load_path is not None
+        report["ok"] = load_path is not None
     except Exception as exc:
         logger.debug("guardian.attach: attach_openclaw(%s) failed: %s", workspace, exc)
         report["error"] = str(exc)
@@ -473,9 +499,16 @@ def detach_openclaw(workspace: Path, *, dry_run: bool = False) -> Dict[str, Any]
                 changed = True
             load = plugins.get("load")
             if isinstance(load, dict) and isinstance(load.get("paths"), list):
-                target = _openclaw_load_paths_entry()
-                if target and target in load["paths"]:
-                    load["paths"] = [p for p in load["paths"] if p != target]
+                # Remove ANY guardian openclaw load path, not just the one that
+                # resolves from this location — detaching an installed home would
+                # otherwise orphan an entry pointing at a now-removed plugin.
+                marker = os.path.join("integrations", "openclaw")
+                kept = [
+                    p for p in load["paths"]
+                    if not (isinstance(p, str) and p.rstrip("/").endswith(marker))
+                ]
+                if len(kept) != len(load["paths"]):
+                    load["paths"] = kept
                     changed = True
             entries = plugins.get("entries")
             if isinstance(entries, dict) and "guardian" in entries:
@@ -484,7 +517,7 @@ def detach_openclaw(workspace: Path, *, dry_run: bool = False) -> Dict[str, Any]
         report["changed"] = changed
         report["already"] = not changed
         if changed and not dry_run:
-            config_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+            _atomic_write(config_path, json.dumps(data, indent=2) + "\n")
         report["ok"] = True
     except Exception as exc:
         logger.debug("guardian.attach: detach_openclaw(%s) failed: %s", workspace, exc)

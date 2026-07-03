@@ -371,15 +371,23 @@ export function detectDependency(
 
 // A remote-download-piped-to-interpreter shape: `curl ... | sh`, `wget ... | bash`.
 const REMOTE_SCRIPT_RE = /\b(?:curl|wget)\b[\s\S]{0,500}\|\s*(?:sh|bash|zsh|python|python3|node)\b/i;
-// `rm -rf` against system / home roots.
+// `rm -rf` against DANGEROUS roots only (mirrors Python RM_RF_SYSTEM_RE): system
+// roots, bare `/`, whole-home wipe (~, $HOME), or a sensitive home dir. Routine
+// cleanup (node_modules, ~/.cache, ~/build, /var/tmp) does NOT match.
 const RM_RF_SYSTEM_RE =
-  /\brm\s+(?:-[a-z]*r[a-z]*f|-[a-z]*f[a-z]*r|-r\s+-f|-f\s+-r)\b[\s\S]{0,200}(?:\s\/(?:etc|var|usr|bin|sbin|opt|private|System|Library)\b|\s~\/?|\s\/\s*$|\s\$HOME\b)/i;
-// `chmod 777` / world-writable perms.
-const CHMOD_WORLD_RE = /\bchmod\s+(?:-R\s+)?0?777\b/i;
+  /\brm\s+(?:-[a-z]*r[a-z]*f|-[a-z]*f[a-z]*r|-r\s+-f|-f\s+-r|--recursive\s+--force|--force\s+--recursive|-r\s+--force|--recursive\s+-f)\b[\s\S]{0,200}(?:\s\/(?:etc|usr|bin|sbin|opt|private|System|Library)\b|\s\/var(?!\/(?:tmp|folders))\b|\s\/\s*(?=[;&|]|$)|\s(?:~|\$HOME)\/?(?=\s|[;&|]|$)|\s(?:~|\$HOME)\/\.(?:ssh|aws|gnupg|gpg|kube|docker|password-store)\b)/i;
+// `chmod 777` against a SENSITIVE target only (mirrors Python CHMOD_WORLD_RE).
+const CHMOD_WORLD_RE =
+  /\bchmod\s+(?:-R\s+)?0?777\b[\s\S]{0,200}(?:\s\/(?:etc|usr|bin|sbin|var|opt|private|System|Library)\b|\s\/\s*(?=[;&|]|$)|\s(?:~|\$HOME)\/?\.?(?:ssh|aws|gnupg))/i;
 // Piping a fetched payload straight into eval.
 const CURL_EVAL_RE = /\b(?:curl|wget)\b[\s\S]{0,300}\|\s*eval\b/i;
-// Disabling TLS verification on a network fetch.
-const INSECURE_FETCH_RE = /\b(?:curl|wget)\b[\s\S]{0,200}(?:--insecure|-k\b|--no-check-certificate)/i;
+// Disabling TLS verification on a network fetch (mirrors Python INSECURE_FETCH_RE).
+const INSECURE_FETCH_RE =
+  /\bcurl\b[\s\S]{0,200}(?:--insecure|--no-check-certificate|\s-[a-z]*k[a-z]*\b)|\bwget\b[\s\S]{0,200}--no-check-certificate/i;
+// A local/private/dev host — an insecure TLS fetch against one of these is
+// routine, not a threat (mirrors Python _LOCAL_HOST_RE).
+const LOCAL_HOST_RE =
+  /(?:localhost|127\.0\.0\.\d+|0\.0\.0\.0|\[::1\]|\b10\.\d+\.\d+\.\d+|\b192\.168\.\d+\.\d+|\b172\.(?:1[6-9]|2\d|3[01])\.\d+\.\d+|\.local\b|\.internal\b)/i;
 
 /**
  * Ordered so the most specific / most dangerous shape wins for a given command.
@@ -436,7 +444,12 @@ export function normalizeArgShape(toolName: string, args: unknown): string | nul
   if (!command) return null;
   for (const [shape, pattern] of SHELL_SHAPE_RULES) {
     try {
-      if (pattern.test(command)) return shape;
+      if (pattern.test(command)) {
+        // Insecure TLS against a localhost / private / .local host is routine
+        // dev work, not a threat — skip it (mirrors Python normalize_arg_shape).
+        if (shape === "insecure-tls-fetch" && LOCAL_HOST_RE.test(command)) continue;
+        return shape;
+      }
     } catch {
       // static patterns; ignore any engine hiccup and keep scanning.
     }
@@ -1309,13 +1322,10 @@ export function detectAll(
   const findings: Finding[] = [];
   findings.push(...detectEscalation(toolName, args, ruleset));
   findings.push(...detectDependency(toolName, args, ruleset));
-  let argsText: string;
-  try {
-    argsText = typeof args === "string" ? args : JSON.stringify(args);
-  } catch {
-    argsText = String(args);
-  }
-  argsText = argsText ?? "";
+  // Collect raw string values (real newlines preserved) rather than
+  // JSON.stringify — which escapes newlines to "\\n" and lets a multi-line
+  // injection payload evade even a curated rule (mirrors Python _injection_scan_text).
+  const argsText = typeof args === "string" ? args : collectText(args).join("\n");
   findings.push(...detectInjection(argsText, ruleset));
   if (discover) {
     findings.push(...discoverInjection(argsText, ruleset));

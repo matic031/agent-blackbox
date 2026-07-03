@@ -29,14 +29,17 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from . import constants
+from . import constants, quads
 from .config import GuardianConfig, load_guardian_config
 from .dkg_client import DkgClient, extract_binding
 
 logger = logging.getLogger(__name__)
 
-# SPARQL that pulls every threat's queryable fields in one shot.
-_THREATS_SPARQL = """
+# SPARQL that pulls every threat's queryable fields. Paginated (never a fixed
+# cap) so the local detector loads the WHOLE curated graph — spam is controlled
+# by curator approvals, not by truncating detection. ``ORDER BY`` gives a stable
+# order so LIMIT/OFFSET pages don't overlap or skip rows.
+_THREATS_SELECT = """
 PREFIX g: <http://umanitek.ai/ontology/guardian/>
 PREFIX schema: <http://schema.org/>
 SELECT ?identifier ?severity ?name ?pattern ?toolName ?argShape
@@ -60,8 +63,17 @@ WHERE {
   OPTIONAL { ?threat g:skillVersion ?skillVersion . }
   OPTIONAL { ?threat g:dangerShape ?dangerShape . }
 }
-LIMIT 2000
+ORDER BY ?identifier
 """
+
+#: Rows fetched per page when syncing a tier. One SPARQL round-trip each.
+_PAGE_SIZE = 5000
+#: Safety ceiling so a misbehaving node can never spin the pager forever.
+_MAX_ROWS = 1_000_000
+
+
+def _threats_sparql(limit: int, offset: int) -> str:
+    return f"{_THREATS_SELECT}LIMIT {int(limit)} OFFSET {int(offset)}"
 
 
 @dataclass
@@ -144,7 +156,7 @@ def _row_to_rule(row: Dict[str, Any], source: str = "public") -> Optional[tuple]
                 eco, pkg, ver = eco2.lower(), pkg2.lower(), ver2
             except ValueError:
                 return None
-        key = f"{eco}:{pkg}@{ver}"
+        key = quads.dependency_key(eco, pkg, ver)
         return ("dependency", key, {
             "identifier": identifier,
             "ecosystem": eco,
@@ -310,33 +322,52 @@ _memory_cache: Optional[Ruleset] = None
 _refreshing = False
 
 
+_QUERY_ERROR = object()  # sentinel: distinguishes a tier failure from an empty tier
+
+
+def _fetch_tier(client: DkgClient, cg_id: str, view: str) -> Optional[List[Dict[str, Any]]]:
+    """Fully paginate one tier. Returns all rows, or ``None`` if the node errored.
+
+    ``None`` (error) is distinct from ``[]`` (the tier is genuinely empty) so
+    the caller can preserve a tier's last-good rules through a transient failure
+    instead of wiping them.
+    """
+    rows: List[Dict[str, Any]] = []
+    offset = 0
+    while offset < _MAX_ROWS:
+        page = client.query(
+            _threats_sparql(_PAGE_SIZE, offset), cg_id, view=view, on_error=_QUERY_ERROR
+        )
+        if page is _QUERY_ERROR:
+            return None
+        rows.extend(page)
+        if len(page) < _PAGE_SIZE:
+            break
+        offset += _PAGE_SIZE
+    return rows
+
+
 def refresh(config: Optional[GuardianConfig] = None, client: Optional[DkgClient] = None) -> Ruleset:
     """Query the node, rebuild the ruleset, and persist it. Fail-open.
 
-    Merges curated threats (VM view) with the node's local graph (SWM view).
-    On total failure, returns the last-good cache or an empty ruleset — never
-    raises.
+    Merges the curated public graph (VM) with the community pool (SWM), fully
+    paginated (no cap). Fail-open is *per tier*: if one tier's query fails, that
+    tier's last-good rules are preserved instead of being wiped, so a transient
+    public-graph error can never silently drop every blockable rule. On total
+    failure, returns the last-good cache or an empty ruleset — never raises.
     """
     global _memory_cache
     config = config or load_guardian_config()
     client = client or DkgClient(url=config.dkg_url)
-    rows: List[Any] = []
-    got_any = False
     # Public curated graph first (source of truth), then the community pool.
     tiers = (
         (constants.VIEW_VERIFIABLE_MEMORY, "public"),
         (constants.VIEW_SHARED_WORKING_MEMORY, "community"),
     )
-    for view, tier in tiers:
-        try:
-            view_rows = client.query(_THREATS_SPARQL, config.context_graph_id, view=view)
-            if view_rows:
-                got_any = True
-                rows.extend((row, tier) for row in view_rows)
-        except Exception as exc:  # pragma: no cover - fail open
-            logger.debug("guardian: ruleset query (%s) failed: %s", view, exc)
-    if not got_any and not rows:
-        # Nothing came back — keep the last-good ruleset instead of emptying.
+    fetched = {tier: _fetch_tier(client, config.context_graph_id, view) for view, tier in tiers}
+
+    if all(rows is None for rows in fetched.values()):
+        # Every tier failed — keep the last-good ruleset instead of emptying.
         existing = _memory_cache or _read_cache()
         if existing is not None:
             existing.synced_at = time.time()
@@ -344,11 +375,44 @@ def refresh(config: Optional[GuardianConfig] = None, client: Optional[DkgClient]
             with _memory_lock:
                 _memory_cache = existing
             return existing
+
+    rows: List[Any] = []
+    for tier, view_rows in fetched.items():
+        if view_rows is not None:  # a successful tier (possibly genuinely empty)
+            rows.extend((row, tier) for row in view_rows)
     rs = build_from_rows(rows)
+
+    errored = [tier for tier, view_rows in fetched.items() if view_rows is None]
+    if errored:
+        prior = _memory_cache or _read_cache()
+        if prior is not None:
+            _restore_tiers(rs, prior, errored)
+
     _write_cache(rs)
     with _memory_lock:
         _memory_cache = rs
     return rs
+
+
+def _restore_tiers(rs: Ruleset, prior: Ruleset, tiers: List[str]) -> None:
+    """Re-add *prior* rules from the given (errored) *tiers* into *rs*.
+
+    Only fills gaps: a rule already present from a freshly-fetched tier wins,
+    and public still beats community for a shared dependency key — mirroring
+    :func:`build_from_rows` precedence.
+    """
+    keep = set(tiers)
+    for attr in ("injection", "escalation", "fileaccess", "skill"):
+        seen = {r.get("identifier") for r in getattr(rs, attr)}
+        for rule in getattr(prior, attr):
+            if rule.get("source") in keep and rule.get("identifier") not in seen:
+                getattr(rs, attr).append(rule)
+    for key, rule in prior.dependency.items():
+        if rule.get("source") not in keep:
+            continue
+        existing = rs.dependency.get(key)
+        if existing is None or (existing.get("source") == "community" and rule.get("source") == "public"):
+            rs.dependency[key] = rule
 
 
 def _background_refresh(config: GuardianConfig) -> None:
@@ -397,12 +461,18 @@ def get(config: Optional[GuardianConfig] = None) -> Ruleset:
         with _memory_lock:
             _memory_cache = cached
     age = time.time() - cached.synced_at
-    if age > max(1, config.sync_interval) and not _refreshing:
-        _refreshing = True
+    # Atomic check-and-set under the lock so two callers can't both spawn.
+    should_spawn = False
+    with _memory_lock:
+        if age > max(1, config.sync_interval) and not _refreshing:
+            _refreshing = True
+            should_spawn = True
+    if should_spawn:
         try:
             threading.Thread(
                 target=_background_refresh, args=(config,), name="guardian-ruleset", daemon=True
             ).start()
         except Exception:  # pragma: no cover
-            _refreshing = False
+            with _memory_lock:
+                _refreshing = False
     return cached

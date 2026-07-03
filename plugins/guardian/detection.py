@@ -224,8 +224,8 @@ def detect_dependency(tool_name: str, args: Any, ruleset: Any) -> List[Finding]:
         if not version:
             continue
         eco = dep["ecosystem"].lower()
-        name = dep["name"].lower()
-        key = f"{eco}:{name}@{version}"
+        name = quads.canonical_package_name(eco, dep["name"])
+        key = quads.dependency_key(eco, dep["name"], version)
         rule = dependency_rules.get(key)
         if not rule or key in seen:
             continue
@@ -249,6 +249,7 @@ def detect_dependency(tool_name: str, args: Any, ruleset: Any) -> List[Finding]:
                     "package_name": name,
                     "package_version": version,
                     "advisory_id": rule.get("advisoryId"),
+                    "kind": rule.get("kind"),
                 } if src == "community" else {},
             )
         )
@@ -259,9 +260,12 @@ def discover_injection(text: str, ruleset: Any) -> List[Finding]:
     """Built-in injection discovery: heuristic matches not already in the graph.
 
     Runs the built-in OWASP LLM01/LLM06 heuristics over *text* and nominates a
-    candidate for each match whose ``injection:{hash(phrase)}`` identifier is
-    not already a graph rule. PRIVACY: the candidate carries ONLY the matched
-    dangerous phrase (truncated ~120 chars) — never the surrounding text.
+    candidate for each match whose identifier is not already a graph rule. The
+    identifier and the shared ``pattern`` are the heuristic's own regex source
+    (a fixed signature), so identical attacks across users dedupe to one
+    candidate. PRIVACY: the matched user substring is kept ONLY as local
+    ``evidence``/``matched`` and is NEVER placed in ``fields`` (the sole part of
+    a finding forwarded to the community graph).
     """
     known: set = set()
     for rule in getattr(ruleset, "injection", []) or []:
@@ -271,8 +275,9 @@ def discover_injection(text: str, ruleset: Any) -> List[Finding]:
     out: List[Finding] = []
     seen: set = set()
     for hit in quads.scan_injection_heuristics(text or ""):
-        phrase = hit["pattern"]
-        identifier = quads.injection_identifier(phrase)
+        signature = hit["pattern"]                 # heuristic regex source (shareable)
+        phrase = hit.get("phrase", "")             # matched user text (local only)
+        identifier = quads.injection_identifier(signature)
         if identifier in known or identifier in seen:
             continue
         seen.add(identifier)
@@ -286,7 +291,7 @@ def discover_injection(text: str, ruleset: Any) -> List[Finding]:
                 evidence=phrase,
                 confirmed=False,
                 source="heuristic",
-                fields={"pattern": phrase, "owasp_category": hit.get("owasp")},
+                fields={"pattern": signature, "owasp_category": hit.get("owasp")},
             )
         )
     return out
@@ -516,6 +521,70 @@ def detect_custom_fileaccess(
     return []
 
 
+def detect_secret_exposure(tool_name: str, args: Any) -> List[Finding]:
+    """Flag a real secret VALUE (API key, token, private key) in the tool args.
+
+    Complements the sensitive-FILE detection: this fires when the agent is
+    actually *handling* a recognizable secret — e.g. passing an ``sk-…`` key in a
+    command, or a private-key block. If the same call also sends data off-box
+    (``curl --data``, ``nc``, …), it is treated as exfiltration and escalated to
+    critical (blockable). Findings are ``source="secret"``: local-only (the
+    value never leaves the machine — only the TYPE is recorded) and blockable.
+    """
+    text = _injection_scan_text(args)
+    if not text:
+        return []
+    hits = quads.scan_secret_values(text)
+    if not hits:
+        return []
+    egress = quads.looks_like_egress(text)
+    out: List[Finding] = []
+    for hit in hits:
+        severity = "critical" if (egress and hit["severity"] != "critical") else hit["severity"]
+        prefix = "Secret exfiltration" if egress else "Secret exposed"
+        out.append(
+            Finding(
+                identifier=f"secret:{hit['type']}",
+                category="secret",
+                severity=severity,
+                title=f"{prefix}: {hit['type']}",
+                tool_name=tool_name or "",
+                matched=hit["type"],   # TYPE only — never the secret value
+                evidence=hit["type"],
+                confirmed=False,
+                source="secret",
+            )
+        )
+    return out
+
+
+def _injection_scan_text(args: Any) -> str:
+    """Flatten tool-call *args* into raw text for injection scanning.
+
+    ``json.dumps`` escapes real newlines/tabs inside string values to the
+    literal two-character sequences (``\\n``), which defeats the ``\\s`` in
+    injection patterns and lets a multi-line payload slip past even a curated,
+    blockable rule. This instead concatenates every nested string value with
+    real newlines preserved, so whitespace-tolerant patterns still match.
+    """
+    if isinstance(args, str):
+        return args
+    parts: List[str] = []
+
+    def walk(value: Any) -> None:
+        if isinstance(value, str):
+            parts.append(value)
+        elif isinstance(value, dict):
+            for item in value.values():
+                walk(item)
+        elif isinstance(value, (list, tuple)):
+            for item in value:
+                walk(item)
+
+    walk(args)
+    return "\n".join(parts)
+
+
 def detect_all(tool_name: str, args: Any, ruleset: Any, discover: bool = True) -> List[Finding]:
     """Run every detector (graph rules + built-in discovery) across categories.
 
@@ -528,15 +597,15 @@ def detect_all(tool_name: str, args: Any, ruleset: Any, discover: bool = True) -
     findings: List[Finding] = []
     findings.extend(detect_escalation(tool_name, args, ruleset))
     findings.extend(detect_dependency(tool_name, args, ruleset))
-    try:
-        args_text = args if isinstance(args, str) else json.dumps(args, ensure_ascii=False, default=str)
-    except Exception:
-        args_text = str(args)
+    args_text = _injection_scan_text(args)
     findings.extend(detect_injection(args_text, ruleset))
     if discover:
         findings.extend(discover_injection(args_text, ruleset))
     findings.extend(detect_fileaccess(tool_name, args, ruleset))
     findings.extend(detect_skill(tool_name, args, ruleset))
+    # Secret-value exposure always runs (not gated by discovery) — a real secret
+    # in the tool args is a personal, always-on signal, never a graph candidate.
+    findings.extend(detect_secret_exposure(tool_name, args))
     if not discover:
         findings = [f for f in findings if f.source != "heuristic"]
     return findings

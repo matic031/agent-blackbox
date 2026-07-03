@@ -108,6 +108,20 @@ def normalize_severity(value: object, fallback: str = "info") -> str:
     return raw if raw in SEVERITY_RANK else fallback
 
 
+def severity_for_kind(kind: object, severity: object, fallback: str = "high") -> str:
+    """Normalized severity, forcing ``malware`` to at least ``critical``.
+
+    Malware must block under the default policy (``block_severity=critical``),
+    so a malware entry that omits or under-states its severity is floored to
+    ``critical``. A ``vulnerability`` (or unknown kind) keeps its normalized
+    severity — a legit-but-vulnerable package should flag, not block.
+    """
+    sev = normalize_severity(severity, fallback)
+    if str(kind or "").strip().lower() == KIND_MALWARE:
+        return "critical"
+    return sev
+
+
 def hermes_home() -> Path:
     """Return the active ``HERMES_HOME`` directory.
 
