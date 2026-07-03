@@ -1,0 +1,30 @@
+{
+  "name": "@umanitek/guardian-openclaw",
+  "version": "0.1.0",
+  "description": "Umanitek Agent Guardian plugin for OpenClaw — mirrors hermes guardian detection and reports sightings to the local DKG threat graph.",
+  "type": "module",
+  "license": "Apache-2.0",
+  "files": [
+    "src",
+    "openclaw.plugin.json",
+    "README.md"
+  ],
+  "openclaw": {
+    "extensions": [
+      "./src/index.ts"
+    ],
+    "compat": {
+      "pluginApi": ">=2026.6.11",
+      "minGatewayVersion": "2026.6.11"
+    },
+    "build": {
+      "openclawVersion": "2026.6.11"
+    }
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.0"
+  }
+}

@@ -1,0 +1,62 @@
+{
+  "id": "guardian",
+  "name": "Umanitek Agent Guardian",
+  "description": "Detects escalation, dependency, and prompt-injection threats from tool calls and prompts, and reports sightings to the local DKG threat graph. Audit-only by default; blocking is opt-in.",
+  "activation": {
+    "onStartup": true
+  },
+  "hooks": {
+    "registers": [
+      "before_tool_call",
+      "after_tool_call",
+      "before_agent_run",
+      "message_received",
+      "session_start",
+      "session_end"
+    ],
+    "notes": "before_agent_run is a conversation hook: OpenClaw requires plugins.entries.guardian.hooks.allowConversationAccess=true for it to receive the prompt and session messages. Without it, tool-call, message, and session detection still work, but the prompt-injection scan on the incoming run is skipped."
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": true,
+    "properties": {
+      "mode": {
+        "type": "string",
+        "enum": ["audit", "block"],
+        "default": "audit",
+        "description": "audit = observe + report only; block = also block tool calls and runs at or above blockSeverity."
+      },
+      "contextGraphId": {
+        "type": "string",
+        "default": "umanitek/guardian-threats",
+        "description": "Public curated threat context-graph id on the local DKG node."
+      },
+      "dkgUrl": {
+        "type": "string",
+        "default": "http://127.0.0.1:9200",
+        "description": "Local DKG node HTTP URL (override with $DKG_DAEMON_URL)."
+      },
+      "syncInterval": {
+        "type": "number",
+        "default": 300,
+        "description": "Seconds between ruleset refreshes from the node."
+      },
+      "report": {
+        "type": "boolean",
+        "default": true,
+        "description": "Share sightings to shared working memory (SWM) when a threat matches."
+      },
+      "dailyReportLimit": {
+        "type": "number",
+        "default": 500,
+        "description": "Anti-bot cap on outbound sighting reports per day."
+      },
+      "blockSeverity": {
+        "type": "string",
+        "enum": ["info", "low", "medium", "high", "critical"],
+        "default": "critical",
+        "description": "Minimum severity blocked when mode is block."
+      }
+    }
+  }
+}

@@ -1,0 +1,14 @@
+<svg width="200" height="200" viewBox="0 0 200 200" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <!-- Dark circle background matching the logo -->
+  <circle cx="100" cy="100" r="100" fill="#111111"/>
+  <!-- White flag mark, scaled and centered from original paths -->
+  <!-- Original viewBox: 278 228 108 88, centered in 200x200 with padding -->
+  <g transform="translate(46, 56) scale(1.0)">
+    <!-- diagonal slash -->
+    <path d="M58.192 87.252H65.642L106.328 0H98.879L58.192 87.252Z" fill="white"/>
+    <!-- flag body -->
+    <path d="M16.292 40.202H77.342L96.085 0H35.045L16.292 40.202Z" fill="white"/>
+    <!-- pole / left notch -->
+    <path d="M18.753 9.623H28.36L16.267 35.559H18.456L30.549 9.623H47.296L28.544 49.826H0L18.753 9.623Z" fill="white"/>
+  </g>
+</svg>
