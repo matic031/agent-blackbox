@@ -199,10 +199,14 @@ def on_pre_tool_call(
             _spawn_osv_discovery(cfg, rs, tool_name, args)
         if cfg.block_enabled:
             # Public-graph findings and the user's own custom rules block;
-            # community/heuristic findings only alert.
+            # community/heuristic findings only alert. A ``vulnerability``-kind
+            # threat NEVER blocks (a legit-but-vulnerable package must keep
+            # working) — only active ``malware`` is stopped.
             blocking = [
                 f for f in findings
-                if (f.confirmed or f.source == "custom") and cfg.meets_block_threshold(f.severity)
+                if (f.confirmed or f.source == "custom")
+                and getattr(f, "kind", None) != constants.KIND_VULNERABILITY
+                and cfg.meets_block_threshold(f.severity)
             ]
             if blocking:
                 return {"action": "block", "message": guardian_block_message(blocking)}

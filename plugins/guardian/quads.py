@@ -147,6 +147,14 @@ _SHELL_SHAPE_RULES = (
     ("insecure-tls-fetch", INSECURE_FETCH_RE),
 )
 
+# Shapes that Guardian still MATCHES against curated graph rules but never
+# auto-nominates as heuristic candidates. `remote-script-pipe` (`curl … | bash`)
+# is the canonical install idiom for rustup, nvm, Homebrew, oh-my-zsh, etc., so
+# firing + reporting on the shape alone would flag routine agent behaviour and
+# flood the community graph. A curator can still curate a known-bad
+# `curl|bash` into the graph and Guardian will match it.
+NO_AUTO_NOMINATE_SHAPES = frozenset({"remote-script-pipe"})
+
 # Tool names whose payload is treated as a shell command string.
 _SHELL_TOOLS = {"terminal", "shell", "bash", "run_command", "exec", "command"}
 _COMMAND_KEYS = ("command", "cmd", "shell", "script", "input")
@@ -610,6 +618,7 @@ def build_threat_quads(
     name: str,
     description: str,
     curated: bool = True,
+    kind: Optional[str] = None,
     ts: Optional[datetime] = None,
     # injection
     pattern: Optional[str] = None,
@@ -658,6 +667,8 @@ def build_threat_quads(
         _q(subj, constants.SCHEMA_DESCRIPTION_PRED, literal(description)),
         _q(subj, constants.SCHEMA_DATE_MODIFIED_PRED, datetime_literal(ts)),
     ]
+    if kind:
+        out.append(_q(subj, constants.KIND_PRED, literal(kind)))
 
     if category == "injection":
         if pattern:

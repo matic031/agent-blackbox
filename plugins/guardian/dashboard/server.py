@@ -168,34 +168,54 @@ def create_app():
 
     @app.get("/api/agents")
     def agents() -> Any:
-        """Distinct threat reporters in SWM, plus this node's own agent.
+        """Local protected agents + distinct threat reporters in SWM.
 
-        Fail-open: on any query failure we still return the local node agent
-        (or, if even that fails, an empty list).
+        A "protected agent" is any framework that has written findings into this
+        shared guardian home (Hermes always; OpenClaw once it detects). Each is
+        shown separately even when several share one node wallet — so a Hermes
+        and an OpenClaw on the same machine are two agents, not one.
+
+        Fail-open: on any query failure we still return whatever we resolved.
         """
         cfg = load_guardian_config()
-        # Keyed by (framework, lowercased-address) so a wallet reported in a
-        # different case doesn't show up as a second, duplicate agent.
+        # Keyed by (framework, lowercased-address) so the same wallet under two
+        # frameworks shows as two agents, and the same wallet+framework folds.
         found: "Dict[tuple, Dict[str, Any]]" = {}
-        local_key = None
 
-        # Local node agent — always try to include it, labelled as this node.
+        # Resolve this node's wallet once (shared by every local framework).
+        local_addr = ""
         try:
             client = DkgClient(url=cfg.dkg_url)
             identity = client.agent_identity() or {}
-            local_addr = identity.get("agentAddress") or identity.get("agentDid")
-            if local_addr:
-                local_key = ("hermes", str(local_addr).lower())
-                found[local_key] = {
-                    "framework": "hermes",
-                    "address": str(local_addr),
-                    "reports": 0,
-                    "is_local": True,
-                }
+            local_addr = str(identity.get("agentAddress") or identity.get("agentDid") or "")
         except Exception as exc:  # pragma: no cover - fail open
             logger.debug("guardian dashboard: agent identity failed: %s", exc)
 
-        # Distinct reporters of threats from the shared graph.
+        # Local protected agents: one per framework with a findings log here.
+        try:
+            local_fw = audit.local_frameworks() or ["hermes"]
+        except Exception:  # pragma: no cover - fail open
+            local_fw = ["hermes"]
+        # Per-framework local finding counts (so the card shows real activity).
+        counts_by_fw: "Dict[str, int]" = {}
+        try:
+            for row in audit.read_findings(limit=100000):
+                fw = (row.get("framework") or "hermes").lower()
+                counts_by_fw[fw] = counts_by_fw.get(fw, 0) + 1
+        except Exception:  # pragma: no cover - fail open
+            pass
+        for fw in local_fw:
+            key = (fw, local_addr.lower())
+            found[key] = {
+                "framework": fw,
+                "address": local_addr or fw,
+                "reports": 0,
+                "findings": counts_by_fw.get(fw, 0),
+                "is_local": True,
+            }
+
+        # Distinct reporters of threats from the shared graph (may include
+        # remote agents on other machines). Same-wallet+framework folds in.
         try:
             client = DkgClient(url=cfg.dkg_url)
             sparql = (
@@ -216,12 +236,7 @@ def create_app():
                     n = int(extract_binding(row.get("n")) or "0")
                 except (TypeError, ValueError):
                     n = 0
-                addr_lc = str(addr).lower()
-                key = (fw, addr_lc)
-                # Fold reporter rows for the local wallet into the local agent
-                # entry regardless of the framework label reported alongside them.
-                if local_key is not None and addr_lc == local_key[1]:
-                    key = local_key
+                key = (fw, str(addr).lower())
                 if key in found:
                     found[key]["reports"] = max(found[key].get("reports", 0), n)
                 else:
@@ -321,6 +336,7 @@ def create_app():
     # Predicate IRI -> friendly detail key, for the single-threat lookup.
     _DETAIL_FIELDS = {
         constants.SEVERITY_PRED: "severity",
+        constants.KIND_PRED: "kind",
         constants.SCHEMA_NAME_PRED: "name",
         constants.SCHEMA_DESCRIPTION_PRED: "description",
         constants.OWASP_CATEGORY_PRED: "owasp",

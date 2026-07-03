@@ -56,6 +56,13 @@ FRAMEWORK_PRED = f"{GUARDIAN_ONTOLOGY}framework"
 DISPUTES_PRED = f"{GUARDIAN_ONTOLOGY}disputes"
 DISPUTE_REPORTER_PRED = f"{GUARDIAN_ONTOLOGY}disputeReporter"
 
+# threat kind: distinguishes active malware from a mere vulnerability. Only
+# ``malware`` blocks (at/above block_severity); ``vulnerability`` always flags
+# but never auto-blocks, so a legit-but-vulnerable package isn't stopped.
+KIND_PRED = f"{GUARDIAN_ONTOLOGY}kind"
+KIND_MALWARE = "malware"
+KIND_VULNERABILITY = "vulnerability"
+
 # file-access predicates (g:toolName reused; category is new) ----------------
 CATEGORY_PRED = f"{GUARDIAN_ONTOLOGY}category"
 # suspicious-skill predicates -----------------------------------------------

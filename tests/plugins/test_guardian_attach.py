@@ -197,6 +197,9 @@ def test_attach_openclaw_writes_guardian_block(fake_env):
     assert entry["config"]["mode"]
     assert entry["config"]["daemonUrl"]
     assert entry["config"]["contextGraphId"]
+    # guardianHome points OpenClaw's local findings log at the Hermes guardian
+    # home so the one dashboard surfaces OpenClaw detections too.
+    assert entry["config"]["guardianHome"] == str(constants.guardian_home())
     # Unrelated keys preserved.
     assert data["someKey"] == "keepme"
     # A backup was made.

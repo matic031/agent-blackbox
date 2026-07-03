@@ -40,6 +40,7 @@ import {
   GUARDIAN_CATEGORY_PRED,
   GUARDIAN_DANGER_SHAPE_PRED,
   GUARDIAN_IDENTIFIER_PRED,
+  GUARDIAN_KIND_PRED,
   GUARDIAN_OWASP_CATEGORY_PRED,
   GUARDIAN_PACKAGE_ECOSYSTEM_PRED,
   GUARDIAN_PACKAGE_NAME_PRED,
@@ -120,6 +121,8 @@ interface ThreatAccum {
   packageVersion?: string;
   packageEcosystem?: string;
   advisoryId?: string;
+  // dependency threat kind (malware | vulnerability)
+  kind?: string;
   // fileaccess
   category?: string;
   // skill
@@ -149,6 +152,7 @@ function collectThreats(resp: unknown): ThreatAccum[] {
       case GUARDIAN_PACKAGE_NAME_PRED: acc.packageName = o; break;
       case GUARDIAN_PACKAGE_VERSION_PRED: acc.packageVersion = o; break;
       case GUARDIAN_PACKAGE_ECOSYSTEM_PRED: acc.packageEcosystem = o; break;
+      case GUARDIAN_KIND_PRED: acc.kind = o; break;
       case SCHEMA_ADVISORY: acc.advisoryId = o; break;
       case GUARDIAN_CATEGORY_PRED: acc.category = o; break;
       case GUARDIAN_SKILL_NAME_PRED: acc.skillName = o; break;
@@ -217,7 +221,7 @@ function accumToRule(acc: ThreatAccum, source: RuleSource): MappedRule | null {
     return {
       category: "dependency",
       key: `${eco}:${pkg}@${ver}`,
-      rule: { identifier, severity, advisoryId: acc.advisoryId, name, source },
+      rule: { identifier, severity, advisoryId: acc.advisoryId, kind: acc.kind || undefined, name, source },
     };
   }
   if (identifier.startsWith("fileaccess:")) {

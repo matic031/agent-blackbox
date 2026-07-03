@@ -88,6 +88,8 @@ export interface DependencyRule {
   identifier: string;
   severity: GuardianSeverity;
   advisoryId?: string;
+  /** malware | vulnerability — vulnerabilities flag but never auto-block. */
+  kind?: string;
   name: string;
   source?: RuleSource;
 }
@@ -177,6 +179,12 @@ export interface Finding {
    * Mirrors Python `Finding.source`.
    */
   source: FindingSource;
+  /**
+   * Dependency threat kind (`malware` | `vulnerability`); undefined for other
+   * categories. A `vulnerability`-kind finding flags but NEVER auto-blocks, so
+   * a legit-but-vulnerable package keeps working. Mirrors Python `Finding.kind`.
+   */
+  kind?: string;
   /** Privacy-safe candidate threat fields (see `FindingFields`). */
   fields: FindingFields;
 }
@@ -342,6 +350,7 @@ export function detectDependency(
         : `${dep.ecosystem}:${dep.name}@${dep.version}`,
       confirmed: src === "public",
       source: src,
+      kind: rule.kind,
       fields:
         src === "community"
           ? {

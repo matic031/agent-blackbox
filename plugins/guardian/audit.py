@@ -121,52 +121,99 @@ def _trim_if_needed(path: Path) -> None:
         pass
 
 
-def read_findings(limit: int = 100, offset: int = 0) -> List[Dict[str, Any]]:
-    """Return findings newest-first, paged. Empty on any error."""
-    path = _home() / "findings.jsonl"
-    if not path.exists():
-        return []
+def _findings_files() -> List["tuple[Path, str]"]:
+    """Return ``(path, default_framework)`` for every findings log in the home.
+
+    ``findings.jsonl`` is the Hermes (Python) plugin's own log; sibling
+    ``findings.<framework>.jsonl`` files are written by other local agents
+    (e.g. OpenClaw writes ``findings.openclaw.jsonl``) into the SAME shared
+    guardian home so the one dashboard surfaces every agent's detections. The
+    framework is taken from each finding line when present, else the filename.
+    """
+    home = _home()
+    out: List["tuple[Path, str]"] = [(home / "findings.jsonl", "hermes")]
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
-    except Exception:
-        return []
-    out: List[Dict[str, Any]] = []
-    for line in reversed(lines):
-        line = line.strip()
-        if not line:
+        for extra in sorted(home.glob("findings.*.jsonl")):
+            # findings.<framework>.jsonl → framework from the middle segment.
+            parts = extra.name.split(".")
+            fw = parts[1] if len(parts) == 3 else "unknown"
+            out.append((extra, fw))
+    except Exception:  # pragma: no cover - defensive
+        pass
+    return out
+
+
+def _flatten_finding_row(rec: Dict[str, Any], default_fw: str) -> Dict[str, Any]:
+    # Flatten to a dashboard-friendly row: the finding fields live under
+    # ``finding`` (singular) per stored line; lift them up and stamp the event
+    # time/tool so the UI can render each row directly.
+    finding = rec.get("finding") or (rec.get("findings") or [{}])[0] or {}
+    return {
+        "time": rec.get("iso") or rec.get("ts"),
+        "ts": rec.get("ts") or 0,
+        "event": rec.get("event"),
+        "identifier": finding.get("identifier"),
+        "category": finding.get("category"),
+        "severity": finding.get("severity"),
+        "title": finding.get("title"),
+        "framework": finding.get("framework") or rec.get("framework") or default_fw,
+        "tool_name": finding.get("tool_name") or (rec.get("detail") or {}).get("tool_name"),
+        "evidence": finding.get("evidence") or finding.get("title"),
+        "confirmed": bool(finding.get("confirmed", True)),
+        "source": finding.get("source") or ("public" if finding.get("confirmed", True) else "heuristic"),
+    }
+
+
+def read_findings(limit: int = 100, offset: int = 0) -> List[Dict[str, Any]]:
+    """Return findings newest-first, paged, merged across every agent's log.
+
+    Reads ``findings.jsonl`` plus any ``findings.<framework>.jsonl`` siblings in
+    the shared guardian home and merges them newest-first by timestamp. Empty on
+    any error.
+    """
+    rows: List[Dict[str, Any]] = []
+    for path, default_fw in _findings_files():
+        if not path.exists():
             continue
         try:
-            rec = json.loads(line)
+            lines = path.read_text(encoding="utf-8").splitlines()
         except Exception:
             continue
-        # Flatten to a dashboard-friendly row: the finding fields live under
-        # ``finding`` (singular) per stored line; lift them up and stamp the
-        # event time/tool so the UI can render each row directly.
-        finding = rec.get("finding") or (rec.get("findings") or [{}])[0] or {}
-        out.append({
-            "time": rec.get("iso") or rec.get("ts"),
-            "event": rec.get("event"),
-            "identifier": finding.get("identifier"),
-            "category": finding.get("category"),
-            "severity": finding.get("severity"),
-            "title": finding.get("title"),
-            "framework": finding.get("framework") or "hermes",
-            "tool_name": finding.get("tool_name") or (rec.get("detail") or {}).get("tool_name"),
-            "evidence": finding.get("evidence") or finding.get("title"),
-            "confirmed": bool(finding.get("confirmed", True)),
-            "source": finding.get("source") or ("public" if finding.get("confirmed", True) else "heuristic"),
-        })
-    return out[offset : offset + limit]
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except Exception:
+                continue
+            rows.append(_flatten_finding_row(rec, default_fw))
+    # Newest-first across all logs. Fall back to insertion order when a row has
+    # no numeric ts (kept stable by enumerate tiebreak).
+    rows.sort(key=lambda r: r.get("ts") or 0, reverse=True)
+    return rows[offset : offset + limit]
 
 
 def count_findings() -> int:
-    path = _home() / "findings.jsonl"
-    if not path.exists():
-        return 0
-    try:
-        return sum(1 for line in path.read_text(encoding="utf-8").splitlines() if line.strip())
-    except Exception:
-        return 0
+    total = 0
+    for path, _ in _findings_files():
+        if not path.exists():
+            continue
+        try:
+            total += sum(1 for line in path.read_text(encoding="utf-8").splitlines() if line.strip())
+        except Exception:
+            continue
+    return total
+
+
+def local_frameworks() -> List[str]:
+    """Frameworks that have written findings into this shared home (for the
+    dashboard's agent list). Always includes ``hermes`` when its log exists."""
+    out: List[str] = []
+    for path, default_fw in _findings_files():
+        if path.exists() and default_fw not in out:
+            out.append(default_fw)
+    return out
 
 
 # ---------------------------------------------------------------------------

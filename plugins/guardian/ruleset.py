@@ -41,9 +41,10 @@ PREFIX g: <http://umanitek.ai/ontology/guardian/>
 PREFIX schema: <http://schema.org/>
 SELECT ?identifier ?severity ?name ?pattern ?toolName ?argShape
        ?packageName ?packageVersion ?packageEcosystem ?advisoryId ?curated
-       ?category ?skillName ?skillVersion ?dangerShape
+       ?category ?skillName ?skillVersion ?dangerShape ?kind
 WHERE {
   ?threat g:identifier ?identifier .
+  OPTIONAL { ?threat g:kind ?kind . }
   OPTIONAL { ?threat g:severity ?severity . }
   OPTIONAL { ?threat schema:name ?name . }
   OPTIONAL { ?threat g:pattern ?pattern . }
@@ -150,6 +151,7 @@ def _row_to_rule(row: Dict[str, Any], source: str = "public") -> Optional[tuple]
             "packageName": pkg,
             "packageVersion": ver,
             "advisoryId": extract_binding(row.get("advisoryId")),
+            "kind": extract_binding(row.get("kind")) or None,
             "severity": severity,
             "name": name,
             "source": source,

@@ -144,11 +144,16 @@ check_python() {
     done
     if [ -n "$PY" ]; then
         ok "Python $($PY -V 2>&1 | awk '{print $2}') ($PY)"
+    elif command -v uv >/dev/null 2>&1; then
+        # No system 3.11–3.13 (e.g. the machine only has 3.14) — that's fine:
+        # uv fetches a compatible interpreter when it builds the venv.
+        warn "No system Python 3.11–3.13 found — uv will provide a compatible one."
+        PY=""
     else
-        err "Python 3.11–3.13 not found."
+        err "Python 3.11–3.13 not found (and uv isn't installed)."
         case "$OS" in
-            macos) step "Install: brew install python@3.11   (or use uv: https://docs.astral.sh/uv/)" ;;
-            linux) step "Install: sudo apt install python3.11 python3.11-venv" ;;
+            macos) step "Easiest fix: brew install uv   (or: brew install python@3.12)" ;;
+            linux) step "Easiest fix: curl -LsSf https://astral.sh/uv/install.sh | sh   (or: apt install python3.12 python3.12-venv)" ;;
         esac
         exit 1
     fi
@@ -272,14 +277,26 @@ ensure_web_extra() {
 minimal_python_env() {
     VENV_DIR="$REPO_DIR/venv"
     if [ ! -d "$VENV_DIR" ]; then
-        step "Creating virtual environment ($PY) ..."
-        "$PY" -m venv "$VENV_DIR"
+        if [ -n "$PY" ]; then
+            step "Creating virtual environment ($PY) ..."
+            "$PY" -m venv "$VENV_DIR"
+        elif command -v uv >/dev/null 2>&1; then
+            step "Creating virtual environment (uv fetches Python 3.12) ..."
+            ( cd "$REPO_DIR" && uv venv --python 3.12 "$VENV_DIR" )
+        else
+            err "Need Python 3.11–3.13 or uv to build the environment."; exit 1
+        fi
     else
         step "Reusing existing venv at $VENV_DIR"
     fi
-    step "Upgrading pip and installing agent-guardian[web] (editable) ..."
-    "$VENV_DIR/bin/python" -m pip install --upgrade pip >/dev/null
-    ( cd "$REPO_DIR" && "$VENV_DIR/bin/python" -m pip install -e ".[web]" )
+    step "Installing agent-guardian[web] (editable) ..."
+    # A uv-built venv ships no pip, so install with uv when it's available.
+    if command -v uv >/dev/null 2>&1; then
+        ( cd "$REPO_DIR" && VIRTUAL_ENV="$VENV_DIR" uv pip install -e ".[web]" )
+    else
+        "$VENV_DIR/bin/python" -m pip install --upgrade pip >/dev/null
+        ( cd "$REPO_DIR" && "$VENV_DIR/bin/python" -m pip install -e ".[web]" )
+    fi
     ok "Guardian installed (editable, with dashboard extras)"
 }
 

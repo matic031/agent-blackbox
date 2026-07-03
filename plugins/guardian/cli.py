@@ -385,6 +385,7 @@ def _cmd_curate_approve(args: argparse.Namespace) -> int:
         name=name,
         description=description,
         curated=True,
+        kind=fields.get("kind"),
         pattern=fields.get("pattern"),
         owasp_category=fields.get("owasp_category"),
         tool_name=fields.get("tool_name"),
@@ -523,6 +524,7 @@ def _seed_entries(
             name=fields.get("name", ident),
             description=fields.get("description", ""),
             curated=True,
+            kind=fields.get("kind"),
             pattern=fields.get("pattern"),
             owasp_category=fields.get("owasp_category"),
             tool_name=fields.get("tool_name"),
@@ -854,6 +856,7 @@ def _entry_to_threat(entry: Dict[str, Any]) -> tuple:
         if not (eco and name and ver):
             raise ValueError("dependency needs ecosystem, name, version")
         ident = quads.dependency_identifier(eco, name, ver)
+        kind = str(entry.get("kind") or "").strip().lower() or None
         return "dependency", ident, {
             "severity": constants.normalize_severity(entry.get("severity"), "high"),
             "name": entry.get("title") or entry.get("name") or f"{name}@{ver}",
@@ -863,6 +866,7 @@ def _entry_to_threat(entry: Dict[str, Any]) -> tuple:
             "package_version": ver,
             "advisory_id": entry.get("advisoryId") or entry.get("advisory_id"),
             "references": entry.get("references") or [],
+            "kind": kind if kind in (constants.KIND_MALWARE, constants.KIND_VULNERABILITY) else None,
         }
     if ctype == "fileaccess":
         tool = str(entry.get("toolName") or entry.get("tool") or entry.get("tool_name") or "").strip()

@@ -82,6 +82,55 @@ def test_block_mode_ignores_below_threshold(monkeypatch):
     assert out is None
 
 
+def _dependency_ruleset(kind=None):
+    rs = ruleset_mod.Ruleset()
+    rs.dependency = {
+        "npm:evil-pkg@1.0.0": {
+            "identifier": "dep:npm:evil-pkg@1.0.0",
+            "ecosystem": "npm", "packageName": "evil-pkg", "packageVersion": "1.0.0",
+            "severity": "critical", "name": "evil-pkg", "source": "public", "kind": kind,
+        }
+    }
+    rs.synced_at = 9e18
+    return rs
+
+
+def test_block_mode_blocks_malware_dependency(monkeypatch):
+    monkeypatch.setattr(ruleset_mod, "get", lambda cfg=None: _dependency_ruleset(kind="malware"))
+    monkeypatch.setattr(hooks, "_report_and_audit", lambda *a, **k: None)
+    monkeypatch.setattr(hooks, "_spawn_osv_discovery", lambda *a, **k: None)  # no bg thread in tests
+    monkeypatch.setattr(
+        config_mod, "load_guardian_config",
+        lambda: config_mod.GuardianConfig(mode="block", block_severity="critical"),
+    )
+    out = hooks.on_pre_tool_call(tool_name="terminal", args={"command": "npm install evil-pkg@1.0.0"})
+    assert isinstance(out, dict) and out["action"] == "block"
+
+
+def test_vulnerability_kind_never_blocks(monkeypatch):
+    # Same critical, confirmed dependency — but kind=vulnerability must NOT block
+    # (a legit-but-vulnerable package has to keep working; it only flags).
+    monkeypatch.setattr(ruleset_mod, "get", lambda cfg=None: _dependency_ruleset(kind="vulnerability"))
+    monkeypatch.setattr(hooks, "_report_and_audit", lambda *a, **k: None)
+    monkeypatch.setattr(hooks, "_spawn_osv_discovery", lambda *a, **k: None)  # no bg thread in tests
+    monkeypatch.setattr(
+        config_mod, "load_guardian_config",
+        lambda: config_mod.GuardianConfig(mode="block", block_severity="critical"),
+    )
+    out = hooks.on_pre_tool_call(tool_name="terminal", args={"command": "npm install evil-pkg@1.0.0"})
+    assert out is None
+
+
+def test_kind_round_trips_through_quads(monkeypatch):
+    q = quads.build_threat_quads(
+        category="dependency", identifier="dep:npm:evil-pkg@1.0.0", severity="critical",
+        name="evil-pkg", description="", kind="malware",
+        ecosystem="npm", package_name="evil-pkg", package_version="1.0.0",
+    )
+    kind_pred = load_guardian("constants").KIND_PRED
+    assert any(t.get("predicate") == kind_pred and "malware" in str(t.get("object")) for t in q)
+
+
 def test_pre_tool_call_fails_open_on_error(monkeypatch):
     def boom(cfg=None):
         raise RuntimeError("kaboom")

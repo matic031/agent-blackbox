@@ -7,6 +7,8 @@
  * Keys mirror the hermes plugin's config table so the two frameworks stay in
  * lockstep.
  */
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { GuardianSeverity, SEVERITY_RANK } from "./quads.js";
 import type { ThreatCategory } from "./detection.js";
 
@@ -66,6 +68,21 @@ export interface GuardianConfig {
    * Mirrors Python `GuardianConfig.protected_paths`.
    */
   protectedPaths: string[];
+  /**
+   * Directory where this plugin writes its local findings log
+   * (`findings.openclaw.jsonl`). Set by `hermes guardian attach` to the Hermes
+   * guardian home so the ONE dashboard surfaces OpenClaw detections too. Falls
+   * back to `$OPENCLAW_STATE_DIR/guardian`. Read from
+   * `plugins.entries.guardian.config.guardianHome` / env `GUARDIAN_HOME`.
+   */
+  guardianHome: string;
+}
+
+/** Default guardian home when unset — mirrors ruleset.ts `resolveStateDir`. */
+export function defaultGuardianHome(): string {
+  const base =
+    process.env.OPENCLAW_STATE_DIR || process.env.OPENCLAW_HOME || join(homedir(), ".openclaw");
+  return join(base, "guardian");
 }
 
 /**
@@ -93,6 +110,7 @@ const DEFAULTS: GuardianConfig = {
   osvLookup: true,
   categories: {},
   protectedPaths: [...DEFAULT_PROTECTED_PATHS],
+  guardianHome: "",
 };
 
 function str(value: unknown): string | undefined {
@@ -252,6 +270,11 @@ export function resolveConfig(pluginConfig: Record<string, unknown> = {}): Guard
       DEFAULTS.osvLookup,
     categories: normalizeCategories(pluginConfig.detection),
     protectedPaths: normalizeProtectedPaths(pluginConfig.protected_paths ?? pluginConfig.protectedPaths),
+    guardianHome:
+      str(env.GUARDIAN_HOME) ??
+      str(pluginConfig.guardianHome) ??
+      str(pluginConfig.guardian_home) ??
+      defaultGuardianHome(),
   };
 }
 

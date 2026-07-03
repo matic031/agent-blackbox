@@ -39,9 +39,10 @@ import {
   discoverDependencyCandidates,
 } from "./detection.js";
 import { DkgClient, DkgError } from "./dkgClient.js";
+import { recordFinding } from "./audit.js";
 import { GuardianConfig, categoryAllows, resolveConfig } from "./config.js";
 import { RulesetCache } from "./ruleset.js";
-import { GuardianSeverity, SEVERITY_RANK, buildReportQuads, stableHash } from "./quads.js";
+import { GuardianSeverity, KIND_VULNERABILITY, SEVERITY_RANK, buildReportQuads, stableHash } from "./quads.js";
 import { lookup as osvLookup } from "./osv.js";
 import { redact, sanitizeText } from "./redact.js";
 
@@ -205,12 +206,15 @@ async function reportSighting(rt: GuardianRuntime, finding: Finding): Promise<vo
  * Findings that can block at or above the block threshold: CONFIRMED public-graph
  * matches (`source === "public"`) and the user's own custom rules
  * (`source === "custom"`). Community-pool matches and discovery candidates never
- * block — they only alert/report. Mirrors Python's `pre_tool_call` blocking
- * filter (`f.confirmed or f.source == "custom"`).
+ * block — they only alert/report. A `vulnerability`-kind threat NEVER blocks
+ * (a legit-but-vulnerable package must keep working) — only active `malware` is
+ * stopped. Mirrors Python's `pre_tool_call` blocking filter
+ * (`(f.confirmed or f.source == "custom") and f.kind != KIND_VULNERABILITY`).
  */
 function meetsBlock(finding: Finding, cfg: GuardianConfig): boolean {
   return (
     (finding.confirmed || finding.source === "custom") &&
+    finding.kind !== KIND_VULNERABILITY &&
     SEVERITY_RANK[finding.severity] >= SEVERITY_RANK[cfg.blockSeverity]
   );
 }
@@ -226,6 +230,22 @@ function blockMessage(findings: Finding[]): string {
   const worst = maxSeverity(findings);
   const titles = [...new Set(findings.map((f) => f.title))].slice(0, 3).join("; ");
   return `Umanitek Guardian blocked this action (${worst}): ${titles}`;
+}
+
+/**
+ * Surface a flagged finding: write it to the local findings log (so the shared
+ * Guardian dashboard shows OpenClaw detections) AND report the sighting to the
+ * community graph. Local recording covers EVERY flagged finding — including
+ * `source === "custom"`, which stays local; `reportSighting` itself skips
+ * custom and applies the daily cap / per-identifier cooldown.
+ */
+function observe(rt: GuardianRuntime, event: string, finding: Finding, toolName?: string): void {
+  try {
+    recordFinding(rt.cfg.guardianHome, event, finding, toolName);
+  } catch {
+    /* fail-open — local logging must never break the loop */
+  }
+  void reportSighting(rt, finding);
 }
 
 // --- Hook handlers ---------------------------------------------------------
@@ -252,7 +272,7 @@ function makeBeforeToolCall(rt: GuardianRuntime) {
       if (rt.cfg.discover && rt.cfg.osvLookup) {
         void discoverDependencyCandidates(event.toolName, params, ruleset, osvLookup)
           .then((candidates) => {
-            for (const f of flagWorthy(rt.cfg, candidates)) void reportSighting(rt, f);
+            for (const f of flagWorthy(rt.cfg, candidates)) observe(rt, "osv_discovery", f, event.toolName);
           })
           .catch(() => {
             /* fail-open — OSV discovery must never break the loop */
@@ -261,8 +281,8 @@ function makeBeforeToolCall(rt: GuardianRuntime) {
 
       if (findings.length === 0) return;
 
-      // Observe + report every finding (fire-and-forget; never blocks the loop).
-      for (const f of findings) void reportSighting(rt, f);
+      // Record locally + report every finding (fire-and-forget; never blocks).
+      for (const f of findings) observe(rt, "before_tool_call", f, event.toolName);
 
       if (rt.cfg.mode === "block") {
         // Confirmed graph findings and the user's own custom rules can block
@@ -305,7 +325,7 @@ function makeBeforeAgentRun(rt: GuardianRuntime) {
       findings = flagWorthy(rt.cfg, findings);
       if (findings.length === 0) return { outcome: "pass" };
 
-      for (const f of findings) void reportSighting(rt, f);
+      for (const f of findings) observe(rt, "before_agent_run", f);
 
       if (rt.cfg.mode === "block") {
         const blocking = findings.filter((f) => meetsBlock(f, rt.cfg));
@@ -332,7 +352,7 @@ function makeMessageReceived(rt: GuardianRuntime) {
       const text = event.content ?? "";
       const findings = detectInjection(text, ruleset);
       if (rt.cfg.discover) findings.push(...discoverInjection(text, ruleset));
-      for (const f of flagWorthy(rt.cfg, findings)) void reportSighting(rt, f);
+      for (const f of flagWorthy(rt.cfg, findings)) observe(rt, "message_received", f);
     } catch {
       /* fail-open — message_received is observation-only */
     }

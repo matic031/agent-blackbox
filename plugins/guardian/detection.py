@@ -61,6 +61,7 @@ class Finding:
     evidence: str = ""
     confirmed: bool = True
     source: str = "public"  # public | community | heuristic | custom
+    kind: Optional[str] = None  # malware | vulnerability (dependencies) — vulns never block
     fields: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -75,6 +76,7 @@ class Finding:
             "confirmed": self.confirmed,
             "candidate": not self.confirmed,
             "source": self.source,
+            "kind": self.kind,
             "fields": dict(self.fields),
         }
 
@@ -177,8 +179,10 @@ def detect_escalation(tool_name: str, args: Any, ruleset: Any) -> List[Finding]:
                 )
             )
     # Discovery layer: a dangerous shape that no graph rule covers is still a
-    # candidate escalation nominated to the community graph.
-    if not out:
+    # candidate escalation nominated to the community graph — except for shapes
+    # that overlap routine behaviour (e.g. `curl … | bash` installers), which
+    # only ever match an explicitly curated rule, never self-nominate.
+    if not out and arg_shape not in quads.NO_AUTO_NOMINATE_SHAPES:
         candidate_id = quads.escalation_identifier(tool_lower, arg_shape)
         out.append(
             Finding(
@@ -249,6 +253,7 @@ def detect_dependency(tool_name: str, args: Any, ruleset: Any) -> List[Finding]:
                 + (f" ({rule.get('advisoryId')})" if rule.get("advisoryId") else ""),
                 confirmed=src == "public",
                 source=src,
+                kind=rule.get("kind"),
                 fields={
                     "ecosystem": eco,
                     "package_name": name,

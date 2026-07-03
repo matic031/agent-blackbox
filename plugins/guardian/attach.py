@@ -426,6 +426,10 @@ def _merge_openclaw(data: Dict[str, Any], cfg: Dict[str, Any], load_path: Option
             "daemonUrl": cfg["dkg_url"],
             "contextGraphId": cfg["context_graph_id"],
             "mode": cfg["mode"],
+            # Point OpenClaw's local findings log at THIS Hermes guardian home so
+            # the one dashboard surfaces OpenClaw detections too. OpenClaw writes
+            # findings.openclaw.jsonl here; the dashboard merges all findings*.jsonl.
+            "guardianHome": cfg.get("guardian_home") or str(constants.guardian_home()),
         },
         "hooks": {"allowConversationAccess": True},
     }
@@ -508,12 +512,14 @@ def load_guardian_config_snapshot() -> Dict[str, Any]:
             "dkg_url": cfg.dkg_url,
             "context_graph_id": cfg.context_graph_id,
             "mode": cfg.mode,
+            "guardian_home": str(constants.guardian_home()),
         }
     except Exception:
         return {
             "dkg_url": constants.DEFAULT_DKG_URL,
             "context_graph_id": constants.DEFAULT_CONTEXT_GRAPH_ID,
             "mode": "audit",
+            "guardian_home": str(constants.guardian_home()),
         }
 
 

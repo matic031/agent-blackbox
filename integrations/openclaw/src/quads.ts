@@ -53,6 +53,12 @@ export const GUARDIAN_FRAMEWORK_PRED = `${GUARDIAN_ONTOLOGY}framework`;
 export const GUARDIAN_PACKAGE_NAME_PRED = `${GUARDIAN_ONTOLOGY}packageName`;
 export const GUARDIAN_PACKAGE_VERSION_PRED = `${GUARDIAN_ONTOLOGY}packageVersion`;
 export const GUARDIAN_PACKAGE_ECOSYSTEM_PRED = `${GUARDIAN_ONTOLOGY}packageEcosystem`;
+// threat kind: distinguishes active malware from a mere vulnerability. Only
+// `malware` blocks (at/above block_severity); `vulnerability` always flags but
+// never auto-blocks, so a legit-but-vulnerable package isn't stopped.
+export const GUARDIAN_KIND_PRED = `${GUARDIAN_ONTOLOGY}kind`;
+export const KIND_MALWARE = "malware";
+export const KIND_VULNERABILITY = "vulnerability";
 // file-access predicates (g:toolName reused; category is new) ---------------
 export const GUARDIAN_CATEGORY_PRED = `${GUARDIAN_ONTOLOGY}category`;
 // suspicious-skill predicates -----------------------------------------------
