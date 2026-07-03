@@ -148,20 +148,47 @@ def _flatten_finding_row(rec: Dict[str, Any], default_fw: str) -> Dict[str, Any]
     # ``finding`` (singular) per stored line; lift them up and stamp the event
     # time/tool so the UI can render each row directly.
     finding = rec.get("finding") or (rec.get("findings") or [{}])[0] or {}
+    detail = rec.get("detail") or {}
     return {
         "time": rec.get("iso") or rec.get("ts"),
         "ts": rec.get("ts") or 0,
         "event": rec.get("event"),
+        "session_id": detail.get("session_id"),
+        "task_id": detail.get("task_id"),
+        "turn_id": detail.get("turn_id"),
         "identifier": finding.get("identifier"),
         "category": finding.get("category"),
         "severity": finding.get("severity"),
         "title": finding.get("title"),
         "framework": finding.get("framework") or rec.get("framework") or default_fw,
-        "tool_name": finding.get("tool_name") or (rec.get("detail") or {}).get("tool_name"),
+        "tool_name": finding.get("tool_name") or detail.get("tool_name"),
         "evidence": finding.get("evidence") or finding.get("title"),
         "confirmed": bool(finding.get("confirmed", True)),
         "source": finding.get("source") or ("public" if finding.get("confirmed", True) else "heuristic"),
     }
+
+
+def _dedupe_finding_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Collapse repeated findings emitted by multiple API calls in one turn."""
+    deduped: Dict[tuple, Dict[str, Any]] = {}
+    order: List[tuple] = []
+    for row in rows:
+        scope = row.get("turn_id") or row.get("task_id") or row.get("session_id") or row.get("time")
+        key = (
+            row.get("framework"),
+            row.get("event"),
+            scope,
+            row.get("identifier"),
+            row.get("evidence"),
+        )
+        existing = deduped.get(key)
+        if existing is None:
+            deduped[key] = row
+            order.append(key)
+            continue
+        if (row.get("ts") or 0) < (existing.get("ts") or 0):
+            deduped[key] = row
+    return [deduped[key] for key in order]
 
 
 def read_findings(limit: int = 100, offset: int = 0) -> List[Dict[str, Any]]:
@@ -188,6 +215,7 @@ def read_findings(limit: int = 100, offset: int = 0) -> List[Dict[str, Any]]:
             except Exception:
                 continue
             rows.append(_flatten_finding_row(rec, default_fw))
+    rows = _dedupe_finding_rows(rows)
     # Newest-first across all logs. Fall back to insertion order when a row has
     # no numeric ts (kept stable by enumerate tiebreak).
     rows.sort(key=lambda r: r.get("ts") or 0, reverse=True)
@@ -195,15 +223,7 @@ def read_findings(limit: int = 100, offset: int = 0) -> List[Dict[str, Any]]:
 
 
 def count_findings() -> int:
-    total = 0
-    for path, _ in _findings_files():
-        if not path.exists():
-            continue
-        try:
-            total += sum(1 for line in path.read_text(encoding="utf-8").splitlines() if line.strip())
-        except Exception:
-            continue
-    return total
+    return len(read_findings(limit=1_000_000))
 
 
 def local_frameworks() -> List[str]:

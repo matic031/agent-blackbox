@@ -17,6 +17,7 @@ Blocking uses the same contract as ``security-guidance``:
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any, Dict, List, Optional
 
 from . import audit, config as config_mod, constants, detection, quads, ruleset
@@ -132,6 +133,8 @@ def _share_sighting(client: DkgClient, cfg: GuardianConfig, finding: Dict[str, A
 
 
 _reporter_cache: Dict[str, str] = {}
+_seen_api_findings: Dict[tuple, float] = {}
+_API_FINDING_DEDUPE_TTL_SECS = 10 * 60
 
 
 def _reporter_address(client: DkgClient) -> str:
@@ -159,6 +162,25 @@ def _reporter_address(client: DkgClient) -> str:
             break
     _reporter_cache["addr"] = addr
     return addr
+
+
+def _dedupe_api_findings(findings: List[detection.Finding], detail: Dict[str, Any]) -> List[detection.Finding]:
+    """Drop repeated pre-api findings from additional model calls in one turn."""
+    turn_key = str(detail.get("turn_id") or detail.get("task_id") or detail.get("session_id") or "")
+    if not turn_key:
+        return findings
+    now = time.time()
+    for key, seen_at in list(_seen_api_findings.items()):
+        if now - seen_at > _API_FINDING_DEDUPE_TTL_SECS:
+            _seen_api_findings.pop(key, None)
+    out: List[detection.Finding] = []
+    for finding in findings:
+        key = (turn_key, finding.identifier, finding.evidence or finding.matched or finding.title)
+        if key in _seen_api_findings:
+            continue
+        _seen_api_findings[key] = now
+        out.append(finding)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -330,9 +352,11 @@ def on_pre_api_request(**kwargs: Any) -> None:
         detail = {
             "session_id": kwargs.get("session_id"),
             "task_id": kwargs.get("task_id"),
+            "turn_id": kwargs.get("turn_id"),
             "model": kwargs.get("model"),
             "provider": kwargs.get("provider"),
         }
+        findings = _dedupe_api_findings(findings, detail)
         _report_and_audit(cfg, "pre_api_request", findings, detail)
         # Optional LLM second opinion — runs off-thread so it never delays the
         # request, and only when the user has configured it.
