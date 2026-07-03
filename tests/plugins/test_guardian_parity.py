@@ -22,7 +22,7 @@ def _fixture():
 
 
 def test_fixture_exists():
-    assert _FIXTURE.exists(), "parity fixture missing — run scratchpad/gen_fixture.py"
+    assert _FIXTURE.exists(), "parity fixture missing — run tests/parity/generate.py"
 
 
 def test_identifier_parity():

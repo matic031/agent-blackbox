@@ -7,7 +7,9 @@ Routes:
 * ``GET /api/graph-status`` → curated threat counts + last sync + ruleset counts.
 * ``GET /api/reports``      → recent outbound sightings from the community graph.
 * ``GET /api/agents``       → distinct threat reporters + this node's own agent.
-* ``GET /api/graph``        → threats from VM (``tier=public``) or SWM (``tier=local``).
+* ``GET /api/graph``        → threats per tier: ``public`` (verifiable-memory,
+  the curated Umanitek threat graph), ``community`` (shared-working-memory,
+  the community pool), ``local`` (working-memory, this node's own graph).
 
 FastAPI/uvicorn come from the hermes ``[web]`` extra — imported lazily so the
 rest of the plugin has no web dependency. Served on ``127.0.0.1`` only.
@@ -27,10 +29,10 @@ _ASSETS_DIR = Path(__file__).resolve().parent / "assets"
 
 def create_app():
     """Build and return the FastAPI application."""
-    from fastapi import FastAPI, Query
+    from fastapi import Body, FastAPI, Query
     from fastapi.responses import FileResponse, JSONResponse, HTMLResponse
 
-    from .. import audit, constants, ruleset
+    from .. import audit, constants, ruleset, settings
     from ..config import load_guardian_config
     from ..dkg_client import DkgClient, extract_binding
 
@@ -56,7 +58,9 @@ def create_app():
     def index() -> Any:
         html = _STATIC_DIR / "index.html"
         if html.exists():
-            return FileResponse(str(html))
+            # Never cache the SPA shell — it's a live tool that updates in place,
+            # so a browser should always fetch the current dashboard, not a stale copy.
+            return FileResponse(str(html), headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
         return HTMLResponse("<h1>Guardian</h1><p>dashboard assets missing</p>", status_code=200)
 
     @app.get("/assets/{name}")
@@ -81,6 +85,29 @@ def create_app():
             return JSONResponse({"error": "not found"}, status_code=404)
         return FileResponse(str(path), media_type="application/javascript")
 
+    @app.get("/api/settings")
+    def get_settings() -> Any:
+        """Current user-tunable detection policy (defaults included)."""
+        try:
+            return settings.read_settings()
+        except Exception as exc:  # pragma: no cover - fail open
+            logger.debug("guardian dashboard: read settings failed: %s", exc)
+            return JSONResponse({"error": "could not read settings"}, status_code=500)
+
+    @app.post("/api/settings")
+    def post_settings(payload: Dict[str, Any] = Body(...)) -> Any:
+        """Validate + persist detection policy under plugins.entries.guardian.*.
+
+        Loopback-only (same bind as the whole dashboard); writes are validated
+        server-side in :mod:`settings` so a malformed body can't corrupt config.
+        """
+        try:
+            result = settings.write_settings(payload)
+            return JSONResponse(result, status_code=200 if result.get("ok") else 400)
+        except Exception as exc:  # pragma: no cover - fail open
+            logger.debug("guardian dashboard: write settings failed: %s", exc)
+            return JSONResponse({"ok": False, "errors": ["internal error"]}, status_code=500)
+
     @app.get("/api/findings")
     def findings(limit: int = Query(50, ge=1, le=500), offset: int = Query(0, ge=0)) -> Any:
         items = audit.read_findings(limit=limit, offset=offset)
@@ -97,6 +124,7 @@ def create_app():
         counts = rs.counts()
         curated = 0
         sightings = 0
+        community = 0
         reachable = False
         try:
             client = DkgClient(url=cfg.dkg_url)
@@ -114,6 +142,13 @@ def create_app():
                 "{ ?r a <http://umanitek.ai/ontology/guardian/ThreatReport> . }",
                 constants.VIEW_SHARED_WORKING_MEMORY,
             )
+            community = _count_query(
+                client,
+                cfg,
+                "SELECT (COUNT(DISTINCT ?identifier) AS ?n) WHERE "
+                "{ ?t g:identifier ?identifier . }",
+                constants.VIEW_SHARED_WORKING_MEMORY,
+            )
         except Exception as exc:  # pragma: no cover - fail open
             logger.debug("guardian dashboard: graph-status query failed: %s", exc)
         # Field names chosen to match what static/index.html reads.
@@ -126,6 +161,7 @@ def create_app():
             "last_sync": rs.synced_at,
             "ruleset": counts,
             "curated": curated,
+            "community": community,
             "sightings": sightings,
             "findings_logged": audit.count_findings(),
         }
@@ -195,27 +231,39 @@ def create_app():
 
         return {"agents": list(found.values())}
 
+    def _tier_view(tier: str, default: str = "public") -> tuple:
+        """Map a UI tier name to a DKG SPARQL view.
+
+        ``public`` → verifiable-memory (the curated source of truth),
+        ``community`` → shared-working-memory (the shared community pool),
+        ``local`` → working-memory (this node's own private graph).
+        """
+        tier = (tier or default).lower()
+        views = {
+            "public": constants.VIEW_VERIFIABLE_MEMORY,
+            "community": constants.VIEW_SHARED_WORKING_MEMORY,
+            "local": constants.VIEW_WORKING_MEMORY,
+        }
+        if tier not in views:
+            tier = default
+        return tier, views[tier]
+
     @app.get("/api/graph")
     def graph(tier: str = Query("public")) -> Any:
-        """Threats from the graph. ``tier=public`` reads VM, ``tier=local`` SWM."""
+        """Threats from one graph tier: ``public`` | ``community`` | ``local``."""
         cfg = load_guardian_config()
-        tier = (tier or "public").lower()
-        view = (
-            constants.VIEW_VERIFIABLE_MEMORY
-            if tier == "public"
-            else constants.VIEW_SHARED_WORKING_MEMORY
-        )
+        tier, view = _tier_view(tier)
 
         def _category(identifier: str) -> str:
             ident = str(identifier or "")
             prefix = ident.split(":", 1)[0].lower() if ":" in ident else ""
-            if prefix == "dep":
-                return "dependency"
-            if prefix == "injection":
-                return "injection"
-            if prefix == "escalation":
-                return "escalation"
-            return "other"
+            return {
+                "dep": "dependency",
+                "injection": "injection",
+                "escalation": "escalation",
+                "fileaccess": "fileaccess",
+                "skill": "skill",
+            }.get(prefix, "other")
 
         seen: "Dict[str, Dict[str, Any]]" = {}
         try:
@@ -292,16 +340,12 @@ def create_app():
     }
 
     @app.get("/api/threat")
-    def threat(identifier: str = Query(..., min_length=1), tier: str = Query("local")) -> Any:
+    def threat(identifier: str = Query(..., min_length=1), tier: str = Query("community")) -> Any:
         """Full detail for ONE threat — a targeted point-lookup (scales to any
-        graph size). ``tier=public`` reads VM, ``tier=local`` SWM. Fail-open."""
+        graph size). ``tier`` ∈ public | community | local (legacy ``local``
+        callers get this node's working memory). Fail-open."""
         cfg = load_guardian_config()
-        tier = (tier or "local").lower()
-        view = (
-            constants.VIEW_VERIFIABLE_MEMORY
-            if tier == "public"
-            else constants.VIEW_SHARED_WORKING_MEMORY
-        )
+        tier, view = _tier_view(tier, default="community")
         prefix = identifier.split(":", 1)[0].lower() if ":" in identifier else ""
         category = prefix if prefix in ("dep", "injection", "escalation", "fileaccess", "skill") else "other"
         if category == "dep":
@@ -313,42 +357,45 @@ def create_app():
             "references": [],
             "found": False,
         }
-        # A threat and its ThreatReports share g:identifier, so exclude reports
-        # and false-positives to return only the threat asset's own fields.
+        # A threat and its ThreatReports share g:identifier. A single bare
+        # point-lookup returns both; we separate them in Python. This is far
+        # cheaper than a SPARQL ``FILTER NOT EXISTS`` (which re-scans the whole
+        # shared-memory view per candidate row — ~3x slower here) and folds the
+        # reporter count into the same round-trip.
         lit = identifier.replace("\\", "\\\\").replace('"', '\\"')
+        rdf_type = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"
         try:
             client = DkgClient(url=cfg.dkg_url)
             rows = client.query(
-                _PREFIX
-                + f'SELECT ?p ?o WHERE {{ ?t g:identifier "{lit}" . ?t ?p ?o . '
-                "FILTER NOT EXISTS { ?t a g:ThreatReport } "
-                "FILTER NOT EXISTS { ?t a g:FalsePositive } }",
+                _PREFIX + f'SELECT ?t ?p ?o WHERE {{ ?t g:identifier "{lit}" . ?t ?p ?o }}',
                 cfg.context_graph_id,
                 view=view,
             )
+            subjects: Dict[str, List[Any]] = {}
             for row in rows:
-                detail["found"] = True
-                pred = extract_binding(row.get("p"))
-                obj = extract_binding(row.get("o"))
-                if pred == constants.REFERENCE_PRED:
-                    if obj and obj not in detail["references"]:
-                        detail["references"].append(obj)
-                elif pred in _DETAIL_FIELDS:
-                    detail[_DETAIL_FIELDS[pred]] = obj
-            # How many distinct agents have reported this (community corroboration).
-            rrows = client.query(
-                _PREFIX
-                + "SELECT (COUNT(DISTINCT ?reporter) AS ?n) (SAMPLE(?fw) AS ?framework) WHERE { "
-                f'?r a g:ThreatReport . ?r g:identifier "{lit}" . ?r g:reporter ?reporter . '
-                "OPTIONAL { ?r g:framework ?fw } }",
-                cfg.context_graph_id,
-                view=constants.VIEW_SHARED_WORKING_MEMORY,
-            )
-            if rrows:
-                detail["reporters"] = int(extract_binding(rrows[0].get("n")) or "0")
-                fw = extract_binding(rrows[0].get("framework"))
-                if fw:
-                    detail["framework"] = fw
+                subjects.setdefault(extract_binding(row.get("t")), []).append(
+                    (extract_binding(row.get("p")), extract_binding(row.get("o")))
+                )
+            reporters = set()
+            for pairs in subjects.values():
+                types = {obj for (pred, obj) in pairs if pred == rdf_type}
+                if constants.REPORT_TYPE_IRI in types:  # a sighting, not the threat
+                    for pred, obj in pairs:
+                        if pred == constants.REPORTER_PRED and obj:
+                            reporters.add(obj)
+                        elif pred == constants.FRAMEWORK_PRED and obj:
+                            detail.setdefault("framework", obj)
+                    continue
+                if constants.FALSE_POSITIVE_TYPE_IRI in types:
+                    continue
+                detail["found"] = True  # the threat asset itself
+                for pred, obj in pairs:
+                    if pred == constants.REFERENCE_PRED:
+                        if obj and obj not in detail["references"]:
+                            detail["references"].append(obj)
+                    elif pred in _DETAIL_FIELDS:
+                        detail[_DETAIL_FIELDS[pred]] = obj
+            detail["reporters"] = len(reporters)
         except Exception as exc:  # pragma: no cover - fail open
             logger.debug("guardian dashboard: threat detail query failed: %s", exc)
         return detail

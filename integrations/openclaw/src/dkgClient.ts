@@ -157,7 +157,8 @@ export class DkgClient {
     });
   }
 
-  /** SPARQL query against a memory view (ruleset sync reads shared-working-memory). */
+  /** SPARQL query against a memory view (ruleset sync reads verifiable-memory
+   * then shared-working-memory — the two trust tiers). */
   async query(
     sparql: string,
     contextGraphId: string,

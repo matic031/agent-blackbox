@@ -11,10 +11,13 @@ from __future__ import annotations
 
 import logging
 import os
-from dataclasses import dataclass
-from typing import Any, Dict
+from dataclasses import dataclass, field
+from typing import Any, Dict, Mapping, Tuple
 
 from . import constants
+
+#: The five detection categories a user can tune individually.
+DETECTION_CATEGORIES = ("injection", "escalation", "dependency", "fileaccess", "skill")
 
 logger = logging.getLogger(__name__)
 
@@ -59,11 +62,21 @@ class GuardianConfig:
     dkg_url: str = constants.DEFAULT_DKG_URL
     sync_interval: int = 300
     report: bool = True
-    daily_report_limit: int = 500
+    daily_report_limit: int = 9999
+    report_min_severity: str = "high"
     block_severity: str = "critical"
     dashboard_port: int = 9700
     discover: bool = True
     osv_lookup: bool = True
+    auto_attach: bool = True
+    #: Per-category user policy: ``{category: {"enabled": bool, "min_severity": str}}``.
+    #: Missing categories default to enabled at ``info`` (flag everything the
+    #: graph knows). Config key: ``plugins.entries.guardian.detection.*``.
+    categories: Mapping[str, Any] = field(default_factory=dict)
+    #: User-defined protected path patterns (globs / prefixes). Access to a
+    #: matching path is flagged locally (source="custom", never shared to SWM)
+    #: and blocks in block mode. Config key: ``protected_paths``.
+    protected_paths: Tuple[str, ...] = ()
 
     @property
     def block_enabled(self) -> bool:
@@ -74,6 +87,44 @@ class GuardianConfig:
         """True when *severity* is at or above the configured block threshold."""
         rank = constants.SEVERITY_RANK
         floor = rank.get(self.block_severity.lower(), rank["critical"])
+        return rank.get((severity or "").lower(), -1) >= floor
+
+    def meets_report_threshold(self, severity: str) -> bool:
+        """True when a heuristic candidate at *severity* is worth flagging.
+
+        Graph-backed findings (public or community) are always flagged; this
+        threshold only gates the built-in discovery heuristics so low-signal
+        candidates don't drown the findings feed and the community graph.
+        """
+        rank = constants.SEVERITY_RANK
+        floor = rank.get(self.report_min_severity.lower(), rank["high"])
+        return rank.get((severity or "").lower(), -1) >= floor
+
+    def category_setting(self, category: str) -> Dict[str, Any]:
+        """Resolved user policy for one category: ``{"enabled", "min_severity"}``.
+
+        Defaults: enabled at ``info`` — flag everything Guardian can detect for
+        that category. A user who only cares about e.g. critical dependency
+        vulns sets ``detection.dependency.min_severity: critical``.
+        """
+        raw = self.categories.get(category) if isinstance(self.categories, Mapping) else None
+        raw = raw if isinstance(raw, Mapping) else {}
+        min_sev = str(raw.get("min_severity") or "info").lower()
+        if min_sev not in constants.SEVERITY_RANK:
+            min_sev = "info"
+        enabled = raw.get("enabled")
+        return {
+            "enabled": bool(enabled) if isinstance(enabled, bool) else True,
+            "min_severity": min_sev,
+        }
+
+    def category_allows(self, category: str, severity: str) -> bool:
+        """True when the user's policy lets a *category* finding at *severity* flag."""
+        setting = self.category_setting(category)
+        if not setting["enabled"]:
+            return False
+        rank = constants.SEVERITY_RANK
+        floor = rank[setting["min_severity"]]
         return rank.get((severity or "").lower(), -1) >= floor
 
 
@@ -102,6 +153,18 @@ def load_guardian_config() -> GuardianConfig:
     ).lower()
     if block_severity not in constants.SEVERITY_RANK:
         block_severity = "critical"
+    report_min_severity = str(
+        _env_or(
+            entry,
+            env="GUARDIAN_REPORT_MIN_SEVERITY",
+            key="report_min_severity",
+            default="high",
+        )
+    ).lower()
+    if report_min_severity not in constants.SEVERITY_RANK:
+        report_min_severity = "high"
+    categories = _normalize_categories(entry.get("detection"))
+    protected_paths = _normalize_protected_paths(entry.get("protected_paths"))
     return GuardianConfig(
         mode=mode,
         context_graph_id=str(
@@ -124,10 +187,11 @@ def load_guardian_config() -> GuardianConfig:
                 entry,
                 env="GUARDIAN_DAILY_REPORT_LIMIT",
                 key="daily_report_limit",
-                default=500,
+                default=9999,
             ),
-            500,
+            9999,
         ),
+        report_min_severity=report_min_severity,
         block_severity=block_severity,
         dashboard_port=_as_int(
             _env_or(entry, env="GUARDIAN_DASHBOARD_PORT", key="dashboard_port", default=9700), 9700
@@ -136,4 +200,41 @@ def load_guardian_config() -> GuardianConfig:
         osv_lookup=_as_bool(
             _env_or(entry, env="GUARDIAN_OSV_LOOKUP", key="osv_lookup", default=True), True
         ),
+        auto_attach=_as_bool(
+            _env_or(entry, env="GUARDIAN_AUTO_ATTACH", key="auto_attach", default=True), True
+        ),
+        categories=categories,
+        protected_paths=protected_paths,
     )
+
+
+def _normalize_categories(raw: Any) -> Dict[str, Dict[str, Any]]:
+    """Validate the ``detection`` config mapping into per-category policy dicts."""
+    out: Dict[str, Dict[str, Any]] = {}
+    if not isinstance(raw, dict):
+        return out
+    for category in DETECTION_CATEGORIES:
+        item = raw.get(category)
+        if not isinstance(item, dict):
+            continue
+        setting: Dict[str, Any] = {}
+        if isinstance(item.get("enabled"), bool):
+            setting["enabled"] = item["enabled"]
+        min_sev = str(item.get("min_severity") or "").lower()
+        if min_sev in constants.SEVERITY_RANK:
+            setting["min_severity"] = min_sev
+        if setting:
+            out[category] = setting
+    return out
+
+
+def _normalize_protected_paths(raw: Any) -> Tuple[str, ...]:
+    """Validate ``protected_paths`` into a tuple of non-empty pattern strings."""
+    if not isinstance(raw, (list, tuple)):
+        return ()
+    out = []
+    for item in raw:
+        text = str(item or "").strip()
+        if text and text not in out:
+            out.append(text)
+    return tuple(out[:100])

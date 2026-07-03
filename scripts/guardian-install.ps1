@@ -11,7 +11,7 @@
 # the end).
 #
 # Usage:
-#   iwr -useb https://raw.githubusercontent.com/umanitek/agent-guardian/main/scripts/guardian-install.ps1 | iex
+#   iwr -useb https://raw.githubusercontent.com/matic031/agent-guardian/feat/guardian/scripts/guardian-install.ps1 | iex
 #   # or, from a clone:
 #   .\scripts\guardian-install.ps1 [-SkipDkg] [-Network testnet]
 #
@@ -28,8 +28,8 @@ $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 
 # ── Configuration (override via env) ────────────────────────────────────────
-$RepoUrl     = if ($env:GUARDIAN_REPO_URL)    { $env:GUARDIAN_REPO_URL }    else { "https://github.com/umanitek/agent-guardian.git" }
-$RepoBranch  = if ($env:GUARDIAN_REPO_BRANCH) { $env:GUARDIAN_REPO_BRANCH } else { "main" }
+$RepoUrl     = if ($env:GUARDIAN_REPO_URL)    { $env:GUARDIAN_REPO_URL }    else { "https://github.com/matic031/agent-guardian.git" }
+$RepoBranch  = if ($env:GUARDIAN_REPO_BRANCH) { $env:GUARDIAN_REPO_BRANCH } else { "feat/guardian" }
 $HermesHome  = if ($env:HERMES_HOME)          { $env:HERMES_HOME }          else { "$env:USERPROFILE\.hermes" }
 $NodeMajor   = if ($env:GUARDIAN_NODE_MAJOR)  { [int]$env:GUARDIAN_NODE_MAJOR } else { 22 }
 
@@ -297,7 +297,8 @@ defaults = {
     "dkg_url": "http://127.0.0.1:9200",
     "sync_interval": 300,
     "report": True,
-    "daily_report_limit": 500,
+    "daily_report_limit": 9999,
+    "report_min_severity": "high",
     "block_severity": "critical",
     "dashboard_port": 9700,
 }
@@ -316,6 +317,22 @@ print("  seeded: " + ", ".join(added) if added else "  already configured - no c
         Write-Warn2 "Could not seed config automatically. Run 'hermes guardian status' to verify configuration."
     } finally {
         Remove-Item $seedFile -Force -ErrorAction SilentlyContinue
+    }
+}
+
+# ── Auto-protect every local agent (best-effort, non-fatal) ─────────────────
+# Discovers every local Hermes home + OpenClaw workspace and enables Guardian
+# in each, so protection is on everywhere without per-instance setup.
+function Protect-AllAgents {
+    Write-Heading "Protecting all local agents"
+    Write-Step "Discovering local Hermes homes + OpenClaw workspaces (hermes guardian attach) ..."
+    try {
+        & $HermesBin guardian attach
+        if ($LASTEXITCODE -ne 0) { throw "hermes exit $LASTEXITCODE" }
+        Write-Ok "Guardian attached to all discovered local agents"
+    } catch {
+        Write-Warn2 "Could not auto-attach to every local agent (this is non-fatal)."
+        Write-Step "Re-run anytime with:  hermes guardian attach"
     }
 }
 
@@ -358,6 +375,7 @@ function Main {
     Install-PythonEnv
     Install-Dkg
     Enable-AndSeed
+    Protect-AllAgents
     Sync-Ruleset
     Show-NextSteps
 }

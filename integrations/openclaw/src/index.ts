@@ -33,14 +33,15 @@ import {
   Ruleset,
   collectText,
   detectAll,
+  detectCustomFileAccess,
   detectInjection,
   discoverInjection,
   discoverDependencyCandidates,
 } from "./detection.js";
 import { DkgClient, DkgError } from "./dkgClient.js";
-import { GuardianConfig, resolveConfig } from "./config.js";
+import { GuardianConfig, categoryAllows, resolveConfig } from "./config.js";
 import { RulesetCache } from "./ruleset.js";
-import { GuardianSeverity, SEVERITY_RANK, buildReportQuads } from "./quads.js";
+import { GuardianSeverity, SEVERITY_RANK, buildReportQuads, stableHash } from "./quads.js";
 import { lookup as osvLookup } from "./osv.js";
 import { redact, sanitizeText } from "./redact.js";
 
@@ -64,6 +65,55 @@ interface GuardianRuntime {
   reporterAddress?: string;
   log: (level: "debug" | "warn", msg: string, meta?: unknown) => void;
   dailyReports: { date: string; count: number };
+  /**
+   * Per-identifier report cooldown stamps (identifier → epoch ms of the last
+   * outbound sighting). A re-fire of the same identifier within
+   * `REPORT_COOLDOWN_MS` adds no signal and is not re-reported. Mirrors
+   * Python `audit.REPORT_COOLDOWN_SECS` / `allow_report`.
+   */
+  recentReports: Map<string, number>;
+}
+
+/** Re-reporting the same identifier within this window adds no signal (the
+ * sighting KA name is stable per identifier+reporter, so a re-share only
+ * refreshes dateModified) — skip it. Mirrors Python audit.REPORT_COOLDOWN_SECS. */
+const REPORT_COOLDOWN_MS = 6 * 3600 * 1000;
+
+/** Drop expired cooldown stamps so the map stays small. */
+function pruneRecentReports(rt: GuardianRuntime, now: number): void {
+  if (rt.recentReports.size <= 2048) return;
+  for (const [identifier, ts] of rt.recentReports) {
+    if (now - ts >= REPORT_COOLDOWN_MS) rt.recentReports.delete(identifier);
+  }
+}
+
+/**
+ * Apply the user's detection policy to raw findings. Two layers:
+ *
+ *   1. Per-category policy (`detection.<category>.{enabled,minSeverity}`) — a
+ *      disabled category never flags; a category floor drops anything below it
+ *      (e.g. "only critical dependency vulns").
+ *   2. Heuristic gate — built-in discovery candidates additionally need
+ *      `reportMinSeverity`; they are nominations, not confirmed threats.
+ *
+ * Graph-backed findings (public / community) skip the heuristic gate. User
+ * custom rules (`source === "custom"`) bypass the category policy entirely —
+ * the user explicitly asked for them. Mirrors Python `hooks._flag_worthy`.
+ */
+function flagWorthy(cfg: GuardianConfig, findings: Finding[]): Finding[] {
+  const out: Finding[] = [];
+  for (const f of findings) {
+    if (f.source === "custom") {
+      out.push(f);
+      continue;
+    }
+    if (!categoryAllows(cfg, f.category, f.severity)) continue;
+    if (f.source === "heuristic" && SEVERITY_RANK[f.severity] < SEVERITY_RANK[cfg.reportMinSeverity]) {
+      continue;
+    }
+    out.push(f);
+  }
+  return out;
 }
 
 /**
@@ -96,14 +146,31 @@ function underDailyCap(rt: GuardianRuntime): boolean {
 
 /**
  * Report a sighting to the SWM (one-shot KA share). Deterministic HTTP, fully
- * fail-open, rate-limited by daily cap. Reports carry NO observed content.
+ * fail-open, rate-limited by daily cap + per-identifier cooldown. Reports
+ * carry NO observed content.
  */
 async function reportSighting(rt: GuardianRuntime, finding: Finding): Promise<void> {
+  // Custom (user-configured) rules are personal: they are surfaced/blocked
+  // locally but NEVER leave this machine — no community sighting. Mirrors
+  // Python `_report_and_audit` skipping `source == "custom"`.
+  if (finding.source === "custom") return;
   if (!rt.cfg.report) return;
+  // Per-threat cooldown: a re-fire of the same identifier within the window
+  // adds no signal — skip the sighting. Mirrors Python `audit.allow_report`.
+  const now = Date.now();
+  const last = rt.recentReports.get(finding.identifier);
+  if (last !== undefined && now - last < REPORT_COOLDOWN_MS) {
+    rt.log("debug", `guardian: report cooldown active for ${finding.identifier}`);
+    return;
+  }
   if (!underDailyCap(rt)) {
     rt.log("debug", "guardian: daily report cap reached, dropping sighting");
     return;
   }
+  // Stamp before the share (like Python's allow_report) so a burst of re-fires
+  // can't queue N identical shares while the first is in flight.
+  rt.recentReports.set(finding.identifier, now);
+  pruneRecentReports(rt, now);
   try {
     const reporter = await resolveReporter(rt);
     // For candidate (heuristic-only) findings, forward the privacy-safe threat
@@ -118,7 +185,11 @@ async function reportSighting(rt: GuardianRuntime, finding: Finding): Promise<vo
       framework: FRAMEWORK,
       candidate: finding.fields,
     });
-    const name = `guardian-report-${finding.identifier.replace(/[^A-Za-z0-9._@:-]+/g, "-").slice(0, 80)}`;
+    // KA name matches Python hooks._share_sighting exactly:
+    // "report-" + stableHash(identifier + reporter, 16). Hashing in the
+    // reporter keeps two reporters of the same threat from colliding on one
+    // KA name while staying stable per (identifier, reporter).
+    const name = `report-${stableHash(finding.identifier + reporter, 16)}`;
     await rt.client.shareKnowledgeAsset(rt.cfg.contextGraphId, name, quads);
     rt.dailyReports.count += 1;
   } catch (err) {
@@ -131,12 +202,17 @@ async function reportSighting(rt: GuardianRuntime, finding: Finding): Promise<vo
 }
 
 /**
- * Only CONFIRMED graph findings at/above the block threshold can block.
- * Discovery candidates (heuristic-only, `confirmed === false`) never block —
- * they only alert/report. Mirrors Python's `pre_tool_call` blocking filter.
+ * Findings that can block at or above the block threshold: CONFIRMED public-graph
+ * matches (`source === "public"`) and the user's own custom rules
+ * (`source === "custom"`). Community-pool matches and discovery candidates never
+ * block — they only alert/report. Mirrors Python's `pre_tool_call` blocking
+ * filter (`f.confirmed or f.source == "custom"`).
  */
 function meetsBlock(finding: Finding, cfg: GuardianConfig): boolean {
-  return finding.confirmed && SEVERITY_RANK[finding.severity] >= SEVERITY_RANK[cfg.blockSeverity];
+  return (
+    (finding.confirmed || finding.source === "custom") &&
+    SEVERITY_RANK[finding.severity] >= SEVERITY_RANK[cfg.blockSeverity]
+  );
 }
 
 function maxSeverity(findings: Finding[]): GuardianSeverity {
@@ -163,15 +239,20 @@ function makeBeforeToolCall(rt: GuardianRuntime) {
       const params = (event.params ?? {}) as Record<string, unknown>;
       // detectAll covers escalation + dependency + injection, plus the built-in
       // discovery layer (candidate injection / file-access / skill) when
-      // `discover` is enabled. Mirrors Python `detect_all`.
-      const findings: Finding[] = detectAll(event.toolName, params, ruleset, rt.cfg.discover);
+      // `discover` is enabled. detectCustomFileAccess adds the user's own
+      // protected-path rules (source="custom"). flagWorthy then applies the
+      // per-category policy + heuristic gate (custom rules bypass both).
+      // Mirrors Python `detect_all` + `detect_custom_fileaccess` + `_flag_worthy`.
+      const raw = detectAll(event.toolName, params, ruleset, rt.cfg.discover);
+      raw.push(...detectCustomFileAccess(event.toolName, params, rt.cfg.protectedPaths));
+      const findings: Finding[] = flagWorthy(rt.cfg, raw);
 
       // Dependency OSV auto-discovery runs OFF the blocking path (best-effort,
       // fail-open) so a network lookup never delays or breaks the tool call.
       if (rt.cfg.discover && rt.cfg.osvLookup) {
         void discoverDependencyCandidates(event.toolName, params, ruleset, osvLookup)
           .then((candidates) => {
-            for (const f of candidates) void reportSighting(rt, f);
+            for (const f of flagWorthy(rt.cfg, candidates)) void reportSighting(rt, f);
           })
           .catch(() => {
             /* fail-open — OSV discovery must never break the loop */
@@ -184,7 +265,8 @@ function makeBeforeToolCall(rt: GuardianRuntime) {
       for (const f of findings) void reportSighting(rt, f);
 
       if (rt.cfg.mode === "block") {
-        // Only confirmed graph findings can block (see meetsBlock).
+        // Confirmed graph findings and the user's own custom rules can block
+        // (see meetsBlock).
         const blocking = findings.filter((f) => meetsBlock(f, rt.cfg));
         if (blocking.length > 0) {
           return { block: true, blockReason: blockMessage(blocking) };
@@ -218,8 +300,9 @@ function makeBeforeAgentRun(rt: GuardianRuntime) {
     try {
       const ruleset = rt.ruleset.get();
       const text = [event.prompt ?? "", ...collectText(event.messages)].join("\n");
-      const findings = detectInjection(text, ruleset);
+      let findings = detectInjection(text, ruleset);
       if (rt.cfg.discover) findings.push(...discoverInjection(text, ruleset));
+      findings = flagWorthy(rt.cfg, findings);
       if (findings.length === 0) return { outcome: "pass" };
 
       for (const f of findings) void reportSighting(rt, f);
@@ -249,7 +332,7 @@ function makeMessageReceived(rt: GuardianRuntime) {
       const text = event.content ?? "";
       const findings = detectInjection(text, ruleset);
       if (rt.cfg.discover) findings.push(...discoverInjection(text, ruleset));
-      for (const f of findings) void reportSighting(rt, f);
+      for (const f of flagWorthy(rt.cfg, findings)) void reportSighting(rt, f);
     } catch {
       /* fail-open — message_received is observation-only */
     }
@@ -296,7 +379,14 @@ function buildRuntime(api: OpenClawPluginApi): GuardianRuntime {
       /* logging must never throw */
     }
   };
-  return { cfg, client, ruleset, log, dailyReports: { date: today(), count: 0 } };
+  return {
+    cfg,
+    client,
+    ruleset,
+    log,
+    dailyReports: { date: today(), count: 0 },
+    recentReports: new Map<string, number>(),
+  };
 }
 
 export function register(api: OpenClawPluginApi): void {

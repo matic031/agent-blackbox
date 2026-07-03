@@ -1,18 +1,25 @@
 """Pure, testable matcher over a :class:`~plugins.guardian.ruleset.Ruleset`.
 
 No hardcoded threat rules act as truth: every rule comes from the graph-synced
-ruleset. Detection is three independent passes — injection (regex over text),
-escalation (tool name AND arg shape), dependency (parse installs → lookup).
+ruleset, in two trust tiers. Rules tagged ``source: "public"`` come from the
+curated public threat graph (verifiable-memory) — the source of truth: if it's
+there, it's a threat, and a match is CONFIRMED (blockable). Rules tagged
+``source: "community"`` come from the shared community pool — a match is
+flagged but can never block. Built-in heuristics only *nominate* candidates
+(``source: "heuristic"``) for the community graph.
+
 All matching is resilient to peer-supplied garbage: regex compile/exec errors
 are caught per rule and oversized inputs are capped.
 """
 
 from __future__ import annotations
 
+import fnmatch
 import json
 import logging
+import os
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
 from . import quads
 
@@ -25,14 +32,24 @@ _MAX_INJECTION_TEXT = 50_000
 class Finding:
     """One detected threat. ``evidence`` is expected to already be redacted.
 
-    ``confirmed`` is True when the finding matched a curated GRAPH rule (a
-    blockable, source-of-truth threat) and False when it was raised only by a
-    built-in discovery heuristic (a *candidate* nominated to the community
-    graph for a curator to promote). ``fields`` carries the privacy-safe
-    candidate threat attributes (pattern/toolName/category/skillName/...) that
-    the auto-submit path forwards to ``build_report_quads`` so a curator can
-    promote a candidate directly — it NEVER contains raw prompts, paths, or
-    file/skill source.
+    ``source`` says which trust tier raised the finding:
+
+    * ``"public"`` — matched the curated public threat graph (the source of
+      truth). ``confirmed`` is True; blockable in block mode.
+    * ``"community"`` — matched a rule seen only in the shared community pool.
+      Flagged (and re-reported to strengthen the consensus signal) but NEVER
+      blocks: anyone can write to the community pool.
+    * ``"heuristic"`` — raised only by a built-in discovery heuristic; a
+      *candidate* nominated to the community graph for a curator to promote.
+    * ``"custom"`` — matched a user-configured local rule (e.g. a protected
+      path). Always flags, blocks in block mode, never shared to SWM.
+
+    ``confirmed`` is kept as the strict "public graph says so" bit — only
+    confirmed findings can block. ``fields`` carries the privacy-safe threat
+    attributes (pattern/toolName/category/skillName/...) that the auto-submit
+    path forwards to ``build_report_quads`` so a curator can promote the
+    threat directly — it NEVER contains raw prompts, paths, or file/skill
+    source.
     """
 
     identifier: str
@@ -43,6 +60,7 @@ class Finding:
     matched: str = ""
     evidence: str = ""
     confirmed: bool = True
+    source: str = "public"  # public | community | heuristic | custom
     fields: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -56,8 +74,17 @@ class Finding:
             "evidence": self.evidence,
             "confirmed": self.confirmed,
             "candidate": not self.confirmed,
+            "source": self.source,
             "fields": dict(self.fields),
         }
+
+
+def _rule_source(rule: Dict[str, Any]) -> str:
+    """Trust tier of a graph rule. Untagged rules default to ``public`` —
+    rules built before tier tagging (or handed in directly by tests) were
+    always treated as curated."""
+    src = str(rule.get("source") or "public").lower()
+    return src if src in ("public", "community") else "public"
 
 
 @dataclass
@@ -93,6 +120,7 @@ def detect_injection(text: str, ruleset: Any) -> List[Finding]:
             continue
         if match:
             seen.add(identifier)
+            src = _rule_source(rule)
             out.append(
                 Finding(
                     identifier=identifier,
@@ -101,7 +129,11 @@ def detect_injection(text: str, ruleset: Any) -> List[Finding]:
                     title=rule.get("name") or "Prompt injection pattern matched",
                     matched=str(match.group(0))[:200],
                     evidence=str(match.group(0))[:200],
-                    confirmed=True,
+                    confirmed=src == "public",
+                    source=src,
+                    # Community matches carry the promotion fields so our
+                    # sighting strengthens the curation signal.
+                    fields={"pattern": rule.get("pattern_src")} if src == "community" else {},
                 )
             )
     return out
@@ -129,6 +161,7 @@ def detect_escalation(tool_name: str, args: Any, ruleset: Any) -> List[Finding]:
         # Both must match. This is the corrected contract.
         if rule_tool == tool_lower and rule_shape == arg_shape:
             seen.add(identifier)
+            src = _rule_source(rule)
             out.append(
                 Finding(
                     identifier=identifier,
@@ -138,7 +171,9 @@ def detect_escalation(tool_name: str, args: Any, ruleset: Any) -> List[Finding]:
                     tool_name=tool_name or "",
                     matched=arg_shape,
                     evidence=arg_shape,
-                    confirmed=True,
+                    confirmed=src == "public",
+                    source=src,
+                    fields={"tool_name": tool_lower, "arg_shape": arg_shape} if src == "community" else {},
                 )
             )
     # Discovery layer: a dangerous shape that no graph rule covers is still a
@@ -155,6 +190,7 @@ def detect_escalation(tool_name: str, args: Any, ruleset: Any) -> List[Finding]:
                 matched=arg_shape,
                 evidence=arg_shape,
                 confirmed=False,
+                source="heuristic",
                 fields={"tool_name": tool_lower, "arg_shape": arg_shape},
             )
         )
@@ -200,6 +236,7 @@ def detect_dependency(tool_name: str, args: Any, ruleset: Any) -> List[Finding]:
         if not rule or key in seen:
             continue
         seen.add(key)
+        src = _rule_source(rule)
         out.append(
             Finding(
                 identifier=rule.get("identifier", quads.dependency_identifier(eco, name, version)),
@@ -210,7 +247,14 @@ def detect_dependency(tool_name: str, args: Any, ruleset: Any) -> List[Finding]:
                 matched=key,
                 evidence=f"{dep['ecosystem']}:{dep['name']}@{version}"
                 + (f" ({rule.get('advisoryId')})" if rule.get("advisoryId") else ""),
-                confirmed=True,
+                confirmed=src == "public",
+                source=src,
+                fields={
+                    "ecosystem": eco,
+                    "package_name": name,
+                    "package_version": version,
+                    "advisory_id": rule.get("advisoryId"),
+                } if src == "community" else {},
             )
         )
     return out
@@ -246,6 +290,7 @@ def discover_injection(text: str, ruleset: Any) -> List[Finding]:
                 matched=phrase,
                 evidence=phrase,
                 confirmed=False,
+                source="heuristic",
                 fields={"pattern": phrase, "owasp_category": hit.get("owasp")},
             )
         )
@@ -271,11 +316,11 @@ def detect_fileaccess(tool_name: str, args: Any, ruleset: Any) -> List[Finding]:
     category = hit["category"]
     identifier = quads.fileaccess_identifier(tool, category)
     severity = hit["severity"]
-    confirmed = False
+    source = "heuristic"
     name = None
     for rule in getattr(ruleset, "fileaccess", []) or []:
         if str(rule.get("toolName", "")).lower() == tool and str(rule.get("category", "")).lower() == category:
-            confirmed = True
+            source = _rule_source(rule)
             severity = rule.get("severity", severity)
             name = rule.get("name")
             identifier = rule.get("identifier", identifier)
@@ -289,7 +334,8 @@ def detect_fileaccess(tool_name: str, args: Any, ruleset: Any) -> List[Finding]:
             tool_name=tool,
             matched=category,
             evidence=f"{access['mode']} {category}",
-            confirmed=confirmed,
+            confirmed=source == "public",
+            source=source,
             fields={"tool_name": tool, "file_category": category},
         )
     ]
@@ -318,6 +364,7 @@ def detect_skill(tool_name: str, args: Any, ruleset: Any) -> List[Finding]:
             if ident in seen:
                 continue
             seen.add(ident)
+            src = _rule_source(rule)
             out.append(
                 Finding(
                     identifier=ident,
@@ -327,7 +374,8 @@ def detect_skill(tool_name: str, args: Any, ruleset: Any) -> List[Finding]:
                     tool_name=skill.get("tool", "") or (tool_name or "").lower(),
                     matched=name,
                     evidence=f"known-bad skill {name}",
-                    confirmed=True,
+                    confirmed=src == "public",
+                    source=src,
                     fields={"skill_name": name, "skill_version": version},
                 )
             )
@@ -348,6 +396,7 @@ def detect_skill(tool_name: str, args: Any, ruleset: Any) -> List[Finding]:
                 matched=shape,
                 evidence=f"skill {name}: {shape}",
                 confirmed=False,
+                source="heuristic",
                 fields={"skill_name": name, "skill_version": version, "danger_shape": shape},
             )
         )
@@ -397,6 +446,7 @@ def discover_dependency_candidates(tool_name: str, args: Any, ruleset: Any, osv_
                 matched=key,
                 evidence=f"{eco}:{name}@{version} ({hit.get('advisory_id')})",
                 confirmed=False,
+                source="heuristic",
                 fields={
                     "ecosystem": eco,
                     "package_name": name,
@@ -408,16 +458,80 @@ def discover_dependency_candidates(tool_name: str, args: Any, ruleset: Any, osv_
     return out
 
 
+def _protected_path_match(path: str, pattern: str) -> bool:
+    """True when *path* matches a user's protected-path *pattern*.
+
+    Patterns are matched three ways so plain paths, directories, and globs all
+    behave intuitively: exact/glob match on the full expanded path, glob match
+    on the basename (``*.pem``), and prefix match when the pattern names a
+    directory (``~/secrets`` protects everything under it).
+    """
+    try:
+        norm_path = os.path.normpath(os.path.expanduser(str(path or "")))
+        norm_pat = os.path.normpath(os.path.expanduser(str(pattern or "")))
+        if not norm_path or not norm_pat:
+            return False
+        if fnmatch.fnmatch(norm_path, norm_pat):
+            return True
+        if fnmatch.fnmatch(os.path.basename(norm_path), norm_pat):
+            return True
+        # Directory-prefix semantics for glob-free patterns.
+        if not any(ch in norm_pat for ch in "*?[") and (
+            norm_path == norm_pat or norm_path.startswith(norm_pat.rstrip(os.sep) + os.sep)
+        ):
+            return True
+    except Exception:  # pragma: no cover - fail open
+        return False
+    return False
+
+
+def detect_custom_fileaccess(
+    tool_name: str, args: Any, protected_paths: Iterable[str]
+) -> List[Finding]:
+    """Match file-access tool calls against the USER'S protected-path list.
+
+    These are personal, locally-configured rules (``source="custom"``): they
+    always flag, they block in block mode (the user wrote the rule), and they
+    are NEVER reported to the community graph — the matched pattern is the
+    user's own configuration, not shared threat intel.
+    """
+    patterns = [p for p in (protected_paths or []) if str(p or "").strip()]
+    if not patterns:
+        return []
+    access = quads.file_access_arg(tool_name, args)
+    if not access:
+        return []
+    for pattern in patterns:
+        if _protected_path_match(access["path"], pattern):
+            tool = access["tool"]
+            return [
+                Finding(
+                    identifier=quads.fileaccess_identifier(tool, "user-protected"),
+                    category="fileaccess",
+                    severity="critical",
+                    title="Access to a user-protected path",
+                    tool_name=tool,
+                    matched="user-protected",
+                    evidence=f"{access['mode']} path matching protected pattern {str(pattern)[:120]}",
+                    confirmed=False,
+                    source="custom",
+                    fields={},
+                )
+            ]
+    return []
+
+
 def detect_all(tool_name: str, args: Any, ruleset: Any, discover: bool = True) -> List[Finding]:
     """Run every detector (graph rules + built-in discovery) across categories.
 
-    Graph-only detectors (dependency lookup, curated injection regexes) always
-    run. When *discover* is True the built-in escalation/injection/file-access/
-    skill nomination layer also runs. Dependency OSV auto-discovery is NOT run
-    here — it is best-effort and runs off the blocking path (see :mod:`hooks`).
+    Graph-backed detection (public + community rules) ALWAYS runs for every
+    category. When *discover* is False only the built-in heuristic candidates
+    are suppressed — a curated fileaccess/skill/escalation rule keeps firing.
+    Dependency OSV auto-discovery is NOT run here — it is best-effort and runs
+    off the blocking path (see :mod:`hooks`).
     """
     findings: List[Finding] = []
-    findings.extend(detect_escalation(tool_name, args, ruleset) if discover else _graph_escalation(tool_name, args, ruleset))
+    findings.extend(detect_escalation(tool_name, args, ruleset))
     findings.extend(detect_dependency(tool_name, args, ruleset))
     try:
         args_text = args if isinstance(args, str) else json.dumps(args, ensure_ascii=False, default=str)
@@ -426,12 +540,8 @@ def detect_all(tool_name: str, args: Any, ruleset: Any, discover: bool = True) -
     findings.extend(detect_injection(args_text, ruleset))
     if discover:
         findings.extend(discover_injection(args_text, ruleset))
-        findings.extend(detect_fileaccess(tool_name, args, ruleset))
-        findings.extend(detect_skill(tool_name, args, ruleset))
+    findings.extend(detect_fileaccess(tool_name, args, ruleset))
+    findings.extend(detect_skill(tool_name, args, ruleset))
+    if not discover:
+        findings = [f for f in findings if f.source != "heuristic"]
     return findings
-
-
-def _graph_escalation(tool_name: str, args: Any, ruleset: Any) -> List[Finding]:
-    """Graph-only escalation (drops the discovery candidate) — used when
-    discovery is disabled so escalation still matches curated rules."""
-    return [f for f in detect_escalation(tool_name, args, ruleset) if f.confirmed]

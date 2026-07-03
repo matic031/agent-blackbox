@@ -1,10 +1,22 @@
 /**
  * Graph-synced rule cache.
  *
- * The ruleset is the ONLY source of detection truth. We SPARQL the local DKG
- * node for curated `g:Threat` nodes, normalize them into a `Ruleset`, and cache
- * to a JSON file under the OpenClaw state dir with a TTL. On an empty graph the
- * ruleset is empty and the matcher detects nothing — by design.
+ * The ruleset is the ONLY source of detection truth, merged from two tiers
+ * with strict precedence (mirrors Python `ruleset.py`):
+ *
+ *   - `verifiable-memory` (the curated public threat graph) → rules tagged
+ *     `source: "public"`. The source of truth: matches are CONFIRMED and, in
+ *     block mode, blockable.
+ *   - `shared-working-memory` (the community pool) → rules tagged
+ *     `source: "community"`. Checked only when the public graph doesn't
+ *     already cover the identifier: matches flag but NEVER block — anyone can
+ *     write to the community pool, so it must not be able to stop tool calls.
+ *
+ * Each tier pulls EVERY subject that carries `g:identifier` (no type/curated
+ * filter — matching Python `_THREATS_SPARQL` semantics), normalized into a
+ * `Ruleset` and cached to a JSON file (source tags included) under the
+ * OpenClaw state dir with a TTL. On an empty graph the ruleset is empty and
+ * the matcher detects nothing — by design.
  *
  * Fail-open: if the node is unreachable we keep serving the last cached (or
  * empty) ruleset and try again after the TTL.
@@ -12,12 +24,13 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import { DkgClient, DkgError } from "./dkgClient.js";
+import { DkgClient, DkgError, DkgView } from "./dkgClient.js";
 import {
   DependencyRule,
   EscalationRule,
   FileAccessRule,
   InjectionRule,
+  RuleSource,
   Ruleset,
   SkillRule,
   emptyRuleset,
@@ -25,7 +38,6 @@ import {
 import {
   GUARDIAN_ARG_SHAPE_PRED,
   GUARDIAN_CATEGORY_PRED,
-  GUARDIAN_CURATED_PRED,
   GUARDIAN_DANGER_SHAPE_PRED,
   GUARDIAN_IDENTIFIER_PRED,
   GUARDIAN_OWASP_CATEGORY_PRED,
@@ -36,7 +48,6 @@ import {
   GUARDIAN_SEVERITY_PRED,
   GUARDIAN_SKILL_NAME_PRED,
   GUARDIAN_SKILL_VERSION_PRED,
-  GUARDIAN_THREAT_TYPE_IRI,
   GUARDIAN_TOOL_NAME_PRED,
   SCHEMA_DESCRIPTION,
   SCHEMA_NAME,
@@ -45,15 +56,25 @@ import {
 
 const SCHEMA_ADVISORY = "http://schema.org/identifier";
 
-/** SPARQL that pulls every curated threat's fields as subject/predicate/object rows. */
+/**
+ * SPARQL that pulls every threat-shaped subject's fields as s/p/o rows. Any
+ * subject carrying `g:identifier` qualifies — no `rdf:type`/`g:curated`
+ * filter, matching Python `_THREATS_SPARQL` (the trust tier comes from WHICH
+ * memory view the query ran against, not from per-row flags).
+ */
 function rulesetQuery(): string {
   return `
 SELECT ?s ?p ?o WHERE {
-  ?s <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <${GUARDIAN_THREAT_TYPE_IRI}> .
-  ?s <${GUARDIAN_CURATED_PRED}> "true" .
+  ?s <${GUARDIAN_IDENTIFIER_PRED}> ?identifier .
   ?s ?p ?o .
 }`.trim();
 }
+
+/** Tier sync order: public curated graph first (source of truth), then community. */
+const TIERS: ReadonlyArray<readonly [DkgView, RuleSource]> = [
+  ["verifiable-memory", "public"],
+  ["shared-working-memory", "community"],
+];
 
 export function resolveStateDir(explicit?: string): string {
   if (explicit) return explicit;
@@ -107,7 +128,8 @@ interface ThreatAccum {
   dangerShape?: string;
 }
 
-function normalizeThreats(resp: unknown): Ruleset {
+/** Accumulate the s/p/o rows of one tier's response into per-subject threats. */
+function collectThreats(resp: unknown): ThreatAccum[] {
   const bySubject = new Map<string, ThreatAccum>();
   for (const b of extractBindings(resp)) {
     const s = bindingValue(b.s);
@@ -136,74 +158,142 @@ function normalizeThreats(resp: unknown): Ruleset {
     }
     bySubject.set(s, acc);
   }
+  return [...bySubject.values()];
+}
 
-  const ruleset = emptyRuleset();
-  ruleset.fetchedAt = Date.now();
-  for (const acc of bySubject.values()) {
-    if (!acc.identifier) continue;
-    const severity = normalizeSeverity(acc.severity, "medium");
-    const name = acc.name || acc.identifier;
-    if (acc.identifier.startsWith("injection:") && acc.pattern) {
-      const rule: InjectionRule = {
-        identifier: acc.identifier,
+type MappedRule =
+  | { category: "injection"; key: string; rule: InjectionRule }
+  | { category: "escalation"; key: string; rule: EscalationRule }
+  | { category: "dependency"; key: string; rule: DependencyRule }
+  | { category: "fileaccess"; key: string; rule: FileAccessRule }
+  | { category: "skill"; key: string; rule: SkillRule };
+
+/** Map one accumulated threat to `(category, key, rule)` or null. Port of Python `_row_to_rule`. */
+function accumToRule(acc: ThreatAccum, source: RuleSource): MappedRule | null {
+  if (!acc.identifier) return null;
+  const identifier = acc.identifier;
+  const severity = normalizeSeverity(acc.severity, "high");
+  const name = acc.name || identifier;
+  if (identifier.startsWith("injection:")) {
+    if (!acc.pattern) return null;
+    return {
+      category: "injection",
+      key: identifier,
+      rule: {
+        identifier,
         pattern: acc.pattern,
         severity,
         name,
         owaspCategory: acc.owaspCategory,
-      };
-      ruleset.injection.push(rule);
-    } else if (acc.identifier.startsWith("escalation:") && acc.toolName && acc.argShape) {
-      const rule: EscalationRule = {
-        identifier: acc.identifier,
-        toolName: acc.toolName,
-        argShape: acc.argShape,
+        source,
+      },
+    };
+  }
+  if (identifier.startsWith("escalation:")) {
+    if (!acc.toolName || !acc.argShape) return null;
+    return {
+      category: "escalation",
+      key: identifier,
+      rule: { identifier, toolName: acc.toolName, argShape: acc.argShape, severity, name, source },
+    };
+  }
+  if (identifier.startsWith("dep:")) {
+    let eco = (acc.packageEcosystem || "").toLowerCase();
+    let pkg = (acc.packageName || "").toLowerCase();
+    let ver = acc.packageVersion || "";
+    if (!(eco && pkg && ver)) {
+      // Fall back to parsing the identifier: dep:{eco}:{name}@{version}.
+      // Mirrors Python: rest.split(":", 1) then tail.rsplit("@", 1).
+      const rest = identifier.slice("dep:".length);
+      const ci = rest.indexOf(":");
+      if (ci < 0) return null;
+      const tail = rest.slice(ci + 1);
+      const at = tail.lastIndexOf("@");
+      if (at < 0) return null;
+      eco = rest.slice(0, ci).toLowerCase();
+      pkg = tail.slice(0, at).toLowerCase();
+      ver = tail.slice(at + 1);
+    }
+    return {
+      category: "dependency",
+      key: `${eco}:${pkg}@${ver}`,
+      rule: { identifier, severity, advisoryId: acc.advisoryId, name, source },
+    };
+  }
+  if (identifier.startsWith("fileaccess:")) {
+    // Prefer explicit predicates; fall back to parsing fileaccess:{tool}:{category}.
+    let toolName = acc.toolName;
+    let category = acc.category;
+    if (!toolName || !category) {
+      const parts = identifier.split(":");
+      // ["fileaccess", tool, category] — mirror Python identifier.split(":", 2).
+      if (parts.length >= 3) {
+        toolName = parts[1];
+        category = parts.slice(2).join(":");
+      }
+    }
+    if (!toolName || !category) return null;
+    return {
+      category: "fileaccess",
+      key: identifier,
+      rule: {
+        identifier,
+        toolName: toolName.trim().toLowerCase(),
+        category: category.trim().toLowerCase(),
         severity,
         name,
-      };
-      ruleset.escalation.push(rule);
-    } else if (acc.identifier.startsWith("dep:") && acc.packageName && acc.packageVersion) {
-      const eco = (acc.packageEcosystem || "").toLowerCase();
-      const key = `${eco}:${acc.packageName.toLowerCase()}@${acc.packageVersion}`;
-      const rule: DependencyRule = {
-        identifier: acc.identifier,
-        severity,
-        advisoryId: acc.advisoryId,
-        name,
-      };
-      ruleset.dependency[key] = rule;
-    } else if (acc.identifier.startsWith("fileaccess:")) {
-      // Prefer explicit predicates; fall back to parsing fileaccess:{tool}:{category}.
-      let toolName = acc.toolName;
-      let category = acc.category;
-      if (!toolName || !category) {
-        const parts = acc.identifier.split(":");
-        // ["fileaccess", tool, category] — mirror Python identifier.split(":", 2).
-        if (parts.length >= 3) {
-          toolName = parts[1];
-          category = parts.slice(2).join(":");
-        }
-      }
-      if (toolName && category) {
-        const rule: FileAccessRule = {
-          identifier: acc.identifier,
-          toolName: toolName.trim().toLowerCase(),
-          category: category.trim().toLowerCase(),
-          severity,
-          name,
-        };
-        ruleset.fileaccess.push(rule);
-      }
-    } else if (acc.identifier.startsWith("skill:")) {
-      // Skill rules are built unconditionally (fields optional), like Python.
-      const rule: SkillRule = {
-        identifier: acc.identifier,
+        source,
+      },
+    };
+  }
+  if (identifier.startsWith("skill:")) {
+    // Skill rules are built unconditionally (fields optional), like Python.
+    return {
+      category: "skill",
+      key: identifier,
+      rule: {
+        identifier,
         skillName: acc.skillName ?? "",
         skillVersion: acc.skillVersion ?? "",
         dangerShape: acc.dangerShape ?? "",
         severity,
         name,
-      };
-      ruleset.skill.push(rule);
+        source,
+      },
+    };
+  }
+  return null;
+}
+
+/**
+ * Build one merged `Ruleset` from per-tier threat accumulations, in tier
+ * order (public first). Precedence is identifier-first-wins in every category
+ * INCLUDING the dependency map, so with public processed first a community
+ * row can never shadow (or escalate/downgrade) a curated public rule. Port of
+ * Python `build_from_rows`.
+ */
+function buildRuleset(tiers: ReadonlyArray<readonly [ThreatAccum[], RuleSource]>): Ruleset {
+  const ruleset = emptyRuleset();
+  ruleset.fetchedAt = Date.now();
+  const seen: Record<MappedRule["category"], Set<string>> = {
+    injection: new Set(),
+    escalation: new Set(),
+    dependency: new Set(),
+    fileaccess: new Set(),
+    skill: new Set(),
+  };
+  for (const [accums, source] of tiers) {
+    for (const acc of accums) {
+      const mapped = accumToRule(acc, source);
+      if (!mapped || seen[mapped.category].has(mapped.key)) continue;
+      seen[mapped.category].add(mapped.key);
+      switch (mapped.category) {
+        case "injection": ruleset.injection.push(mapped.rule); break;
+        case "escalation": ruleset.escalation.push(mapped.rule); break;
+        case "dependency": ruleset.dependency[mapped.key] = mapped.rule; break;
+        case "fileaccess": ruleset.fileaccess.push(mapped.rule); break;
+        case "skill": ruleset.skill.push(mapped.rule); break;
+      }
     }
   }
   return ruleset;
@@ -272,20 +362,40 @@ export class RulesetCache {
     return Date.now() - this.ruleset.fetchedAt > this.ttlMs;
   }
 
-  /** Force a synchronous sync from the node. Fail-open (returns current on error). */
+  /**
+   * Force a synchronous sync from the node. Fail-open (returns current on
+   * error). Two queries per sync: verifiable-memory first (rows tagged
+   * `source: "public"`), then shared-working-memory (`source: "community"`);
+   * public wins identifier collisions. If NOTHING comes back (both tiers
+   * empty/unreachable) the last-good ruleset keeps serving. Mirrors Python
+   * `ruleset.refresh`.
+   */
   async sync(): Promise<Ruleset> {
     if (this.refreshing) return this.ruleset;
     this.refreshing = true;
     try {
-      const resp = await this.client.query(rulesetQuery(), this.contextGraphId, "shared-working-memory");
-      const next = normalizeThreats(resp);
-      this.ruleset = next;
-      this.saveToDisk(next);
-    } catch (err) {
-      if (!(err instanceof DkgError)) throw err;
-      // node unreachable — keep serving the last ruleset, bump fetchedAt so we
-      // don't hammer a down node every tool call.
-      this.ruleset = { ...this.ruleset, fetchedAt: Date.now() };
+      const tierAccums: Array<readonly [ThreatAccum[], RuleSource]> = [];
+      let gotAny = false;
+      for (const [view, source] of TIERS) {
+        try {
+          const resp = await this.client.query(rulesetQuery(), this.contextGraphId, view);
+          const accums = collectThreats(resp);
+          if (accums.length > 0) gotAny = true;
+          tierAccums.push([accums, source]);
+        } catch (err) {
+          if (!(err instanceof DkgError)) throw err;
+          // this view unreachable/failed — skip it, keep the other tier.
+        }
+      }
+      if (!gotAny) {
+        // Nothing came back — keep serving the last ruleset, bump fetchedAt so
+        // we don't hammer a down node every tool call.
+        this.ruleset = { ...this.ruleset, fetchedAt: Date.now() };
+      } else {
+        const next = buildRuleset(tierAccums);
+        this.ruleset = next;
+        this.saveToDisk(next);
+      }
     } finally {
       this.refreshing = false;
     }

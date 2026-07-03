@@ -6,7 +6,9 @@ Guardian bug must never break the agent loop):
 * ``pre_tool_call`` — detect, audit, report, and (block mode only) block.
 * ``post_tool_call`` — audit the redacted result.
 * ``pre_api_request`` — scan the prompt/messages for injection (observer only).
-* ``on_session_start`` / ``on_session_end`` — lifecycle audit.
+* ``on_session_start`` / ``on_session_end`` — lifecycle audit; session start also
+  re-runs the attach sweep in the background (throttled) so agents installed
+  after Guardian get protected without a manual ``hermes guardian attach``.
 
 Blocking uses the same contract as ``security-guidance``:
 ``return {"action": "block", "message": ...}`` in block mode, ``None`` otherwise.
@@ -17,7 +19,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, List, Optional
 
-from . import audit, config as config_mod, detection, ruleset
+from . import audit, config as config_mod, constants, detection, ruleset
 from .config import GuardianConfig
 from .dkg_client import DkgClient, DkgError
 
@@ -46,6 +48,32 @@ def guardian_block_message(findings: List[detection.Finding]) -> str:
     return "\n".join(lines)
 
 
+def _flag_worthy(cfg: GuardianConfig, findings: List[detection.Finding]) -> List[detection.Finding]:
+    """Apply the user's detection policy to raw findings.
+
+    Two layers:
+    * Per-category policy (``detection.<category>.{enabled,min_severity}``) —
+      a disabled category never flags; a category floor drops anything below
+      it (e.g. "only critical dependency vulns").
+    * Heuristic gate — built-in discovery candidates additionally need
+      ``report_min_severity``; they are nominations, not confirmed threats.
+
+    User-configured custom rules (``source == "custom"``) bypass the category
+    policy: the user explicitly asked for them.
+    """
+    out: List[detection.Finding] = []
+    for f in findings:
+        if f.source == "custom":
+            out.append(f)
+            continue
+        if not cfg.category_allows(f.category, f.severity):
+            continue
+        if f.source == "heuristic" and not cfg.meets_report_threshold(f.severity):
+            continue
+        out.append(f)
+    return out
+
+
 def _report_and_audit(cfg: GuardianConfig, event: str, findings: List[detection.Finding], detail: Dict[str, Any]) -> None:
     """Audit always; on findings write private audit KA + outbound SWM sighting."""
     finding_dicts = [f.to_dict() for f in findings]
@@ -58,11 +86,21 @@ def _report_and_audit(cfg: GuardianConfig, event: str, findings: List[detection.
     except Exception:
         client = None
     for finding in finding_dicts:
+        # Custom (user-configured) rules are personal: they are audited in the
+        # local JSONL logs above but never leave this machine — no private WM
+        # KA, no community sighting.
+        if finding.get("source") == "custom":
+            continue
+        identifier = str(finding.get("identifier") or "")
+        # Per-threat cooldown: a re-fire of the same identifier within the
+        # window adds no signal — skip both the private KA and the sighting.
+        if audit.recently_reported(identifier):
+            continue
         # Private WM audit KA (observed evidence stays local).
         if client is not None:
             audit.write_private_audit_ka(client, cfg.context_graph_id, event, finding)
         # Outbound SWM sighting (never carries observed prompt/command text).
-        if cfg.report and client is not None and audit.allow_report(cfg.daily_report_limit):
+        if cfg.report and client is not None and audit.allow_report(cfg.daily_report_limit, identifier):
             _share_sighting(client, cfg, finding)
 
 
@@ -144,7 +182,9 @@ def on_pre_tool_call(
         rs = ruleset.get(cfg)
         # Visibility: log every file-access tool call (best-effort).
         _record_file_access(tool_name, args)
-        findings = detection.detect_all(tool_name, args, rs, discover=cfg.discover)
+        raw = detection.detect_all(tool_name, args, rs, discover=cfg.discover)
+        raw += detection.detect_custom_fileaccess(tool_name, args, cfg.protected_paths)
+        findings = _flag_worthy(cfg, raw)
         detail = {
             "tool_name": tool_name,
             "session_id": session_id,
@@ -158,8 +198,12 @@ def on_pre_tool_call(
         if cfg.discover and cfg.osv_lookup:
             _spawn_osv_discovery(cfg, rs, tool_name, args)
         if cfg.block_enabled:
-            # Candidates (heuristic-only) are unconfirmed → never block.
-            blocking = [f for f in findings if f.confirmed and cfg.meets_block_threshold(f.severity)]
+            # Public-graph findings and the user's own custom rules block;
+            # community/heuristic findings only alert.
+            blocking = [
+                f for f in findings
+                if (f.confirmed or f.source == "custom") and cfg.meets_block_threshold(f.severity)
+            ]
             if blocking:
                 return {"action": "block", "message": guardian_block_message(blocking)}
         return None
@@ -188,7 +232,9 @@ def _spawn_osv_discovery(cfg: GuardianConfig, rs: Any, tool_name: str, args: Any
 
     def _run() -> None:
         try:
-            findings = detection.discover_dependency_candidates(tool_name, args, rs, osv.lookup)
+            findings = _flag_worthy(
+                cfg, detection.discover_dependency_candidates(tool_name, args, rs, osv.lookup)
+            )
             if findings:
                 _report_and_audit(cfg, "osv_discovery", findings, {"tool_name": tool_name})
         except Exception as exc:  # pragma: no cover - fail open
@@ -257,6 +303,7 @@ def on_pre_api_request(**kwargs: Any) -> None:
         findings = detection.detect_injection(text, rs)
         if cfg.discover:
             findings = findings + detection.discover_injection(text, rs)
+        findings = _flag_worthy(cfg, findings)
         detail = {
             "session_id": kwargs.get("session_id"),
             "task_id": kwargs.get("task_id"),
@@ -268,9 +315,74 @@ def on_pre_api_request(**kwargs: Any) -> None:
         logger.debug("guardian: pre_api_request failed: %s", exc)
 
 
+_AUTO_ATTACH_INTERVAL_SECS = 24 * 60 * 60
+
+
+def _auto_attach_due() -> bool:
+    """True at most once per interval, tracked in a state file.
+
+    The timestamp is stamped *before* the sweep runs so concurrent session
+    starts don't each fan out their own attach thread. Any error skips the
+    sweep rather than risking the session.
+    """
+    import json
+    import time
+
+    try:
+        path = constants.guardian_home() / "auto_attach.json"
+        now = time.time()
+        try:
+            last = float(json.loads(path.read_text(encoding="utf-8")).get("last_run", 0.0))
+        except Exception:
+            last = 0.0
+        if now - last < _AUTO_ATTACH_INTERVAL_SECS:
+            return False
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"last_run": now}), encoding="utf-8")
+        return True
+    except Exception as exc:
+        logger.debug("guardian: auto-attach throttle failed: %s", exc)
+        return False
+
+
+def _spawn_auto_attach(cfg: GuardianConfig) -> None:
+    """Re-run the attach sweep on a daemon thread (throttled, fail-open).
+
+    Keeps protection current after install: a Hermes home or OpenClaw
+    workspace created *after* Guardian was installed gets attached the next
+    time any protected agent starts a session.
+    """
+    import threading
+
+    if not cfg.auto_attach or not _auto_attach_due():
+        return
+
+    def _run() -> None:
+        try:
+            from . import attach
+
+            report = attach.attach_all()
+            changed = [
+                row.get("target")
+                for group in ("hermes", "openclaw")
+                for row in report.get(group, [])
+                if row.get("changed")
+            ]
+            if changed:
+                audit.record(event="auto_attach", detail={"targets": changed})
+        except Exception as exc:  # pragma: no cover - fail open
+            logger.debug("guardian: auto-attach failed: %s", exc)
+
+    try:
+        threading.Thread(target=_run, name="guardian-auto-attach", daemon=True).start()
+    except Exception:  # pragma: no cover - fail open
+        pass
+
+
 def on_session_start(session_id: str = "", **kwargs: Any) -> None:
     try:
         audit.record(event="session_start", detail={"session_id": session_id})
+        _spawn_auto_attach(_config())
     except Exception as exc:  # pragma: no cover - fail open
         logger.debug("guardian: on_session_start failed: %s", exc)
 

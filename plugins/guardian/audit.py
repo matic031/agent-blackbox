@@ -150,8 +150,11 @@ def read_findings(limit: int = 100, offset: int = 0) -> List[Dict[str, Any]]:
             "category": finding.get("category"),
             "severity": finding.get("severity"),
             "title": finding.get("title"),
+            "framework": finding.get("framework") or "hermes",
             "tool_name": finding.get("tool_name") or (rec.get("detail") or {}).get("tool_name"),
             "evidence": finding.get("evidence") or finding.get("title"),
+            "confirmed": bool(finding.get("confirmed", True)),
+            "source": finding.get("source") or ("public" if finding.get("confirmed", True) else "heuristic"),
         })
     return out[offset : offset + limit]
 
@@ -208,10 +211,12 @@ def _finding_summary(finding: Dict[str, Any]) -> Dict[str, Any]:
         "category": finding.get("category"),
         "severity": finding.get("severity"),
         "title": finding.get("title"),
+        "framework": finding.get("framework") or "hermes",
         "tool_name": finding.get("tool_name"),
         "evidence": sanitize_text(str(finding.get("evidence") or ""), 700),
         "confirmed": bool(finding.get("confirmed", True)),
         "candidate": bool(finding.get("candidate", not finding.get("confirmed", True))),
+        "source": str(finding.get("source") or ("public" if finding.get("confirmed", True) else "heuristic")),
         "ts": time.time(),
     }
 
@@ -298,30 +303,73 @@ def _rate_state_path() -> Path:
     return _home() / "report_rate.json"
 
 
-def allow_report(daily_limit: int) -> bool:
+#: Re-reporting the same identifier within this window adds no signal (the
+#: sighting KA name is stable per identifier+reporter, so a re-share only
+#: refreshes dateModified) — skip it to keep findings/reports low-noise.
+REPORT_COOLDOWN_SECS = 6 * 3600
+
+
+def _read_rate_state() -> Dict[str, Any]:
+    path = _rate_state_path()
+    if not path.exists():
+        return {}
+    try:
+        state = json.loads(path.read_text(encoding="utf-8"))
+        return state if isinstance(state, dict) else {}
+    except Exception:
+        return {}
+
+
+def recently_reported(identifier: str, cooldown: int = REPORT_COOLDOWN_SECS) -> bool:
+    """True when *identifier* was reported within the last *cooldown* seconds.
+
+    Fail-open: any state error reads as "not recently reported".
+    """
+    if not identifier:
+        return False
+    try:
+        stamps = _read_rate_state().get("reported") or {}
+        ts = float(stamps.get(identifier, 0))
+        return (time.time() - ts) < max(1, cooldown)
+    except Exception:  # pragma: no cover - fail open
+        return False
+
+
+def allow_report(daily_limit: int, identifier: str = "") -> bool:
     """Return True if another outbound SWM report is within today's cap.
 
-    Increments a small date-keyed counter in ``report_rate.json``. Fail-open:
-    if the state file cannot be read/written, allow the report.
+    Increments a small date-keyed counter in ``report_rate.json``. When an
+    *identifier* is given, the report is also skipped if that identifier was
+    already reported within :data:`REPORT_COOLDOWN_SECS` (per-threat dedup),
+    and a fresh timestamp is stamped on success. Fail-open: if the state file
+    cannot be read/written, allow the report.
     """
-    if daily_limit <= 0:
-        return True
     today = time.strftime("%Y-%m-%d", time.gmtime())
     path = _rate_state_path()
     try:
         with _lock:
-            state = {}
-            if path.exists():
-                try:
-                    state = json.loads(path.read_text(encoding="utf-8"))
-                except Exception:
-                    state = {}
+            state = _read_rate_state()
+            stamps = state.get("reported")
+            stamps = dict(stamps) if isinstance(stamps, dict) else {}
+            now = time.time()
+            if identifier:
+                ts = float(stamps.get(identifier, 0) or 0)
+                if (now - ts) < REPORT_COOLDOWN_SECS:
+                    logger.debug("guardian: report cooldown active for %s", identifier)
+                    return False
             if state.get("date") != today:
                 state = {"date": today, "count": 0}
-            if int(state.get("count", 0)) >= daily_limit:
+            if daily_limit > 0 and int(state.get("count", 0)) >= daily_limit:
                 logger.debug("guardian: daily report limit %s reached", daily_limit)
                 return False
             state["count"] = int(state.get("count", 0)) + 1
+            if identifier:
+                stamps[identifier] = now
+            # Prune expired stamps so the state file stays small.
+            state["reported"] = {
+                k: v for k, v in stamps.items()
+                if isinstance(v, (int, float)) and (now - v) < REPORT_COOLDOWN_SECS
+            }
             path.write_text(json.dumps(state), encoding="utf-8")
             return True
     except Exception as exc:  # pragma: no cover - fail open

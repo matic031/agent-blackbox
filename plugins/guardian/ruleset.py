@@ -1,13 +1,21 @@
 """Graph-synced rule cache.
 
-The :class:`Ruleset` is built entirely from DKG query results — curated threats
-from the public CG (``verifiable-memory`` view) merged with the node's local
-graph (``shared-working-memory`` view). It is cached to
-``$GUARDIAN_HOME/ruleset.json`` and refreshed lazily: :func:`get` returns the
-cached ruleset immediately and, if the cache is older than ``sync_interval``,
-kicks off a single non-blocking background refresh (guarded by a file lock so
-only one refresher runs across processes). Every path fails open to the
-last-good (or empty) ruleset.
+The :class:`Ruleset` is built entirely from DKG query results, merged from two
+tiers with strict precedence:
+
+* ``verifiable-memory`` (the curated public threat graph) → rules tagged
+  ``source: "public"``. The source of truth: matches are CONFIRMED and, in
+  block mode, blockable.
+* ``shared-working-memory`` (the community pool) → rules tagged
+  ``source: "community"``. Checked only when the public graph doesn't already
+  cover the identifier: matches are flagged but NEVER block — anyone can write
+  to the community pool, so it must not be able to stop tool calls.
+
+It is cached to ``$GUARDIAN_HOME/ruleset.json`` and refreshed lazily:
+:func:`get` returns the cached ruleset immediately and, if the cache is older
+than ``sync_interval``, kicks off a single non-blocking background refresh
+(guarded by a file lock so only one refresher runs across processes). Every
+path fails open to the last-good (or empty) ruleset.
 """
 
 from __future__ import annotations
@@ -81,8 +89,12 @@ class Ruleset:
 # ---------------------------------------------------------------------------
 
 
-def _row_to_rule(row: Dict[str, Any]) -> Optional[tuple]:
-    """Map one SPARQL binding row to ``(category, key, rule)`` or ``None``."""
+def _row_to_rule(row: Dict[str, Any], source: str = "public") -> Optional[tuple]:
+    """Map one SPARQL binding row to ``(category, key, rule)`` or ``None``.
+
+    *source* tags the rule's trust tier: ``"public"`` (verifiable-memory, the
+    curated source of truth) or ``"community"`` (shared-working-memory).
+    """
     identifier = extract_binding(row.get("identifier"))
     if not identifier:
         return None
@@ -103,6 +115,7 @@ def _row_to_rule(row: Dict[str, Any]) -> Optional[tuple]:
             "pattern_src": pattern_src,
             "severity": severity,
             "name": name,
+            "source": source,
         })
     if identifier.startswith("escalation:"):
         tool_name = extract_binding(row.get("toolName"))
@@ -115,6 +128,7 @@ def _row_to_rule(row: Dict[str, Any]) -> Optional[tuple]:
             "argShape": arg_shape,
             "severity": severity,
             "name": name,
+            "source": source,
         })
     if identifier.startswith("dep:"):
         eco = extract_binding(row.get("packageEcosystem")).lower()
@@ -138,6 +152,7 @@ def _row_to_rule(row: Dict[str, Any]) -> Optional[tuple]:
             "advisoryId": extract_binding(row.get("advisoryId")),
             "severity": severity,
             "name": name,
+            "source": source,
         })
     if identifier.startswith("fileaccess:"):
         tool_name = extract_binding(row.get("toolName"))
@@ -154,6 +169,7 @@ def _row_to_rule(row: Dict[str, Any]) -> Optional[tuple]:
             "category": category.strip().lower(),
             "severity": severity,
             "name": name,
+            "source": source,
         })
     if identifier.startswith("skill:"):
         rule = {
@@ -163,20 +179,31 @@ def _row_to_rule(row: Dict[str, Any]) -> Optional[tuple]:
             "dangerShape": extract_binding(row.get("dangerShape")),
             "severity": severity,
             "name": name,
+            "source": source,
         }
         return ("skill", identifier, rule)
     return None
 
 
-def build_from_rows(rows: List[Dict[str, Any]]) -> Ruleset:
-    """Build a :class:`Ruleset` from merged query binding rows."""
+def build_from_rows(rows: List[Dict[str, Any]], source: str = "public") -> Ruleset:
+    """Build a :class:`Ruleset` from ``(rows, source)`` pairs or plain rows.
+
+    *rows* may be a flat list of binding rows (all tagged *source*) or a list
+    of ``(row, source)`` tuples as produced by :func:`refresh`. Precedence is
+    identifier-first-wins with public beating community, so a community row can
+    never shadow (or escalate/downgrade) a curated public rule.
+    """
     rs = Ruleset(synced_at=time.time())
     inj_seen: set = set()
     esc_seen: set = set()
     fa_seen: set = set()
     skill_seen: set = set()
-    for row in rows:
-        mapped = _row_to_rule(row)
+    for item in rows:
+        if isinstance(item, tuple):
+            row, row_source = item
+        else:
+            row, row_source = item, source
+        mapped = _row_to_rule(row, row_source)
         if not mapped:
             continue
         category, key, rule = mapped
@@ -197,7 +224,12 @@ def build_from_rows(rows: List[Dict[str, Any]]) -> Ruleset:
                 skill_seen.add(key)
                 rs.skill.append(rule)
         else:
-            rs.dependency[key] = rule
+            existing = rs.dependency.get(key)
+            # Public (curated) rules always win over community rows.
+            if existing is None or (
+                existing.get("source") == "community" and rule.get("source") == "public"
+            ):
+                rs.dependency[key] = rule
     return rs
 
 
@@ -286,14 +318,19 @@ def refresh(config: Optional[GuardianConfig] = None, client: Optional[DkgClient]
     global _memory_cache
     config = config or load_guardian_config()
     client = client or DkgClient(url=config.dkg_url)
-    rows: List[Dict[str, Any]] = []
+    rows: List[Any] = []
     got_any = False
-    for view in (constants.VIEW_VERIFIABLE_MEMORY, constants.VIEW_SHARED_WORKING_MEMORY):
+    # Public curated graph first (source of truth), then the community pool.
+    tiers = (
+        (constants.VIEW_VERIFIABLE_MEMORY, "public"),
+        (constants.VIEW_SHARED_WORKING_MEMORY, "community"),
+    )
+    for view, tier in tiers:
         try:
             view_rows = client.query(_THREATS_SPARQL, config.context_graph_id, view=view)
             if view_rows:
                 got_any = True
-                rows.extend(view_rows)
+                rows.extend((row, tier) for row in view_rows)
         except Exception as exc:  # pragma: no cover - fail open
             logger.debug("guardian: ruleset query (%s) failed: %s", view, exc)
     if not got_any and not rows:

@@ -155,3 +155,6 @@ wallets.json
 dkg.json
 
 testing.md
+
+# Accidental literal-tilde dir (unexpanded HERMES_HOME=~/... from a subprocess)
+/~/

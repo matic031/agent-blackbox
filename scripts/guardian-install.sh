@@ -8,7 +8,7 @@
 # sensible config defaults — so onboarding is one command and dead simple.
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/umanitek/agent-guardian/main/scripts/guardian-install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/matic031/agent-guardian/feat/guardian/scripts/guardian-install.sh | bash
 #   # or, from a clone:
 #   ./scripts/guardian-install.sh [--help]
 #
@@ -20,8 +20,8 @@
 set -euo pipefail
 
 # ── Configuration (override via env) ────────────────────────────────────────
-REPO_URL="${GUARDIAN_REPO_URL:-https://github.com/umanitek/agent-guardian.git}"
-REPO_BRANCH="${GUARDIAN_REPO_BRANCH:-main}"
+REPO_URL="${GUARDIAN_REPO_URL:-https://github.com/matic031/agent-guardian.git}"
+REPO_BRANCH="${GUARDIAN_REPO_BRANCH:-feat/guardian}"
 HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
 DKG_NETWORK="${GUARDIAN_DKG_NETWORK:-testnet}"   # ALWAYS testnet (mainnet default is an unfunded trap)
 NODE_MAJOR="${GUARDIAN_NODE_MAJOR:-22}"
@@ -396,7 +396,8 @@ defaults = {
     "dkg_url": "http://127.0.0.1:9200",
     "sync_interval": 300,
     "report": True,
-    "daily_report_limit": 500,
+    "daily_report_limit": 9999,
+    "report_min_severity": "high",
     "block_severity": "critical",
     "dashboard_port": 9700,
 }

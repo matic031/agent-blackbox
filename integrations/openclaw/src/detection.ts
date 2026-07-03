@@ -3,8 +3,12 @@
  * `plugins/guardian/quads.py` (arg-shape + dependency parsing) and
  * `plugins/guardian/detection.py` (the matchers).
  *
- * Detection rules come ONLY from the synced threat graph (see ruleset.ts).
- * On an empty graph the matcher detects nothing until synced — by design.
+ * Detection rules come ONLY from the synced threat graph (see ruleset.ts), in
+ * two trust tiers: `source: "public"` (verifiable-memory, the curated source of
+ * truth — matches are CONFIRMED and blockable) and `source: "community"` (the
+ * shared community pool — matches are flagged but can never block). Built-in
+ * heuristics only *nominate* candidates (`source: "heuristic"`). On an empty
+ * graph the matcher detects nothing until synced — by design.
  *
  * Three pure detectors:
  *   - detectInjection(text, ruleset)         — cached regex over text
@@ -16,6 +20,8 @@
  * shapes stay consistent. It returns the SINGLE top-priority shape (or null),
  * exactly like Python's `normalize_arg_shape`.
  */
+import os from "node:os";
+import path from "node:path";
 import {
   GuardianSeverity,
   escalationIdentifier,
@@ -33,6 +39,33 @@ export type ThreatCategory =
   | "fileaccess"
   | "skill";
 
+/**
+ * Trust tier a graph rule came from. `"public"` = verifiable-memory (the
+ * curated Umanitek public threat graph — the source of truth, blockable);
+ * `"community"` = shared-working-memory (the community pool anyone can write
+ * to — flag-only, never blocks). Mirrors Python ruleset `source` tagging.
+ */
+export type RuleSource = "public" | "community";
+
+/**
+ * Trust tier a finding was raised at: a graph tier (`RuleSource`),
+ * `"heuristic"` for built-in discovery candidates, or `"custom"` for a
+ * user-configured local rule (e.g. a protected path). A `"custom"` finding
+ * always flags, blocks in block mode, and is NEVER shared to the community
+ * graph. Mirrors Python `Finding.source`.
+ */
+export type FindingSource = RuleSource | "heuristic" | "custom";
+
+/**
+ * Trust tier of a graph rule. Untagged rules default to `public` — rules
+ * cached before tier tagging (or handed in directly by tests) were always
+ * treated as curated. Mirrors Python `_rule_source`.
+ */
+export function ruleSource(rule: { source?: string }): RuleSource {
+  const src = String(rule.source ?? "public").toLowerCase();
+  return src === "community" ? "community" : "public";
+}
+
 // --- Ruleset shape ---------------------------------------------------------
 export interface InjectionRule {
   identifier: string;
@@ -40,6 +73,8 @@ export interface InjectionRule {
   severity: GuardianSeverity;
   name: string;
   owaspCategory?: string;
+  /** Trust tier (absent = public, for pre-tier caches). */
+  source?: RuleSource;
 }
 export interface EscalationRule {
   identifier: string;
@@ -47,12 +82,14 @@ export interface EscalationRule {
   argShape: string;
   severity: GuardianSeverity;
   name: string;
+  source?: RuleSource;
 }
 export interface DependencyRule {
   identifier: string;
   severity: GuardianSeverity;
   advisoryId?: string;
   name: string;
+  source?: RuleSource;
 }
 export interface FileAccessRule {
   identifier: string;
@@ -60,6 +97,7 @@ export interface FileAccessRule {
   category: string; // lowercased for comparison
   severity: GuardianSeverity;
   name: string;
+  source?: RuleSource;
 }
 export interface SkillRule {
   identifier: string;
@@ -68,6 +106,7 @@ export interface SkillRule {
   dangerShape: string;
   severity: GuardianSeverity;
   name: string;
+  source?: RuleSource;
 }
 export interface Ruleset {
   injection: InjectionRule[];
@@ -120,11 +159,24 @@ export interface Finding {
   matched: string; // rule name / matched pattern source (not observed content)
   evidence: string; // redacted snippet
   /**
-   * True when the finding matched a curated GRAPH rule (blockable). False when
-   * raised only by a built-in discovery heuristic (a candidate nominated to the
-   * community graph). Mirrors Python `Finding.confirmed`.
+   * True ONLY when the finding matched the curated PUBLIC threat graph
+   * (`source === "public"`) — the strict "public graph says so" bit; only
+   * confirmed findings can block. Community and heuristic findings are never
+   * confirmed. Mirrors Python `Finding.confirmed`.
    */
   confirmed: boolean;
+  /**
+   * Which trust tier raised the finding:
+   *   - `"public"`    — curated public graph match (confirmed, blockable).
+   *   - `"community"` — community-pool match (flagged + re-reported to
+   *                     strengthen consensus, but NEVER blocks).
+   *   - `"heuristic"` — built-in discovery candidate nominated to the
+   *                     community graph.
+   *   - `"custom"`    — user-configured local rule (protected path). Always
+   *                     flags, blocks in block mode, NEVER shared to SWM.
+   * Mirrors Python `Finding.source`.
+   */
+  source: FindingSource;
   /** Privacy-safe candidate threat fields (see `FindingFields`). */
   fields: FindingFields;
 }
@@ -162,6 +214,7 @@ export function detectInjection(text: string, ruleset: Ruleset): Finding[] {
     try {
       if (re.test(capped)) {
         seen.add(rule.identifier);
+        const src = ruleSource(rule);
         out.push({
           identifier: rule.identifier,
           category: "injection",
@@ -170,8 +223,11 @@ export function detectInjection(text: string, ruleset: Ruleset): Finding[] {
           toolName: null,
           matched: rule.pattern,
           evidence: sampleAround(capped, re),
-          confirmed: true,
-          fields: {},
+          confirmed: src === "public",
+          source: src,
+          // Community matches carry the promotion fields so our sighting
+          // strengthens the curation signal. Mirrors Python detect_injection.
+          fields: src === "community" ? { pattern: rule.pattern } : {},
         });
       }
     } catch {
@@ -200,6 +256,7 @@ export function detectEscalation(
     if (rule.toolName.trim().toLowerCase() !== tool) continue;
     if (rule.argShape.trim() !== shape) continue;
     seen.add(rule.identifier);
+    const src = ruleSource(rule);
     out.push({
       identifier: rule.identifier,
       category: "escalation",
@@ -208,8 +265,9 @@ export function detectEscalation(
       toolName: toolName || "",
       matched: shape,
       evidence: shape,
-      confirmed: true,
-      fields: {},
+      confirmed: src === "public",
+      source: src,
+      fields: src === "community" ? { toolName: tool, argShape: shape } : {},
     });
   }
   // Discovery layer: a dangerous shape that no graph rule covers is still a
@@ -224,6 +282,7 @@ export function detectEscalation(
       matched: shape,
       evidence: shape,
       confirmed: false,
+      source: "heuristic",
       fields: { toolName: tool, argShape: shape },
     });
   }
@@ -270,6 +329,7 @@ export function detectDependency(
     const rule = dependencyRules[key];
     if (!rule || seen.has(key)) continue;
     seen.add(key);
+    const src = ruleSource(rule);
     out.push({
       identifier: rule.identifier || dependencyIdentifier(eco, name, dep.version),
       category: "dependency",
@@ -280,8 +340,17 @@ export function detectDependency(
       evidence: rule.advisoryId
         ? `${dep.ecosystem}:${dep.name}@${dep.version} (${rule.advisoryId})`
         : `${dep.ecosystem}:${dep.name}@${dep.version}`,
-      confirmed: true,
-      fields: {},
+      confirmed: src === "public",
+      source: src,
+      fields:
+        src === "community"
+          ? {
+              ecosystem: eco,
+              packageName: name,
+              packageVersion: dep.version,
+              advisoryId: rule.advisoryId,
+            }
+          : {},
     });
   }
   return out;
@@ -450,6 +519,7 @@ export function discoverInjection(text: string, ruleset: Ruleset): Finding[] {
       matched: hit.pattern,
       evidence: hit.pattern,
       confirmed: false,
+      source: "heuristic",
       fields: { pattern: hit.pattern, owaspCategory: hit.owasp },
     });
   }
@@ -574,14 +644,14 @@ export function detectFileaccess(toolName: string, args: unknown, ruleset: Rules
   const category = hit.category;
   let identifier = fileaccessIdentifierFor(tool, category);
   let severity: GuardianSeverity = hit.severity;
-  let confirmed = false;
+  let source: FindingSource = "heuristic";
   let name: string | undefined;
   for (const rule of ruleset.fileaccess ?? []) {
     if (
       String(rule.toolName || "").toLowerCase() === tool &&
       String(rule.category || "").toLowerCase() === category
     ) {
-      confirmed = true;
+      source = ruleSource(rule);
       severity = rule.severity ?? severity;
       name = rule.name;
       identifier = rule.identifier || identifier;
@@ -597,7 +667,8 @@ export function detectFileaccess(toolName: string, args: unknown, ruleset: Rules
       toolName: tool,
       matched: category,
       evidence: `${access.mode} ${category}`,
-      confirmed,
+      confirmed: source === "public",
+      source,
       fields: { toolName: tool, fileCategory: category },
     },
   ];
@@ -769,6 +840,7 @@ export function detectSkill(toolName: string, args: unknown, ruleset: Ruleset): 
       const ident = rule.identifier || skillVersionIdentifierFor(name, version);
       if (seen.has(ident)) continue;
       seen.add(ident);
+      const src = ruleSource(rule);
       out.push({
         identifier: ident,
         category: "skill",
@@ -779,7 +851,8 @@ export function detectSkill(toolName: string, args: unknown, ruleset: Ruleset): 
         toolName: (toolName || "").toLowerCase(),
         matched: name,
         evidence: `known-bad skill ${name}`,
-        confirmed: true,
+        confirmed: src === "public",
+        source: src,
         fields: { skillName: name, skillVersion: version },
       });
     }
@@ -799,6 +872,7 @@ export function detectSkill(toolName: string, args: unknown, ruleset: Ruleset): 
       matched: shape,
       evidence: `skill ${name}: ${shape}`,
       confirmed: false,
+      source: "heuristic",
       fields: { skillName: name, skillVersion: version, dangerShape: shape },
     });
   }
@@ -1064,6 +1138,7 @@ export async function discoverDependencyCandidates(
       matched: key,
       evidence: `${eco}:${name}@${version} (${hit.advisoryId})`,
       confirmed: false,
+      source: "heuristic",
       fields: {
         ecosystem: eco,
         packageName: name,
@@ -1076,16 +1151,153 @@ export async function discoverDependencyCandidates(
 }
 
 // ---------------------------------------------------------------------------
+// Custom (user-configured) protected-path detection
+// Port of detection.py `_protected_path_match` / `detect_custom_fileaccess`.
+// ---------------------------------------------------------------------------
+
+/**
+ * Expand a leading `~` / `~/` to the user's home directory, mirroring Python's
+ * `os.path.expanduser` for the common cases Guardian sees (`~`, `~/foo`). A
+ * bare `~user` form is left untouched (Python would resolve it, but Guardian's
+ * patterns and paths never use it).
+ */
+function expandUser(p: string): string {
+  if (p === "~") return os.homedir();
+  if (p.startsWith("~/") || p.startsWith("~\\")) return path.join(os.homedir(), p.slice(2));
+  return p;
+}
+
+/**
+ * Faithful port of Python's `fnmatch.translate`: build an anchored regex that
+ * matches the WHOLE string. `*` → `.*` (matches path separators too, exactly
+ * like Python `fnmatch`), `?` → `.`, `[seq]`/`[!seq]` → char class. Everything
+ * else is escaped literally. Case-insensitive on platforms where Python's
+ * `fnmatch` normalizes case (Windows); case-sensitive elsewhere — matched here
+ * by `os.platform()`.
+ */
+function fnmatchToRegExp(pattern: string): RegExp {
+  let re = "";
+  let i = 0;
+  const n = pattern.length;
+  while (i < n) {
+    const c = pattern[i];
+    i += 1;
+    if (c === "*") {
+      re += ".*";
+    } else if (c === "?") {
+      re += ".";
+    } else if (c === "[") {
+      let j = i;
+      if (j < n && (pattern[j] === "!" || pattern[j] === "]")) j += 1;
+      while (j < n && pattern[j] !== "]") j += 1;
+      if (j >= n) {
+        // No closing bracket — treat '[' as a literal (Python behavior).
+        re += "\\[";
+      } else {
+        let stuff = pattern.slice(i, j);
+        // Escape backslashes inside the class; leading '!' → '^' negation.
+        stuff = stuff.replace(/\\/g, "\\\\");
+        i = j + 1;
+        if (stuff.startsWith("!")) stuff = "^" + stuff.slice(1);
+        else if (stuff.startsWith("^")) stuff = "\\" + stuff;
+        re += "[" + stuff + "]";
+      }
+    } else {
+      re += c.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    }
+  }
+  // Anchor to the whole string, like fnmatch (translate wraps in (?s:...)\Z).
+  const flags = os.platform() === "win32" ? "is" : "s";
+  return new RegExp(`^(?:${re})$`, flags);
+}
+
+function fnmatch(name: string, pattern: string): boolean {
+  try {
+    return fnmatchToRegExp(pattern).test(name);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * True when `p` matches a user's protected-path `pattern`. Matched three ways so
+ * plain paths, directories, and globs all behave intuitively: glob on the full
+ * expanded path, glob on the basename (`*.pem`), and directory-prefix when the
+ * pattern is glob-free (`~/secrets` protects everything under it). Both sides
+ * are `~`-expanded and normalized. Port of Python `_protected_path_match`.
+ */
+export function protectedPathMatch(p: string, pattern: string): boolean {
+  try {
+    const normPath = path.normalize(expandUser(String(p ?? "")));
+    const normPat = path.normalize(expandUser(String(pattern ?? "")));
+    if (!normPath || !normPat) return false;
+    if (fnmatch(normPath, normPat)) return true;
+    if (fnmatch(path.basename(normPath), normPat)) return true;
+    // Directory-prefix semantics for glob-free patterns.
+    if (
+      !/[*?[]/.test(normPat) &&
+      (normPath === normPat ||
+        normPath.startsWith(normPat.replace(/[/\\]+$/, "") + path.sep))
+    ) {
+      return true;
+    }
+  } catch {
+    return false; // fail open
+  }
+  return false;
+}
+
+/**
+ * Match file-access tool calls against the USER'S protected-path list. These are
+ * personal, locally-configured rules (`source: "custom"`): they always flag,
+ * they block in block mode (the user wrote the rule), and they are NEVER
+ * reported to the community graph — the matched pattern is the user's own
+ * configuration, not shared threat intel. Port of Python
+ * `detect_custom_fileaccess`.
+ */
+export function detectCustomFileAccess(
+  toolName: string,
+  args: unknown,
+  protectedPaths: Iterable<string>,
+): Finding[] {
+  const patterns = [...(protectedPaths ?? [])].filter((p) => String(p ?? "").trim());
+  if (patterns.length === 0) return [];
+  const access = fileAccessArg(toolName, args);
+  if (!access) return [];
+  for (const pattern of patterns) {
+    if (protectedPathMatch(access.path, pattern)) {
+      const tool = access.tool;
+      return [
+        {
+          identifier: fileaccessIdentifierFor(tool, "user-protected"),
+          category: "fileaccess",
+          severity: "critical",
+          title: "Access to a user-protected path",
+          toolName: tool,
+          matched: "user-protected",
+          evidence: `${access.mode} path matching protected pattern ${String(pattern).slice(0, 120)}`,
+          confirmed: false,
+          source: "custom",
+          fields: {},
+        },
+      ];
+    }
+  }
+  return [];
+}
+
+// ---------------------------------------------------------------------------
 // Orchestrator — port of detection.py `detect_all` / `_graph_escalation`.
 // ---------------------------------------------------------------------------
 
 /**
  * Run every detector (graph rules + built-in discovery) across categories.
- * Graph-only detectors (dependency lookup, curated injection regexes) always
- * run. When `discover` is true the built-in escalation/injection/file-access/
- * skill nomination layer also runs. Dependency OSV auto-discovery is NOT run
- * here — it is best-effort and runs off the blocking path (see index.ts).
- * Port of Python `detect_all`.
+ *
+ * Graph-backed detection (public + community rules) ALWAYS runs for every
+ * category. When `discover` is false only the built-in heuristic candidates
+ * are suppressed — a curated fileaccess/skill/escalation rule keeps firing.
+ * Dependency OSV auto-discovery is NOT run here — it is best-effort and runs
+ * off the blocking path (see index.ts). Port of Python `detect_all`.
  */
 export function detectAll(
   toolName: string,
@@ -1094,11 +1306,7 @@ export function detectAll(
   discover = true,
 ): Finding[] {
   const findings: Finding[] = [];
-  findings.push(
-    ...(discover
-      ? detectEscalation(toolName, args, ruleset)
-      : detectEscalation(toolName, args, ruleset).filter((f) => f.confirmed)),
-  );
+  findings.push(...detectEscalation(toolName, args, ruleset));
   findings.push(...detectDependency(toolName, args, ruleset));
   let argsText: string;
   try {
@@ -1110,8 +1318,8 @@ export function detectAll(
   findings.push(...detectInjection(argsText, ruleset));
   if (discover) {
     findings.push(...discoverInjection(argsText, ruleset));
-    findings.push(...detectFileaccess(toolName, args, ruleset));
-    findings.push(...detectSkill(toolName, args, ruleset));
   }
-  return findings;
+  findings.push(...detectFileaccess(toolName, args, ruleset));
+  findings.push(...detectSkill(toolName, args, ruleset));
+  return discover ? findings : findings.filter((f) => f.source !== "heuristic");
 }

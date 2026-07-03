@@ -10,6 +10,8 @@ from _guardian_loader import load_guardian
 
 attach = load_guardian("attach")
 constants = load_guardian("constants")
+hooks = load_guardian("hooks")
+config_mod = load_guardian("config")
 
 
 # ---------------------------------------------------------------------------
@@ -242,3 +244,53 @@ def test_attach_all_reports_targets(fake_env):
     assert report["count"] >= 2  # at least default home + openclaw ws
     assert all(row["ok"] for row in report["hermes"])
     assert all(row["ok"] for row in report["openclaw"])
+
+
+# ---------------------------------------------------------------------------
+# Session-start auto-attach (hooks) — keeps later-installed agents protected
+# ---------------------------------------------------------------------------
+
+
+def test_auto_attach_due_stamps_and_throttles(tmp_path, monkeypatch):
+    monkeypatch.setenv("GUARDIAN_HOME", str(tmp_path / "ghome"))
+    assert hooks._auto_attach_due() is True
+    assert hooks._auto_attach_due() is False  # inside the interval
+
+
+def test_session_start_spawns_attach_sweep_once(tmp_path, monkeypatch):
+    import threading
+
+    monkeypatch.setenv("GUARDIAN_HOME", str(tmp_path / "ghome"))
+    ran = threading.Event()
+    monkeypatch.setattr(
+        attach, "attach_all", lambda **kw: (ran.set(), {"hermes": [], "openclaw": []})[1]
+    )
+    monkeypatch.setattr(hooks, "_config", lambda: config_mod.GuardianConfig())
+
+    hooks.on_session_start(session_id="s1")
+    assert ran.wait(5), "auto-attach sweep did not run"
+
+    ran.clear()
+    hooks.on_session_start(session_id="s2")  # throttled — same interval
+    assert not ran.wait(0.5)
+
+
+def test_auto_attach_disabled_via_config(tmp_path, monkeypatch):
+    import threading
+
+    monkeypatch.setenv("GUARDIAN_HOME", str(tmp_path / "ghome"))
+    ran = threading.Event()
+    monkeypatch.setattr(attach, "attach_all", lambda **kw: ran.set())
+    monkeypatch.setattr(hooks, "_config", lambda: config_mod.GuardianConfig(auto_attach=False))
+
+    hooks.on_session_start(session_id="s1")
+    assert not ran.wait(0.5)
+    # Disabled runs must not stamp the throttle file either.
+    assert not (tmp_path / "ghome" / "auto_attach.json").exists()
+
+
+def test_auto_attach_env_override(monkeypatch):
+    monkeypatch.setenv("GUARDIAN_AUTO_ATTACH", "0")
+    assert config_mod.load_guardian_config().auto_attach is False
+    monkeypatch.setenv("GUARDIAN_AUTO_ATTACH", "1")
+    assert config_mod.load_guardian_config().auto_attach is True

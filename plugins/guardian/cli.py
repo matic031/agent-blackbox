@@ -54,15 +54,22 @@ def setup_cli(parser: argparse.ArgumentParser) -> None:
     detach_p.set_defaults(func=_cmd_detach)
 
     report = sub.add_parser("report", help="Submit a NEW candidate threat to the community graph (SWM)")
-    report.add_argument("--type", required=True, choices=["injection", "escalation", "dependency"])
+    report.add_argument(
+        "--type", required=True,
+        choices=["injection", "escalation", "dependency", "fileaccess", "skill"],
+    )
     report.add_argument("--pattern", help="injection: regex source")
     report.add_argument("--owasp", help="injection: OWASP category (e.g. LLM01)")
-    report.add_argument("--tool", help="escalation: tool name")
+    report.add_argument("--tool", help="escalation/fileaccess: tool name")
     report.add_argument("--arg-shape", dest="arg_shape", help="escalation: arg shape slug")
     report.add_argument("--ecosystem", help="dependency: ecosystem (npm/pypi/...)")
     report.add_argument("--name", help="dependency: package name (or threat display name)")
     report.add_argument("--version", help="dependency: package version")
     report.add_argument("--advisory-id", dest="advisory_id", help="dependency: advisory id")
+    report.add_argument("--category", help="fileaccess: sensitive-path category (e.g. ssh-private-key)")
+    report.add_argument("--skill-name", dest="skill_name", help="skill: skill name")
+    report.add_argument("--skill-version", dest="skill_version", help="skill: known-bad version")
+    report.add_argument("--danger-shape", dest="danger_shape", help="skill: danger shape slug (e.g. shell-exec)")
     report.add_argument("--severity", default="high", choices=list(constants.SEVERITY_ORDER))
     report.add_argument("--description", default="", help="Human-readable description")
     report.set_defaults(func=_cmd_report)
@@ -100,7 +107,11 @@ def setup_cli(parser: argparse.ArgumentParser) -> None:
     csrc = cimport.add_mutually_exclusive_group(required=True)
     csrc.add_argument("--file", help="Path to a JSON catalog file")
     csrc.add_argument("--dir", dest="dir", help="Import every *.json catalog in a directory")
-    cimport.add_argument("--type", choices=["injection", "escalation", "dependency"], help="Force a type")
+    cimport.add_argument(
+        "--type",
+        choices=["injection", "escalation", "dependency", "fileaccess", "skill"],
+        help="Force a type",
+    )
     cimport.add_argument("--osv-enrich", action="store_true", help="OSV-enrich dependency entries before publish")
     cimport.add_argument("--no-publish", action="store_true", help="Share to SWM (the free local tier) only; skip vm/publish")
     cimport.set_defaults(func=_cmd_curate_import)
@@ -129,7 +140,8 @@ def _cmd_status(args: argparse.Namespace) -> int:
     print(f"  reports:           {'on' if cfg.report else 'off'} (limit {cfg.daily_report_limit}/day)")
     print(f"  sync interval:     {cfg.sync_interval}s")
     print(f"  ruleset:           {counts['injection']} injection, "
-          f"{counts['escalation']} escalation, {counts['dependency']} dependency")
+          f"{counts['escalation']} escalation, {counts['dependency']} dependency, "
+          f"{counts['fileaccess']} fileaccess, {counts['skill']} skill")
     print(f"  findings logged:   {audit.count_findings()}")
     print(f"  dashboard:         http://127.0.0.1:{cfg.dashboard_port}")
     _print_attached_targets()
@@ -381,6 +393,10 @@ def _cmd_curate_approve(args: argparse.Namespace) -> int:
         package_name=fields.get("package_name"),
         package_version=fields.get("package_version"),
         advisory_id=fields.get("advisory_id"),
+        file_category=fields.get("file_category"),
+        skill_name=fields.get("skill_name"),
+        skill_version=fields.get("skill_version"),
+        danger_shape=fields.get("danger_shape"),
     )
     ka_name = f"threat-{quads.slug(ident)}"
     try:
@@ -516,6 +532,10 @@ def _seed_entries(
             package_version=fields.get("package_version"),
             advisory_id=fields.get("advisory_id"),
             references=fields.get("references"),
+            file_category=fields.get("file_category"),
+            skill_name=fields.get("skill_name"),
+            skill_version=fields.get("skill_version"),
+            danger_shape=fields.get("danger_shape"),
         )
         ka_name = f"threat-{quads.slug(ident)}"
         try:
@@ -547,15 +567,19 @@ def _cmd_dashboard(args: argparse.Namespace) -> int:
 
 
 def _resolve_reporter(client: DkgClient) -> str:
-    try:
-        info = client.status()
-        if isinstance(info, dict):
-            for key in ("agentAddress", "defaultAgentAddress", "address"):
-                val = info.get(key)
-                if isinstance(val, str) and val:
-                    return val
-    except Exception:
-        pass
+    # agent_identity is the definitive token→address resolution; status() is a
+    # best-effort fallback for older daemons (same order as hooks._reporter_address).
+    for resolver in (client.agent_identity, client.status):
+        try:
+            info = resolver()
+        except Exception:
+            continue
+        if not isinstance(info, dict):
+            continue
+        for key in ("agentAddress", "defaultAgentAddress", "address"):
+            val = info.get(key)
+            if isinstance(val, str) and val:
+                return val
     return "node"
 
 
@@ -581,6 +605,28 @@ def _build_candidate(args: argparse.Namespace) -> tuple:
             "package_version": args.version,
             "advisory_id": args.advisory_id,
         }
+    if args.type == "fileaccess":
+        if not (args.tool and args.category):
+            raise ValueError("fileaccess report requires --tool and --category")
+        ident = quads.fileaccess_identifier(args.tool, args.category)
+        return ident, {
+            "tool_name": args.tool.strip().lower(),
+            "file_category": args.category.strip().lower(),
+        }
+    if args.type == "skill":
+        if not args.skill_name or not (args.skill_version or args.danger_shape):
+            raise ValueError(
+                "skill report requires --skill-name and one of --skill-version / --danger-shape"
+            )
+        if args.skill_version:
+            ident = quads.skill_version_identifier(args.skill_name, args.skill_version)
+        else:
+            ident = quads.skill_shape_identifier(args.skill_name, args.danger_shape)
+        return ident, {
+            "skill_name": args.skill_name.strip().lower(),
+            "skill_version": (args.skill_version or "").strip() or None,
+            "danger_shape": (args.danger_shape or "").strip() or None,
+        }
     raise ValueError(f"unknown type: {args.type}")
 
 
@@ -591,14 +637,22 @@ def _threat_fields_from_reports(client: DkgClient, cfg: GuardianConfig, identifi
     prefix; fields are gathered from any report carrying them.
     """
     prefix = identifier.split(":", 1)[0]
-    category = {"injection": "injection", "escalation": "escalation", "dep": "dependency"}.get(prefix)
+    category = {
+        "injection": "injection",
+        "escalation": "escalation",
+        "dep": "dependency",
+        "fileaccess": "fileaccess",
+        "skill": "skill",
+    }.get(prefix)
     if category is None:
         return None, {}
-    esc = identifier.replace('"', '\\"')
+    esc = identifier.replace("\\", "\\\\").replace('"', '\\"')
     sparql = f"""
 PREFIX g: <http://umanitek.ai/ontology/guardian/>
+PREFIX schema: <http://schema.org/>
 SELECT ?severity ?pattern ?owasp ?toolName ?argShape
-       ?packageName ?packageVersion ?packageEcosystem ?advisoryId WHERE {{
+       ?packageName ?packageVersion ?packageEcosystem ?advisoryId
+       ?category ?skillName ?skillVersion ?dangerShape WHERE {{
   ?report a g:ThreatReport .
   ?report g:identifier "{esc}" .
   OPTIONAL {{ ?report g:severity ?severity . }}
@@ -610,6 +664,10 @@ SELECT ?severity ?pattern ?owasp ?toolName ?argShape
   OPTIONAL {{ ?report g:packageVersion ?packageVersion . }}
   OPTIONAL {{ ?report g:packageEcosystem ?packageEcosystem . }}
   OPTIONAL {{ ?report schema:identifier ?advisoryId . }}
+  OPTIONAL {{ ?report g:category ?category . }}
+  OPTIONAL {{ ?report g:skillName ?skillName . }}
+  OPTIONAL {{ ?report g:skillVersion ?skillVersion . }}
+  OPTIONAL {{ ?report g:dangerShape ?dangerShape . }}
 }}
 LIMIT 50
 """
@@ -621,11 +679,13 @@ LIMIT 50
             ("toolName", "tool_name"), ("argShape", "arg_shape"),
             ("packageName", "package_name"), ("packageVersion", "package_version"),
             ("packageEcosystem", "ecosystem"), ("advisoryId", "advisory_id"),
+            ("category", "file_category"), ("skillName", "skill_name"),
+            ("skillVersion", "skill_version"), ("dangerShape", "danger_shape"),
         ):
             val = extract_binding(row.get(src))
             if val and dst not in fields:
                 fields[dst] = val
-    # Fall back to parsing dependency fields out of the identifier.
+    # Fall back to parsing fields out of the deterministic identifier itself.
     if category == "dependency" and "package_name" not in fields:
         try:
             _, rest = identifier.split(":", 1)
@@ -636,6 +696,25 @@ LIMIT 50
             fields.setdefault("package_version", ver)
         except ValueError:
             pass
+    elif category == "fileaccess" and ("tool_name" not in fields or "file_category" not in fields):
+        try:
+            _, tool, file_category = identifier.split(":", 2)
+            fields.setdefault("tool_name", tool)
+            fields.setdefault("file_category", file_category)
+        except ValueError:
+            pass
+    elif category == "skill" and "skill_name" not in fields:
+        rest = identifier.split(":", 1)[1] if ":" in identifier else ""
+        if "@" in rest:  # skill:{name}@{version}
+            skill_name, _, skill_version = rest.rpartition("@")
+            fields.setdefault("skill_name", skill_name)
+            fields.setdefault("skill_version", skill_version)
+        elif ":" in rest:  # skill:{name}:{dangerShape}
+            skill_name, _, danger_shape = rest.partition(":")
+            fields.setdefault("skill_name", skill_name)
+            fields.setdefault("danger_shape", danger_shape)
+        elif rest:
+            fields.setdefault("skill_name", rest)
     return category, fields
 
 
@@ -727,7 +806,13 @@ def _flatten_catalog(catalog: Any, forced_type: Optional[str]) -> List[Dict[str,
     for item in catalog.get("threats", []) or []:
         if isinstance(item, dict):
             out.append({**item, **({"type": forced_type} if forced_type else {})})
-    for key, ctype in (("dependencies", "dependency"), ("injection", "injection"), ("escalation", "escalation")):
+    for key, ctype in (
+        ("dependencies", "dependency"),
+        ("injection", "injection"),
+        ("escalation", "escalation"),
+        ("fileaccess", "fileaccess"),
+        ("skills", "skill"),
+    ):
         for item in catalog.get(key, []) or []:
             if isinstance(item, dict):
                 out.append({"type": ctype, **item})
@@ -778,6 +863,37 @@ def _entry_to_threat(entry: Dict[str, Any]) -> tuple:
             "package_version": ver,
             "advisory_id": entry.get("advisoryId") or entry.get("advisory_id"),
             "references": entry.get("references") or [],
+        }
+    if ctype == "fileaccess":
+        tool = str(entry.get("toolName") or entry.get("tool") or entry.get("tool_name") or "").strip()
+        file_category = str(entry.get("category") or entry.get("file_category") or "").strip()
+        if not tool or not file_category:
+            raise ValueError("fileaccess needs tool + category")
+        ident = quads.fileaccess_identifier(tool, file_category)
+        return "fileaccess", ident, {
+            "severity": constants.normalize_severity(entry.get("severity"), "high"),
+            "name": entry.get("title") or entry.get("name") or f"{tool} :: {file_category}",
+            "description": entry.get("summary") or entry.get("description") or "",
+            "tool_name": tool.lower(),
+            "file_category": file_category.lower(),
+        }
+    if ctype == "skill":
+        skill_name = str(entry.get("skillName") or entry.get("skill_name") or entry.get("name") or "").strip()
+        skill_version = str(entry.get("skillVersion") or entry.get("skill_version") or entry.get("version") or "").strip()
+        danger_shape = str(entry.get("dangerShape") or entry.get("danger_shape") or "").strip()
+        if not skill_name or not (skill_version or danger_shape):
+            raise ValueError("skill needs name + (version or dangerShape)")
+        if skill_version:
+            ident = quads.skill_version_identifier(skill_name, skill_version)
+        else:
+            ident = quads.skill_shape_identifier(skill_name, danger_shape)
+        return "skill", ident, {
+            "severity": constants.normalize_severity(entry.get("severity"), "high"),
+            "name": entry.get("title") or f"Skill {skill_name}",
+            "description": entry.get("summary") or entry.get("description") or "",
+            "skill_name": skill_name.lower(),
+            "skill_version": skill_version or None,
+            "danger_shape": danger_shape or None,
         }
     raise ValueError(f"unknown entry type: {ctype!r}")
 

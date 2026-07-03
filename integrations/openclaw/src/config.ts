@@ -7,7 +7,30 @@
  * Keys mirror the hermes plugin's config table so the two frameworks stay in
  * lockstep.
  */
-import { GuardianSeverity, SEVERITY_RANK, normalizeSeverity } from "./quads.js";
+import { GuardianSeverity, SEVERITY_RANK } from "./quads.js";
+import type { ThreatCategory } from "./detection.js";
+
+/**
+ * The five detection categories a user can tune individually. Mirrors Python
+ * `config.DETECTION_CATEGORIES`.
+ */
+export const DETECTION_CATEGORIES = [
+  "injection",
+  "escalation",
+  "dependency",
+  "fileaccess",
+  "skill",
+] as const;
+
+/**
+ * Resolved per-category user policy. `enabled=false` drops the whole category;
+ * `minSeverity` sets a per-category floor below which findings are dropped.
+ * Mirrors Python `config.GuardianConfig.category_setting`.
+ */
+export interface CategorySetting {
+  enabled: boolean;
+  minSeverity: GuardianSeverity;
+}
 
 export interface GuardianConfig {
   mode: "audit" | "block";
@@ -16,11 +39,33 @@ export interface GuardianConfig {
   syncInterval: number; // seconds
   report: boolean;
   dailyReportLimit: number;
+  /**
+   * Minimum severity a built-in HEURISTIC candidate must reach to be flagged /
+   * reported. Graph-backed findings (public or community) always flag — this
+   * only gates the discovery heuristics so low-signal candidates don't drown
+   * the findings feed and the community graph. Mirrors Python
+   * `report_min_severity`.
+   */
+  reportMinSeverity: GuardianSeverity;
   blockSeverity: GuardianSeverity;
   /** Run the built-in discovery nomination layer (candidate threats). */
   discover: boolean;
   /** Run OSV dependency auto-discovery off the blocking path. */
   osvLookup: boolean;
+  /**
+   * Per-category user policy: `{category: {enabled, minSeverity}}`. Missing
+   * categories default to enabled at `info` (flag everything the graph knows).
+   * Read from `plugins.entries.guardian.detection.<category>.{enabled,min_severity}`
+   * (snake_case + camelCase accepted). Mirrors Python `GuardianConfig.categories`.
+   */
+  categories: Partial<Record<ThreatCategory, Partial<CategorySetting>>>;
+  /**
+   * User-defined protected path patterns (globs / prefixes). Access to a
+   * matching path is flagged locally (source="custom", never shared) and blocks
+   * in block mode. Read from `plugins.entries.guardian.protected_paths`.
+   * Mirrors Python `GuardianConfig.protected_paths`.
+   */
+  protectedPaths: string[];
 }
 
 const DEFAULTS: GuardianConfig = {
@@ -29,10 +74,13 @@ const DEFAULTS: GuardianConfig = {
   dkgUrl: "http://127.0.0.1:9200",
   syncInterval: 300,
   report: true,
-  dailyReportLimit: 500,
+  dailyReportLimit: 9999,
+  reportMinSeverity: "high",
   blockSeverity: "critical",
   discover: true,
   osvLookup: true,
+  categories: {},
+  protectedPaths: [],
 };
 
 function str(value: unknown): string | undefined {
@@ -64,15 +112,88 @@ function mode(value: unknown): "audit" | "block" | undefined {
 }
 
 function severity(value: unknown): GuardianSeverity | undefined {
-  const v = str(value);
-  if (!v) return undefined;
-  const norm = normalizeSeverity(v, "critical");
-  return norm in SEVERITY_RANK ? norm : undefined;
+  // Strict ladder check (no "moderate" aliasing) — an invalid value falls
+  // through to the key's default, matching Python's config validation.
+  const v = str(value)?.toLowerCase();
+  return v && v in SEVERITY_RANK ? (v as GuardianSeverity) : undefined;
+}
+
+/**
+ * Validate the `detection` config mapping into per-category policy. Only known
+ * categories and valid values are kept; a bad/absent category falls back to the
+ * enabled-at-`info` default at read time. Supports snake_case (`min_severity`)
+ * and camelCase (`minSeverity`) keys. Mirrors Python `_normalize_categories`.
+ */
+function normalizeCategories(
+  raw: unknown,
+): Partial<Record<ThreatCategory, Partial<CategorySetting>>> {
+  const out: Partial<Record<ThreatCategory, Partial<CategorySetting>>> = {};
+  if (raw == null || typeof raw !== "object" || Array.isArray(raw)) return out;
+  const obj = raw as Record<string, unknown>;
+  for (const category of DETECTION_CATEGORIES) {
+    const item = obj[category];
+    if (item == null || typeof item !== "object" || Array.isArray(item)) continue;
+    const rec = item as Record<string, unknown>;
+    const setting: Partial<CategorySetting> = {};
+    const enabled = bool(rec.enabled);
+    if (enabled !== undefined) setting.enabled = enabled;
+    const minSev = severity(rec.minSeverity) ?? severity(rec.min_severity);
+    if (minSev !== undefined) setting.minSeverity = minSev;
+    if (Object.keys(setting).length > 0) out[category] = setting;
+  }
+  return out;
+}
+
+/**
+ * Validate `protected_paths` into a de-duplicated list of non-empty patterns
+ * (capped at 100). Mirrors Python `_normalize_protected_paths`.
+ */
+function normalizeProtectedPaths(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return [];
+  const out: string[] = [];
+  for (const item of raw) {
+    const text = item == null ? "" : String(item).trim();
+    if (text && !out.includes(text)) out.push(text);
+  }
+  return out.slice(0, 100);
+}
+
+/**
+ * Resolved user policy for one category: `{enabled, minSeverity}`. Defaults:
+ * enabled at `info` — flag everything Guardian can detect for that category.
+ * Mirrors Python `GuardianConfig.category_setting`.
+ */
+export function categorySetting(cfg: GuardianConfig, category: string): CategorySetting {
+  const raw = cfg.categories[category as ThreatCategory];
+  const minSeverity =
+    raw && raw.minSeverity && raw.minSeverity in SEVERITY_RANK ? raw.minSeverity : "info";
+  const enabled = raw && typeof raw.enabled === "boolean" ? raw.enabled : true;
+  return { enabled, minSeverity };
+}
+
+/**
+ * True when the user's policy lets a `category` finding at `severity` flag.
+ * Mirrors Python `GuardianConfig.category_allows`.
+ */
+export function categoryAllows(
+  cfg: GuardianConfig,
+  category: string,
+  sev: GuardianSeverity,
+): boolean {
+  const setting = categorySetting(cfg, category);
+  if (!setting.enabled) return false;
+  const floor = SEVERITY_RANK[setting.minSeverity];
+  return (SEVERITY_RANK[sev] ?? -1) >= floor;
 }
 
 /**
  * Merge plugin config + env into a resolved GuardianConfig. `pluginConfig` is
  * the `plugins.entries.guardian.config` object OpenClaw injects per handler.
+ *
+ * The per-category detection policy (`detection.<category>.{enabled,min_severity}`)
+ * and protected paths (`protected_paths`) mirror the Python plugin's
+ * `plugins.entries.guardian.detection` / `.protected_paths` keys and are read
+ * from the same injected config object.
  */
 export function resolveConfig(pluginConfig: Record<string, unknown> = {}): GuardianConfig {
   const env = process.env;
@@ -95,6 +216,11 @@ export function resolveConfig(pluginConfig: Record<string, unknown> = {}): Guard
       num(pluginConfig.dailyReportLimit) ??
       num(pluginConfig.daily_report_limit) ??
       DEFAULTS.dailyReportLimit,
+    reportMinSeverity:
+      severity(env.GUARDIAN_REPORT_MIN_SEVERITY) ??
+      severity(pluginConfig.reportMinSeverity) ??
+      severity(pluginConfig.report_min_severity) ??
+      DEFAULTS.reportMinSeverity,
     blockSeverity:
       severity(env.GUARDIAN_BLOCK_SEVERITY) ??
       severity(pluginConfig.blockSeverity) ??
@@ -109,6 +235,8 @@ export function resolveConfig(pluginConfig: Record<string, unknown> = {}): Guard
       bool(pluginConfig.osvLookup) ??
       bool(pluginConfig.osv_lookup) ??
       DEFAULTS.osvLookup,
+    categories: normalizeCategories(pluginConfig.detection),
+    protectedPaths: normalizeProtectedPaths(pluginConfig.protected_paths ?? pluginConfig.protectedPaths),
   };
 }
 

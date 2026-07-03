@@ -87,6 +87,54 @@
     font-weight: 600;
   }
 
+  /* ---------- Header status pills (node reachability + mode) ---------- */
+  .status-pills {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-shrink: 0;
+  }
+  .status-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    padding: 3px 10px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    color: var(--muted);
+    background: rgba(255,255,255,0.03);
+    white-space: nowrap;
+  }
+  .status-pill[hidden] { display: none; }
+  .status-pill .sp-dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; flex-shrink: 0; }
+  .status-pill.offline { color: var(--critical); border-color: rgba(239,68,68,0.40); background: rgba(239,68,68,0.10); }
+  .status-pill.mode-audit { color: var(--info); border-color: rgba(148,163,184,0.35); background: rgba(148,163,184,0.08); }
+  .status-pill.mode-block { color: var(--mint); border-color: rgba(128,202,156,0.40); background: rgba(128,202,156,0.10); }
+
+  /* gear button — same pill visual language as the status pills */
+  .gear-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 30px; height: 30px;
+    padding: 0;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    background: rgba(255,255,255,0.03);
+    color: var(--muted);
+    cursor: pointer;
+    flex-shrink: 0;
+    transition: color .15s ease, border-color .15s ease, background .15s ease, transform .3s ease;
+  }
+  .gear-btn svg { width: 16px; height: 16px; display: block; }
+  .gear-btn:hover { color: var(--mint); border-color: rgba(128,202,156,0.40); background: rgba(128,202,156,0.08); }
+  .gear-btn:hover svg { transform: rotate(35deg); transition: transform .3s ease; }
+  .gear-btn:focus-visible { outline: 2px solid var(--mint); outline-offset: 2px; color: var(--text); }
+
   /* ---------- Connection banner ---------- */
   .banner {
     max-width: 1180px;
@@ -165,7 +213,7 @@
   /* ---------- Stats row ---------- */
   .stats {
     display: grid;
-    grid-template-columns: repeat(4, 1fr);
+    grid-template-columns: repeat(5, 1fr);
     gap: var(--gap);
     margin-top: 28px;
   }
@@ -480,6 +528,23 @@
   .pill.low { color: var(--low); background: rgba(59,130,246,0.12); border-color: rgba(59,130,246,0.35); }
   .pill.info { color: var(--info); background: rgba(148,163,184,0.12); border-color: rgba(148,163,184,0.35); }
 
+  /* Per-finding source badge: public = confirmed threat (strongest),
+     community = community-flagged, heuristic = discovery candidate. */
+  .src-badge {
+    display: inline-block;
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    padding: 2px 8px;
+    border-radius: 999px;
+    border: 1px solid transparent;
+    white-space: nowrap;
+  }
+  .src-badge.public { color: #0D0D0D; background: var(--mint); border-color: var(--mint); }
+  .src-badge.community { color: var(--medium); background: rgba(245,158,11,0.12); border-color: rgba(245,158,11,0.35); }
+  .src-badge.heuristic { color: var(--info); background: rgba(148,163,184,0.10); border-color: rgba(148,163,184,0.30); }
+
   /* ---------- Empty states ---------- */
   .empty {
     padding: 44px 24px;
@@ -505,10 +570,15 @@
     vertical-align: middle;
   }
 
+  @media (max-width: 1020px) {
+    .stats { grid-template-columns: repeat(3, 1fr); }
+  }
   @media (max-width: 860px) {
     .stats { grid-template-columns: repeat(2, 1fr); }
     .agent-card { min-width: 0; flex: 1 1 100%; }
     .brand-logo { height: 58px; }
+    /* keep the gear reachable on narrow screens; only the text pills collapse */
+    .status-pills .status-pill { display: none; }
   }
   @media (max-width: 520px) {
     .stats { grid-template-columns: 1fr; }
@@ -600,6 +670,8 @@
   }
   .modal-grid .cell { background: var(--panel); padding: 11px 13px; min-width: 0; }
   .modal-grid .cell.full { grid-column: 1 / -1; }
+  .modal-grid .cell:last-child:nth-child(odd) { grid-column: 1 / -1; }
+  .modal-grid .cell:has(+ .cell.full) { grid-column: 1 / -1; }
   .m-k { font-size: 10px; text-transform: uppercase; letter-spacing: .07em; color: var(--info); margin-bottom: 4px; }
   .m-v { font-size: 13px; color: var(--text); overflow-wrap: anywhere; }
   .m-v.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
@@ -626,6 +698,217 @@
     background-size: 400% 100%; animation: mshimmer 1.3s ease infinite; }
   @keyframes mshimmer { 0% { background-position: 100% 0 } 100% { background-position: -100% 0 } }
   .modal-empty { padding: 8px 2px 4px; color: var(--muted); font-size: 13px; line-height: 1.6; }
+
+  /* ---------- Settings panel (reuses .modal-overlay / .modal) ---------- */
+  /* Wider than the threat modal — the policy form needs the room. */
+  .modal.settings-modal { max-width: 640px; border-top-color: var(--mint); }
+  .set-head {
+    display: flex; align-items: center; gap: 13px;
+    padding: 22px 52px 16px 22px;
+    border-bottom: 1px solid var(--border);
+  }
+  .set-ico {
+    flex: 0 0 auto; width: 42px; height: 42px; border-radius: 12px;
+    display: flex; align-items: center; justify-content: center;
+    background: color-mix(in srgb, var(--mint) 13%, transparent);
+    border: 1px solid color-mix(in srgb, var(--mint) 34%, transparent);
+    color: var(--mint);
+  }
+  .set-ico svg { width: 22px; height: 22px; display: block; }
+  .set-htext { min-width: 0; }
+  .set-title { font-size: 16px; font-weight: 650; color: var(--text); line-height: 1.3; }
+  .set-sub { font-size: 12px; color: var(--muted); margin-top: 2px; }
+
+  .set-body { padding: 6px 22px 4px; }
+
+  .set-group { padding: 18px 0; border-bottom: 1px solid var(--border); }
+  .set-group:last-of-type { border-bottom: none; }
+  .set-group > .set-glabel {
+    display: flex; align-items: baseline; justify-content: space-between; gap: 10px;
+    font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em;
+    color: var(--info); font-weight: 600; margin-bottom: 12px;
+  }
+  .set-glabel .set-gnote { text-transform: none; letter-spacing: 0; color: var(--muted); font-weight: 500; font-size: 11px; }
+
+  /* generic labelled row */
+  .set-row {
+    display: flex; align-items: center; justify-content: space-between; gap: 14px;
+    padding: 10px 0;
+  }
+  .set-row + .set-row { border-top: 1px solid rgba(255,255,255,0.04); }
+  .set-row .set-rl { min-width: 0; }
+  .set-row .set-rl .set-rt { font-size: 13px; color: var(--text); font-weight: 550; }
+  .set-row .set-rl .set-rh { font-size: 11.5px; color: var(--muted); margin-top: 2px; line-height: 1.45; }
+  .set-row .set-rc { flex: 0 0 auto; display: flex; align-items: center; gap: 10px; }
+
+  /* segmented control (audit | block) — same look as .sort-seg */
+  .set-seg { display: inline-flex; padding: 3px; background: var(--elevated); border: 1px solid var(--border); border-radius: 999px; }
+  .set-seg button {
+    appearance: none; border: 0; background: transparent; color: var(--muted);
+    font: inherit; font-size: 12px; font-weight: 600; padding: 4px 14px;
+    border-radius: 999px; cursor: pointer; transition: background .15s ease, color .15s ease;
+  }
+  .set-seg button:hover { color: var(--text); }
+  .set-seg button.active { color: #0D0D0D; background: var(--mint); }
+  .set-seg button.active.warn { background: var(--medium); }
+
+  /* toggle switch */
+  .set-toggle { position: relative; display: inline-block; width: 38px; height: 22px; flex: 0 0 auto; }
+  .set-toggle input { position: absolute; opacity: 0; width: 100%; height: 100%; margin: 0; cursor: pointer; }
+  .set-track {
+    position: absolute; inset: 0; border-radius: 999px;
+    background: var(--elevated); border: 1px solid var(--border);
+    transition: background .15s ease, border-color .15s ease;
+  }
+  .set-track::after {
+    content: ""; position: absolute; top: 2px; left: 2px;
+    width: 16px; height: 16px; border-radius: 50%;
+    background: var(--muted); transition: transform .16s ease, background .16s ease;
+  }
+  .set-toggle input:checked + .set-track { background: color-mix(in srgb, var(--mint) 30%, transparent); border-color: color-mix(in srgb, var(--mint) 55%, transparent); }
+  .set-toggle input:checked + .set-track::after { transform: translateX(16px); background: var(--mint); }
+  .set-toggle input:focus-visible + .set-track { outline: 2px solid var(--mint); outline-offset: 2px; }
+  .set-toggle input:disabled { cursor: default; }
+  .set-toggle input:disabled + .set-track { opacity: 0.45; }
+
+  /* severity select — dark, on-brand */
+  .set-select {
+    appearance: none; -webkit-appearance: none;
+    font: inherit; font-size: 12px; font-weight: 600; color: var(--text);
+    background-color: var(--elevated);
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23B8B8B8' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'><path d='m6 9 6 6 6-6'/></svg>");
+    background-repeat: no-repeat; background-position: right 8px center;
+    border: 1px solid var(--border); border-radius: 8px;
+    padding: 5px 26px 5px 10px; cursor: pointer;
+    transition: border-color .15s ease;
+  }
+  .set-select:hover { border-color: #333; }
+  .set-select:focus-visible { outline: 2px solid var(--mint); outline-offset: 1px; border-color: var(--mint); }
+  .set-select:disabled { opacity: 0.4; cursor: default; }
+
+  /* per-category rows */
+  .cat-row {
+    display: flex; align-items: flex-start; gap: 13px;
+    padding: 13px 0; border-top: 1px solid rgba(255,255,255,0.04);
+  }
+  .cat-row:first-of-type { border-top: none; }
+  .cat-ico {
+    flex: 0 0 auto; width: 30px; height: 30px; border-radius: 9px; margin-top: 1px;
+    display: flex; align-items: center; justify-content: center;
+    background: color-mix(in srgb, var(--cat, var(--mint)) 12%, transparent);
+    border: 1px solid color-mix(in srgb, var(--cat, var(--mint)) 32%, transparent);
+    color: var(--cat, var(--mint));
+  }
+  .cat-ico svg { width: 17px; height: 17px; display: block; }
+  .cat-main { flex: 1 1 auto; min-width: 0; }
+  .cat-name { font-size: 13px; font-weight: 600; color: var(--text); }
+  .cat-help { font-size: 11.5px; color: var(--muted); margin-top: 2px; line-height: 1.45; }
+  .cat-ctrl { flex: 0 0 auto; display: flex; align-items: center; gap: 11px; padding-top: 2px; }
+  .cat-row.off .cat-name, .cat-row.off .cat-ico { opacity: 0.5; }
+
+  /* protected-paths list editor */
+  .paths-list { display: flex; flex-direction: column; gap: 7px; margin-bottom: 12px; }
+  .paths-empty {
+    font-size: 12px; color: var(--muted); font-style: italic;
+    padding: 10px 12px; border: 1px dashed var(--border); border-radius: 9px; text-align: center;
+  }
+  .path-row {
+    display: flex; align-items: center; gap: 10px;
+    padding: 7px 9px 7px 12px;
+    background: var(--bg); border: 1px solid var(--border); border-radius: 9px;
+  }
+  .path-row code {
+    flex: 1 1 auto; min-width: 0;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 12px; color: var(--mint);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .path-del {
+    flex: 0 0 auto; width: 24px; height: 24px; border-radius: 7px;
+    display: flex; align-items: center; justify-content: center;
+    background: rgba(255,255,255,0.04); border: 1px solid var(--border);
+    color: var(--muted); cursor: pointer; font-size: 14px; line-height: 1;
+    transition: background .15s, color .15s, border-color .15s;
+  }
+  .path-del:hover { background: rgba(239,68,68,0.12); color: var(--critical); border-color: rgba(239,68,68,0.35); }
+  .path-del:focus-visible { outline: 2px solid var(--mint); outline-offset: 1px; }
+  .path-add { display: flex; gap: 8px; }
+  .path-input {
+    flex: 1 1 auto; min-width: 0;
+    font: inherit; font-size: 12.5px; color: var(--text);
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    background: var(--elevated); border: 1px solid var(--border); border-radius: 9px;
+    padding: 8px 11px;
+  }
+  .path-input::placeholder { color: var(--muted); opacity: 0.7; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+  .path-input:focus-visible { outline: none; border-color: var(--mint); }
+  .path-add-btn {
+    flex: 0 0 auto; font: inherit; font-size: 12px; font-weight: 600;
+    color: var(--text); background: rgba(255,255,255,0.04);
+    border: 1px solid var(--border); border-radius: 9px; padding: 8px 15px; cursor: pointer;
+    transition: background .15s, border-color .15s, color .15s;
+  }
+  .path-add-btn:hover { background: color-mix(in srgb, var(--mint) 12%, transparent); border-color: color-mix(in srgb, var(--mint) 42%, transparent); color: var(--mint); }
+  .path-add-btn:focus-visible { outline: 2px solid var(--mint); outline-offset: 1px; }
+
+  /* footer: hint · reset · save */
+  .set-foot {
+    position: sticky; bottom: 0;
+    display: flex; align-items: center; gap: 12px;
+    padding: 14px 22px;
+    background: linear-gradient(180deg, rgba(17,17,17,0), var(--panel) 40%);
+    border-top: 1px solid var(--border);
+  }
+  .set-foot .set-status { flex: 1 1 auto; min-width: 0; font-size: 12px; color: var(--muted); line-height: 1.4; }
+  .set-foot .set-status.ok { color: var(--mint); }
+  .set-foot .set-status.err { color: var(--high); }
+  .set-reset {
+    flex: 0 0 auto; font: inherit; font-size: 12px; font-weight: 600; color: var(--muted);
+    background: transparent; border: 1px solid var(--border); border-radius: 9px;
+    padding: 8px 14px; cursor: pointer; transition: color .15s, border-color .15s;
+  }
+  .set-reset:hover { color: var(--text); border-color: #333; }
+  .set-reset:focus-visible { outline: 2px solid var(--mint); outline-offset: 1px; }
+  .set-save {
+    flex: 0 0 auto; font: inherit; font-size: 13px; font-weight: 600; color: #0D0D0D;
+    background: var(--mint); border: 1px solid var(--mint); border-radius: 9px;
+    padding: 8px 20px; cursor: pointer; transition: opacity .15s, filter .15s;
+  }
+  .set-save:hover { filter: brightness(1.06); }
+  .set-save:focus-visible { outline: 2px solid var(--text); outline-offset: 2px; }
+  .set-save:disabled { opacity: 0.55; cursor: default; filter: none; }
+
+  .set-defaults-hint {
+    display: flex; gap: 9px; align-items: flex-start;
+    margin: 0 0 2px; padding: 11px 13px;
+    background: color-mix(in srgb, var(--mint) 6%, transparent);
+    border: 1px solid color-mix(in srgb, var(--mint) 22%, transparent);
+    border-radius: 10px; font-size: 12px; color: var(--muted); line-height: 1.5;
+  }
+  .set-defaults-hint svg { flex: 0 0 auto; width: 15px; height: 15px; color: var(--mint); margin-top: 1px; }
+  .set-defaults-hint b { color: var(--text); font-weight: 600; }
+
+  @media (max-width: 560px) {
+    .set-row { flex-wrap: wrap; }
+    .cat-row { flex-wrap: wrap; }
+    .cat-ctrl { padding-left: 43px; }
+  }
+
+  /* ---------- Findings rows (Live findings + Audit trail) ---------- */
+  .agent-tag { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; color: var(--fw, var(--muted)); white-space: nowrap; }
+  .agent-tag .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--fw, var(--muted)); flex: 0 0 auto; }
+  .type-tag { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; color: var(--text); }
+  .type-tag .dot { width: 7px; height: 7px; border-radius: 50%; flex: 0 0 auto; }
+  .reason { display: flex; flex-direction: column; gap: 3px; min-width: 0; max-width: 480px; }
+  .reason-ev { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .reason-meta { color: var(--muted); font-size: 11.5px; display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+  .reason-meta .src-badge { flex: 0 0 auto; }
+  .audit-scroll { max-height: 480px; overflow-y: auto; }
+  .audit-foot { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 16px; border-top: 1px solid var(--border); }
+  .audit-count { font-size: 12px; color: var(--muted); font-weight: 500; }
+  .load-more { font-size: 12px; font-weight: 600; color: var(--text); background: rgba(255,255,255,0.04); border: 1px solid var(--border); border-radius: 8px; padding: 6px 14px; cursor: pointer; transition: background .15s, border-color .15s; }
+  .load-more:hover { background: rgba(255,255,255,0.08); border-color: #333; }
+  .load-more[hidden] { display: none; }
 </style>
 </head>
 <body>
@@ -634,6 +917,13 @@
       <div class="brand">
         <img class="brand-logo brand-glow" src="./assets/guardian-logo.svg" alt="Umanitek" />
         <span class="brand-sub">Agent Guardian</span>
+      </div>
+      <div class="status-pills" aria-live="polite">
+        <span class="status-pill offline" id="pill-node" hidden title="The local DKG node is not responding"><span class="sp-dot"></span>node offline</span>
+        <span class="status-pill mode-audit" id="pill-mode" hidden><span class="sp-dot"></span>audit mode</span>
+        <button type="button" class="gear-btn" id="settings-open" aria-label="Open detection settings" title="Detection settings">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+        </button>
       </div>
     </div>
   </header>
@@ -667,19 +957,24 @@
       <div class="section-head">
         <h2>Threat graph</h2>
         <div class="tabs" role="tablist" aria-label="Threat graph tier">
-          <button class="tab active" id="tab-public" role="tab" aria-selected="true" data-tier="public">
-            Public graph<span class="tab-count" id="count-public">0</span>
+          <button class="tab active" id="tab-public" role="tab" aria-selected="true" data-tier="public" title="Curated by Umanitek &mdash; source of truth, blockable">
+            Public<span class="tab-count" id="count-public">0</span>
           </button>
-          <button class="tab" id="tab-local" role="tab" aria-selected="false" data-tier="local">
-            Local graph<span class="tab-count" id="count-local">0</span>
+          <button class="tab" id="tab-community" role="tab" aria-selected="false" data-tier="community" title="Reported by agents across the network &mdash; flagged, never blocks">
+            Community<span class="tab-count" id="count-community">0</span>
+          </button>
+          <button class="tab" id="tab-local" role="tab" aria-selected="false" data-tier="local" title="This node's own graph &mdash; what your agent has seen">
+            Local<span class="tab-count" id="count-local">0</span>
           </button>
         </div>
       </div>
+      <div class="section-note" id="graph-tier-note" style="margin:-6px 0 12px;">curated by Umanitek &mdash; source of truth, blockable</div>
       <div class="panel">
         <div class="graph-body" id="graph-body">
           <div class="graph-stage">
             <div class="graph-canvas" id="graph-canvas"></div>
             <div class="graph-hint" id="graph-hint" style="display:none;">drag &middot; scroll to zoom</div>
+            <div class="graph-legend" id="graph-legend" style="display:none;"></div>
             <div class="graph-empty" id="graph-empty">
               <svg class="e-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
               <div class="e-msg">Loading threats&hellip;</div>
@@ -706,6 +1001,14 @@
         </div>
         <div class="value mint" id="stat-threats"><span class="skel"></span></div>
         <div class="meta">from the threat graph</div>
+      </div>
+      <div class="stat">
+        <div class="label">
+          <svg class="s-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+          Community pool
+        </div>
+        <div class="value" id="stat-community"><span class="skel"></span></div>
+        <div class="meta">identifiers flagged by agents</div>
       </div>
       <div class="stat">
         <div class="label">
@@ -743,10 +1046,10 @@
             <thead>
               <tr>
                 <th>Time</th>
+                <th>Agent</th>
                 <th>Severity</th>
-                <th>Category</th>
-                <th>Tool / target</th>
-                <th>Evidence</th>
+                <th>Type</th>
+                <th>Reasoning</th>
               </tr>
             </thead>
             <tbody id="findings-body">
@@ -762,6 +1065,41 @@
       </div>
     </section>
 
+    <!-- Audit trail — the full local history (Live findings shows only the latest) -->
+    <section class="section" aria-label="Audit trail">
+      <div class="section-head">
+        <h2>Audit trail</h2>
+        <span class="audit-count" id="audit-total"></span>
+      </div>
+      <div class="panel">
+        <div class="table-scroll audit-scroll">
+          <table aria-label="Audit trail">
+            <thead>
+              <tr>
+                <th>Time</th>
+                <th>Agent</th>
+                <th>Severity</th>
+                <th>Type</th>
+                <th>Reasoning</th>
+              </tr>
+            </thead>
+            <tbody id="audit-body">
+              <tr><td colspan="5">
+                <div class="empty">
+                  <svg class="e-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+                  Loading audit trail&hellip;
+                </div>
+              </td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="audit-foot">
+          <span class="audit-count" id="audit-shown">&mdash;</span>
+          <button type="button" class="load-more" id="audit-more" hidden>Load more</button>
+        </div>
+      </div>
+    </section>
+
   </div>
 
 <!-- Vendored (same-origin) force-graph UMD bundle — defines window.ForceGraph. -->
@@ -772,8 +1110,9 @@
 
   var POLL_MS = 4000;
   var connOk = true;
+  var TIERS = ["public", "community", "local"];
   var activeTier = "public";
-  var graphCache = { public: null, local: null };
+  var graphCache = { public: null, community: null, local: null };
 
   // Findings: keep the latest fetched list so the sort toggle can re-render
   // without a network round-trip. Backend returns newest-first already.
@@ -977,7 +1316,19 @@
   }
   function catMeta(c) { return CATS[catKey(c)]; }
 
-  var TIER_LABEL = { public: "Public graph", local: "Local graph" };
+  var TIER_LABEL = { public: "Public graph", community: "Community graph", local: "Local graph" };
+  // Subtitle under the tab strip — what each trust tier means.
+  var TIER_NOTE = {
+    public: "curated by Umanitek — source of truth, blockable",
+    community: "reported by agents across the network — flagged, never blocks",
+    local: "this node's own graph — what your agent has seen"
+  };
+  // Per-tier empty-state message for the graph stage.
+  var TIER_EMPTY = {
+    public: "No curated threats published yet &mdash; the curator publishes verified threats here.",
+    community: "No community-reported threats yet &mdash; agents across the network flag identifiers here.",
+    local: "No local threats yet."
+  };
 
   // Truncate a long identifier to a short leaf label.
   function leafLabel(t) {
@@ -1048,7 +1399,7 @@
 
   // ---- one ForceGraph instance, re-fed on tab switch ----
   var fg = null;             // ForceGraph instance
-  var fgSig = { public: null, local: null };  // last-rendered signature per tier
+  var fgSig = { public: null, community: null, local: null };  // last-rendered signature per tier
   var fgTierShown = null;    // which tier's data is currently in the instance
   var didInitialZoom = false;
 
@@ -1245,6 +1596,7 @@
 
   // ---------- Threat detail modal ----------
   var TM = { node: null };
+  var THREAT_CACHE = {};   // tier|identifier -> detail (re-clicks are instant)
 
   function catIconSVG(ck, color) {
     var paths = (CAT_ICONS[ck] || CAT_ICONS.other).map(function (d) {
@@ -1295,7 +1647,7 @@
       add("Danger shape", d.danger_shape, true);
     }
     add("Last updated", fmtDateFull(d.modified));
-    add("Source", d.tier === "public" ? "Public graph (VM)" : "Local graph (SWM)");
+    add("Source", { public: "Public graph (VM)", community: "Community graph (SWM)", local: "Local graph (WM)" }[d.tier] || "Threat graph");
     return rows;
   }
 
@@ -1323,7 +1675,7 @@
     var rows = detailRows(d);
     if (rows.length) {
       body += '<div class="modal-grid">' + rows.map(function (r) {
-        var full = (r[0] === "Pattern" || r[0] === "Package") ? " full" : "";
+        var full = (r[0] === "Pattern" || r[0] === "Description") ? " full" : "";
         return '<div class="cell' + full + '"><div class="m-k">' + esc(r[0]) + '</div>' +
           '<div class="m-v' + (r[2] ? ' mono' : '') + '">' + esc(r[1]) + '</div></div>';
       }).join("") + '</div>';
@@ -1344,7 +1696,7 @@
 
     if (!d.description && !rows.length && (!d.references || !d.references.length)) {
       body += '<div class="modal-empty">No further detail is stored for this threat in the ' +
-        (d.tier === "public" ? "public" : "local") + ' graph yet.</div>';
+        ({ public: "public", community: "community", local: "local" }[d.tier] || "local") + ' graph yet.</div>';
     }
 
     $("tm-body").innerHTML = body;
@@ -1364,15 +1716,18 @@
     $("tm-tags").innerHTML = modalTags(cat, sevClass(sev), false);
     $("tm-id").textContent = node.identifier || "";
     var copyBtn = $("tm-copy"); if (copyBtn) { copyBtn.textContent = "Copy"; copyBtn.classList.remove("ok"); }
-    $("tm-body").innerHTML =
-      '<div class="m-sk" style="width:92%"></div><div class="m-sk" style="width:78%"></div>' +
-      '<div class="m-sk" style="width:64%;margin-top:20px"></div><div class="m-sk" style="width:72%"></div>';
     overlay.classList.add("open");
     overlay.setAttribute("aria-hidden", "false");
 
+    var ckey = activeTier + "|" + (node.identifier || "");
+    if (THREAT_CACHE[ckey]) { renderThreatDetail(THREAT_CACHE[ckey], node); return; }
+    $("tm-body").innerHTML =
+      '<div class="m-sk" style="width:92%"></div><div class="m-sk" style="width:78%"></div>' +
+      '<div class="m-sk" style="width:64%;margin-top:20px"></div><div class="m-sk" style="width:72%"></div>';
     var url = "/api/threat?tier=" + encodeURIComponent(activeTier) +
       "&identifier=" + encodeURIComponent(node.identifier || "");
     getJSON(url).then(function (d) {
+      THREAT_CACHE[ckey] = d || {};
       if (!TM.node || TM.node.identifier !== node.identifier) return; // user moved on
       renderThreatDetail(d || {}, node);
     }).catch(function () {
@@ -1417,7 +1772,6 @@
   }
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", wireModal);
   else wireModal();
-  window.__openThreat = openThreatModal; /* TEMP-TEST-HOOK */
 
   function ensureGraph() {
     if (fg) return fg;
@@ -1489,8 +1843,9 @@
     var data = graphCache[activeTier];
 
     // update tab counts from cache (only when we have data)
-    if (graphCache.public) $("count-public").textContent = asList(graphCache.public).length;
-    if (graphCache.local) $("count-local").textContent = asList(graphCache.local).length;
+    TIERS.forEach(function (t) {
+      if (graphCache[t]) $("count-" + t).textContent = asList(graphCache[t]).length;
+    });
 
     // still loading this tier
     if (data == null) {
@@ -1504,9 +1859,7 @@
 
     // empty state — centered message, no canvas noise
     if (!list.length) {
-      var msg = activeTier === "public"
-        ? "No curated threats published yet &mdash; the curator publishes verified threats here."
-        : "No local threats yet.";
+      var msg = TIER_EMPTY[activeTier] || "No threats yet.";
       showGraphEmpty("<strong>Nothing to show</strong>" + msg);
       if (fg) fg.graphData({ nodes: [], links: [] });
       fgTierShown = null;
@@ -1549,18 +1902,32 @@
 
   function switchTier(tier) {
     activeTier = tier;
-    ["public", "local"].forEach(function (t) {
+    TIERS.forEach(function (t) {
       var el = $("tab-" + t);
       var on = (t === tier);
       el.classList.toggle("active", on);
       el.setAttribute("aria-selected", on ? "true" : "false");
     });
+    var note = $("graph-tier-note");
+    if (note) note.textContent = TIER_NOTE[tier] || "";
     renderGraphTab();
   }
 
   // ---------- Findings ----------
   // Severity rank for the "Severity" sort (higher = more severe, sorts first).
   var SEV_RANK = { critical: 5, high: 4, medium: 3, low: 2, info: 1 };
+
+  // Per-finding source badge (three-tier trust model).
+  var SRC_META = {
+    public:    { label: "confirmed", tip: "Public graph match — confirmed threat curated by Umanitek (blockable in block mode)" },
+    community: { label: "community", tip: "Community-flagged — matched the shared community pool; reported to strengthen consensus, never blocks" },
+    heuristic: { label: "candidate", tip: "Built-in heuristic discovery candidate — not yet in any graph" }
+  };
+  function srcKey(f) {
+    var s = String(f.source || "").toLowerCase();
+    if (SRC_META[s]) return s;
+    return (f.confirmed === true || f.confirmed === "true") ? "public" : "heuristic";
+  }
   function findingTime(f) {
     var v = f.time || f.ts || f.timestamp;
     if (v == null) return 0;
@@ -1586,6 +1953,62 @@
     return list;
   }
 
+  // Shared row renderer — Time · Agent · Severity · Type · Reasoning.
+  function agentTag(fw) {
+    return '<span class="agent-tag" style="--fw:' + fwColor(fw) + '"><span class="dot"></span>' + esc(fwLabel(fw)) + '</span>';
+  }
+  function typeTag(cat) {
+    var m = CATS[catKey(cat)];
+    return '<span class="type-tag"><span class="dot" style="background:' + m.color + '"></span>' + esc(m.name) + '</span>';
+  }
+  function reasonCell(f) {
+    var ev = f.evidence || f.matched || f.title || "";
+    var why = f.title || "";
+    var tool = f.tool_name || f.tool || "";
+    var parts = [];
+    if (why && why !== ev) parts.push(esc(why));
+    if (tool) parts.push("via " + esc(tool));
+    var meta = parts.join(" &middot; ");
+    return '<div class="reason"><div class="reason-ev" title="' + esc(ev) + '">' + esc(ev || "—") + '</div>' +
+      (meta ? '<div class="reason-meta">' + meta + '</div>' : '') + '</div>';
+  }
+  function findingRowHTML(f) {
+    var sev = sevClass(f.severity);
+    return '<tr>' +
+      '<td class="col-time">' + fmtTime(f.time || f.ts || f.timestamp) + '</td>' +
+      '<td>' + agentTag(f.framework) + '</td>' +
+      '<td><span class="pill ' + sev + '">' + esc(sev) + '</span></td>' +
+      '<td>' + typeTag(f.category || f.type) + '</td>' +
+      '<td>' + reasonCell(f) + '</td>' +
+    '</tr>';
+  }
+
+  // ---------- Audit trail (the full local history) ----------
+  var AUDIT_PAGE = 100, AUDIT_MAX = 500, auditLoaded = AUDIT_PAGE;
+  function renderAuditTrail(data) {
+    var list = asList(data);
+    var total = (data && data.total != null) ? data.total : list.length;
+    var body = $("audit-body");
+    if (!body) return;
+    if (!list.length) {
+      body.innerHTML = '<tr><td colspan="5"><div class="empty">' +
+        '<svg class="e-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/></svg>' +
+        '<strong>No threats detected yet</strong>Everything Guardian flags will be logged here.</div></td></tr>';
+    } else {
+      body.innerHTML = list.map(findingRowHTML).join("");
+    }
+    var shown = Math.min(list.length, total);
+    var totalEl = $("audit-total");
+    if (totalEl) totalEl.textContent = total + (total === 1 ? " threat detected" : " threats detected");
+    var shownEl = $("audit-shown");
+    if (shownEl) shownEl.textContent = total ? ("Showing " + shown + " of " + total) : "";
+    var more = $("audit-more");
+    if (more) more.hidden = !(shown < total && auditLoaded < AUDIT_MAX);
+  }
+  function loadAudit() {
+    return getJSON("/api/findings?limit=" + auditLoaded + "&offset=0").then(renderAuditTrail).catch(function () {});
+  }
+
   function renderFindings(data) {
     if (data !== undefined) findingsCache = data;   // cache latest fetch
     data = findingsCache;
@@ -1608,24 +2031,7 @@
       return;
     }
 
-    var rows = sortedFindings(list).map(function (f) {
-      var sev = sevClass(f.severity);
-      var cat = f.category || f.type || "—";
-      var tool = f.tool_name || f.tool || "";
-      var target = f.target || f.identifier || "";
-      var ev = f.evidence || f.matched || f.title || "";
-      var toolCell = tool
-        ? '<span class="tool">' + esc(tool) + '</span>' + (target ? " &middot; " + esc(target) : "")
-        : esc(target || "—");
-      return '<tr>' +
-        '<td class="col-time">' + fmtTime(f.time || f.ts || f.timestamp) + '</td>' +
-        '<td><span class="pill ' + sev + '">' + esc(sev) + '</span></td>' +
-        '<td class="col-cat">' + esc(cat) + '</td>' +
-        '<td class="col-target">' + toolCell + '</td>' +
-        '<td class="col-evidence" title="' + esc(ev) + '">' + esc(ev || "—") + '</td>' +
-      '</tr>';
-    }).join("");
-    body.innerHTML = rows;
+    body.innerHTML = sortedFindings(list).map(findingRowHTML).join("");
   }
 
   // ---------- Graph status (stats only) ----------
@@ -1638,6 +2044,25 @@
     var lastSync = data.last_sync != null ? data.last_sync : data.lastSync;
 
     $("stat-threats").textContent = num(curated);
+    $("stat-community").textContent = num(data.community);
+
+    // header status pills: node reachability + enforcement mode
+    var nodePill = $("pill-node");
+    if (nodePill) nodePill.hidden = data.node_reachable !== false;
+    var modePill = $("pill-mode");
+    if (modePill) {
+      var mode = String(data.mode || "").toLowerCase();
+      if (mode === "audit" || mode === "block") {
+        modePill.hidden = false;
+        modePill.className = "status-pill mode-" + mode;
+        modePill.innerHTML = '<span class="sp-dot"></span>' + esc(mode) + ' mode';
+        modePill.title = mode === "block"
+          ? "Block mode — confirmed public-graph threats are blocked"
+          : "Audit mode — findings are logged and reported, nothing is blocked";
+      } else {
+        modePill.hidden = true;
+      }
+    }
     if (lastSync != null) {
       $("stat-sync").textContent = fmtAgo(lastSync);
       $("stat-sync").style.fontSize = "22px";
@@ -1657,12 +2082,14 @@
 
   // ---------- Poll loop ----------
   function poll() {
+    loadAudit();   // full history refresh (independent of the fixed-index batch below)
     Promise.allSettled([
-      getJSON("/api/findings"),
+      getJSON("/api/findings?limit=10"),
       getJSON("/api/graph-status"),
       getJSON("/api/reports"),
       getJSON("/api/agents"),
       getJSON("/api/graph?tier=public"),
+      getJSON("/api/graph?tier=community"),
       getJSON("/api/graph?tier=local")
     ]).then(function (res) {
       var anyOk = res.some(function (r) { return r.status === "fulfilled"; });
@@ -1672,9 +2099,11 @@
       if (res[1].status === "fulfilled") renderGraphStatus(res[1].value);
       if (res[2].status === "fulfilled") renderReports(res[2].value);
       if (res[3].status === "fulfilled") renderAgents(res[3].value);
-      if (res[4].status === "fulfilled") graphCache.public = res[4].value;
-      if (res[5].status === "fulfilled") graphCache.local = res[5].value;
-      if (res[4].status === "fulfilled" || res[5].status === "fulfilled") renderGraphTab();
+      var anyGraph = false;
+      TIERS.forEach(function (t, i) {
+        if (res[4 + i].status === "fulfilled") { graphCache[t] = res[4 + i].value; anyGraph = true; }
+      });
+      if (anyGraph) renderGraphTab();
 
       setBanner(allFail);
       connOk = anyOk;
@@ -1682,8 +2111,9 @@
   }
 
   // wire tabs
-  $("tab-public").addEventListener("click", function () { switchTier("public"); });
-  $("tab-local").addEventListener("click", function () { switchTier("local"); });
+  TIERS.forEach(function (t) {
+    $("tab-" + t).addEventListener("click", function () { switchTier(t); });
+  });
 
   // wire findings sort control
   function setFindingsSort(mode) {
@@ -1699,12 +2129,387 @@
   $("sort-newest").addEventListener("click", function () { setFindingsSort("newest"); });
   $("sort-severity").addEventListener("click", function () { setFindingsSort("severity"); });
 
+  // wire audit-trail "load more"
+  var auditMoreBtn = $("audit-more");
+  if (auditMoreBtn) auditMoreBtn.addEventListener("click", function () {
+    auditLoaded = Math.min(AUDIT_MAX, auditLoaded + AUDIT_PAGE);
+    loadAudit();
+  });
+
   // keep the force-graph canvas sized to its (responsive) container
   var resizeTimer = null;
   window.addEventListener("resize", function () {
     if (resizeTimer) clearTimeout(resizeTimer);
     resizeTimer = setTimeout(resizeGraph, 120);
   });
+
+  // ---------- Settings panel ----------
+  // The full ladder we accept from the server / render into selects. Any value
+  // the API hands back is whitelisted against this before it can build an
+  // <option>, so a malformed payload can never inject markup or bad values.
+  var SEV_ORDER = ["info", "low", "medium", "high", "critical"];
+  // Category → accent color + built-in helper line (order matches the API).
+  var SET_CATS = [
+    { key: "injection",  color: "#FB7185", help: "Detects hidden instructions and prompt-injection patterns in tool inputs." },
+    { key: "escalation", color: "#EF4444", help: "Flags dangerous shell commands and privilege-escalation attempts." },
+    { key: "dependency", color: "#F59E0B", help: "Catches known-vulnerable packages pulled into the workspace." },
+    { key: "fileaccess", color: "#3B82F6", help: "Watches for reads/writes to sensitive files and credential stores." },
+    { key: "skill",      color: "#A78BFA", help: "Reviews installed skills for suspicious or unexpected behaviour." }
+  ];
+  var SET_DEFAULT_LABELS = {
+    injection: "Prompt injection", escalation: "Dangerous commands",
+    dependency: "Vulnerable dependencies", fileaccess: "Sensitive file access",
+    skill: "Suspicious skills"
+  };
+
+  // Live UI state, hydrated from GET /api/settings and mutated in place as the
+  // user edits. Serialized back out on Save. Kept separate from findingsCache
+  // etc. so nothing in the 4s poll loop ever touches it.
+  var setState = null;
+  var setLoaded = false;
+  var setSaving = false;
+
+  function sevOk(v) {
+    v = String(v == null ? "" : v).toLowerCase();
+    return SEV_ORDER.indexOf(v) !== -1 ? v : "info";
+  }
+
+  // Build <option>s from the whitelist only (never from raw server strings).
+  function sevOptions(selected) {
+    selected = sevOk(selected);
+    return SEV_ORDER.map(function (s) {
+      return '<option value="' + s + '"' + (s === selected ? ' selected' : '') + '>' +
+        esc(s.charAt(0).toUpperCase() + s.slice(1)) + '</option>';
+    }).join("");
+  }
+
+  // A fully-defaulted state (used as a fallback and by "Reset to defaults").
+  function defaultSetState() {
+    var cats = {};
+    SET_CATS.forEach(function (c) { cats[c.key] = { enabled: true, min_severity: "info" }; });
+    return {
+      mode: "audit", block_severity: "critical",
+      report: true, report_min_severity: "high",
+      discover: true, osv_lookup: true,
+      categories: cats, protected_paths: [],
+      category_labels: {}
+    };
+  }
+
+  // Normalize whatever the API returns into our safe, complete shape.
+  function normalizeSettings(data) {
+    var out = defaultSetState();
+    data = data || {};
+    out.mode = (String(data.mode).toLowerCase() === "block") ? "block" : "audit";
+    out.block_severity = sevOk(data.block_severity || "critical");
+    out.report_min_severity = sevOk(data.report_min_severity || "high");
+    out.report = data.report !== false;
+    out.discover = data.discover !== false;
+    out.osv_lookup = data.osv_lookup !== false;
+    var cats = (data.categories && typeof data.categories === "object") ? data.categories : {};
+    SET_CATS.forEach(function (c) {
+      var item = cats[c.key] || {};
+      out.categories[c.key] = {
+        enabled: item.enabled !== false,
+        min_severity: sevOk(item.min_severity || "info")
+      };
+    });
+    out.protected_paths = Array.isArray(data.protected_paths)
+      ? data.protected_paths.map(function (p) { return String(p == null ? "" : p); })
+                            .filter(function (p) { return p.trim() !== ""; })
+      : [];
+    out.category_labels = (data.category_labels && typeof data.category_labels === "object")
+      ? data.category_labels : {};
+    return out;
+  }
+
+  function catLabel(key) {
+    return (setState && setState.category_labels[key]) || SET_DEFAULT_LABELS[key] || key;
+  }
+
+  // ---- render pieces ----
+  function renderModeUI() {
+    if (!setState) return;
+    var block = setState.mode === "block";
+    var ba = $("set-mode-audit"), bb = $("set-mode-block");
+    ba.classList.toggle("active", !block);
+    bb.classList.toggle("active", block);
+    ba.setAttribute("aria-pressed", block ? "false" : "true");
+    bb.setAttribute("aria-pressed", block ? "true" : "false");
+    $("set-mode-help").innerHTML = block
+      ? "Block — actively stop confirmed threats at or above the chosen severity."
+      : "Audit — log &amp; report findings, never block.";
+    // block-severity row is only meaningful in block mode
+    var row = $("set-block-sev-row");
+    row.style.display = block ? "" : "none";
+    $("set-block-severity").disabled = !block;
+  }
+
+  function renderCategoriesUI() {
+    if (!setState) return;
+    var host = $("set-categories");
+    host.innerHTML = SET_CATS.map(function (c) {
+      var st = setState.categories[c.key] || { enabled: true, min_severity: "info" };
+      var off = st.enabled ? "" : " off";
+      return '<div class="cat-row' + off + '" data-cat="' + c.key + '">' +
+        '<span class="cat-ico" style="--cat:' + c.color + '">' + catIconSVG(catKey(c.key), c.color) + '</span>' +
+        '<div class="cat-main">' +
+          '<div class="cat-name">' + esc(catLabel(c.key)) + '</div>' +
+          '<div class="cat-help">' + esc(c.help) + '</div>' +
+        '</div>' +
+        '<div class="cat-ctrl">' +
+          '<select class="set-select cat-sev" data-cat="' + c.key + '" aria-label="Minimum severity for ' + esc(catLabel(c.key)) + '"' + (st.enabled ? '' : ' disabled') + '>' +
+            sevOptions(st.min_severity) +
+          '</select>' +
+          '<label class="set-toggle"><input type="checkbox" class="cat-enabled" data-cat="' + c.key + '"' + (st.enabled ? ' checked' : '') + ' aria-label="Enable ' + esc(catLabel(c.key)) + '" /><span class="set-track"></span></label>' +
+        '</div>' +
+      '</div>';
+    }).join("");
+    // wire the freshly-built controls
+    Array.prototype.forEach.call(host.querySelectorAll(".cat-enabled"), function (cb) {
+      cb.addEventListener("change", function () {
+        var key = cb.getAttribute("data-cat");
+        setState.categories[key].enabled = cb.checked;
+        renderCategoriesUI();          // re-render to reflect enabled/disabled styling
+        markDirty();
+      });
+    });
+    Array.prototype.forEach.call(host.querySelectorAll(".cat-sev"), function (sel) {
+      sel.addEventListener("change", function () {
+        var key = sel.getAttribute("data-cat");
+        setState.categories[key].min_severity = sevOk(sel.value);
+        markDirty();
+      });
+    });
+  }
+
+  function renderPathsUI() {
+    if (!setState) return;
+    var host = $("set-paths-list");
+    var paths = setState.protected_paths;
+    if (!paths.length) {
+      host.innerHTML = '<div class="paths-empty">No protected paths yet &mdash; add one below.</div>';
+      return;
+    }
+    host.innerHTML = paths.map(function (p, i) {
+      return '<div class="path-row">' +
+        '<code title="' + esc(p) + '">' + esc(p) + '</code>' +
+        '<button type="button" class="path-del" data-idx="' + i + '" aria-label="Remove ' + esc(p) + '">&#10005;</button>' +
+      '</div>';
+    }).join("");
+    Array.prototype.forEach.call(host.querySelectorAll(".path-del"), function (btn) {
+      btn.addEventListener("click", function () {
+        var idx = parseInt(btn.getAttribute("data-idx"), 10);
+        if (idx >= 0 && idx < setState.protected_paths.length) {
+          setState.protected_paths.splice(idx, 1);
+          renderPathsUI();
+          markDirty();
+        }
+      });
+    });
+  }
+
+  function addPath() {
+    var input = $("set-path-input");
+    var val = String(input.value || "").trim();
+    if (!val) return;
+    if (setState.protected_paths.indexOf(val) === -1) {
+      if (setState.protected_paths.length >= 100) { setStatus("Up to 100 protected paths.", "err"); return; }
+      setState.protected_paths.push(val);
+      renderPathsUI();
+      markDirty();
+    }
+    input.value = "";
+    input.focus();
+  }
+
+  function renderAdvancedUI() {
+    if (!setState) return;
+    $("set-report").checked = !!setState.report;
+    $("set-discover").checked = !!setState.discover;
+    $("set-osv").checked = !!setState.osv_lookup;
+    var sel = $("set-report-severity");
+    sel.innerHTML = sevOptions(setState.report_min_severity);
+    sel.disabled = !setState.report;
+  }
+
+  function renderAllSettings() {
+    // Selects whose options are static across renders get filled once here.
+    $("set-block-severity").innerHTML = sevOptions(setState.block_severity);
+    renderModeUI();
+    renderCategoriesUI();
+    renderPathsUI();
+    renderAdvancedUI();
+  }
+
+  function setStatus(msg, kind) {
+    var el = $("set-status");
+    if (!el) return;
+    el.textContent = msg || "";
+    el.className = "set-status" + (kind ? " " + kind : "");
+  }
+  function markDirty() {
+    // clear a lingering success/error note once the user edits again
+    setStatus("");
+  }
+
+  // ---- assemble the POST payload (validated shapes only) ----
+  function buildPayload() {
+    var cats = {};
+    SET_CATS.forEach(function (c) {
+      var st = setState.categories[c.key];
+      cats[c.key] = { enabled: !!st.enabled, min_severity: sevOk(st.min_severity) };
+    });
+    return {
+      mode: setState.mode === "block" ? "block" : "audit",
+      block_severity: sevOk(setState.block_severity),
+      report: !!setState.report,
+      report_min_severity: sevOk(setState.report_min_severity),
+      discover: !!setState.discover,
+      osv_lookup: !!setState.osv_lookup,
+      categories: cats,
+      protected_paths: setState.protected_paths.slice(0, 100)
+    };
+  }
+
+  function postJSON(url, body) {
+    return fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Accept": "application/json" },
+      cache: "no-store",
+      body: JSON.stringify(body)
+    }).then(function (r) {
+      return r.json().catch(function () { return {}; }).then(function (j) {
+        return { ok: r.ok, status: r.status, body: j };
+      });
+    });
+  }
+
+  function saveSettings() {
+    if (setSaving || !setState) return;
+    setSaving = true;
+    var btn = $("set-save");
+    btn.disabled = true;
+    btn.textContent = "Saving…";
+    setStatus("Saving…");
+    postJSON("/api/settings", buildPayload()).then(function (res) {
+      var result = res.body || {};
+      if (res.ok && result.ok) {
+        // refresh in-memory settings from the server's authoritative view
+        if (result.settings) setState = normalizeSettings(result.settings);
+        renderAllSettings();
+        setStatus("Saved — changes are live.", "ok");
+      } else {
+        var errs = Array.isArray(result.errors) && result.errors.length
+          ? result.errors.join(" · ")
+          : ("Could not save (HTTP " + res.status + ").");
+        setStatus(errs, "err");
+      }
+    }).catch(function () {
+      setStatus("Network error — settings not saved. Check the connection and retry.", "err");
+    }).then(function () {
+      setSaving = false;
+      btn.disabled = false;
+      btn.textContent = "Save changes";
+    });
+  }
+
+  function resetDefaults() {
+    setState = defaultSetState();
+    // keep the server-provided labels if we have them
+    var labels = (window.__setLabels) || {};
+    setState.category_labels = labels;
+    renderAllSettings();
+    setStatus("Defaults restored — click Save to apply.", "ok");
+  }
+
+  function loadSettings(force) {
+    if (setLoaded && !force) { return Promise.resolve(); }
+    return getJSON("/api/settings").then(function (data) {
+      setState = normalizeSettings(data);
+      window.__setLabels = setState.category_labels;   // remembered for Reset
+      setLoaded = true;
+      renderAllSettings();
+      setStatus("");
+    }).catch(function () {
+      if (!setState) setState = defaultSetState();
+      renderAllSettings();
+      setStatus("Could not load settings — showing defaults.", "err");
+    });
+  }
+
+  // ---- open / close (mirrors the threat-modal conventions) ----
+  function openSettings() {
+    var overlay = $("settings-modal");
+    if (!overlay) return;
+    overlay.classList.add("open");
+    overlay.setAttribute("aria-hidden", "false");
+    if (setState) renderAllSettings(); else setStatus("Loading settings…");
+    loadSettings(false);
+    var close = $("set-close");
+    if (close) close.focus();
+  }
+  function closeSettings() {
+    var overlay = $("settings-modal");
+    if (!overlay) return;
+    overlay.classList.remove("open");
+    overlay.setAttribute("aria-hidden", "true");
+    var gear = $("settings-open");
+    if (gear) gear.focus();
+  }
+
+  function wireSettings() {
+    var overlay = $("settings-modal");
+    if (!overlay || overlay.__wired) return;
+    overlay.__wired = true;
+
+    $("settings-open").addEventListener("click", openSettings);
+    $("set-close").addEventListener("click", closeSettings);
+    overlay.addEventListener("click", function (e) { if (e.target === overlay) closeSettings(); });
+    document.addEventListener("keydown", function (e) {
+      if (e.key === "Escape" && overlay.classList.contains("open")) closeSettings();
+    });
+
+    // mode segmented control
+    $("set-mode-audit").addEventListener("click", function () {
+      if (!setState) return; setState.mode = "audit"; renderModeUI(); markDirty();
+    });
+    $("set-mode-block").addEventListener("click", function () {
+      if (!setState) return; setState.mode = "block"; renderModeUI(); markDirty();
+    });
+    $("set-block-severity").addEventListener("change", function () {
+      if (!setState) return; setState.block_severity = sevOk(this.value); markDirty();
+    });
+
+    // advanced toggles + report severity
+    $("set-report").addEventListener("change", function () {
+      if (!setState) return; setState.report = this.checked;
+      $("set-report-severity").disabled = !this.checked; markDirty();
+    });
+    $("set-report-severity").addEventListener("change", function () {
+      if (!setState) return; setState.report_min_severity = sevOk(this.value); markDirty();
+    });
+    $("set-discover").addEventListener("change", function () {
+      if (!setState) return; setState.discover = this.checked; markDirty();
+    });
+    $("set-osv").addEventListener("change", function () {
+      if (!setState) return; setState.osv_lookup = this.checked; markDirty();
+    });
+
+    // protected-paths add (button + Enter)
+    $("set-path-add").addEventListener("click", addPath);
+    $("set-path-input").addEventListener("keydown", function (e) {
+      if (e.key === "Enter") { e.preventDefault(); addPath(); }
+    });
+
+    // footer
+    $("set-save").addEventListener("click", saveSettings);
+    $("set-reset").addEventListener("click", resetDefaults);
+  }
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", wireSettings);
+  else wireSettings();
+  // warm the settings once at startup so the first open is instant (best-effort)
+  loadSettings(false);
 
   poll();
   setInterval(poll, POLL_MS);
@@ -1727,6 +2532,118 @@
       <button class="modal-copy" id="tm-copy">Copy</button>
     </div>
     <div class="modal-body" id="tm-body"></div>
+  </div>
+</div>
+
+<!-- Settings panel — reuses the .modal-overlay / .modal system -->
+<div class="modal-overlay" id="settings-modal" aria-hidden="true">
+  <div class="modal settings-modal" role="dialog" aria-modal="true" aria-labelledby="set-title">
+    <button class="modal-close" id="set-close" aria-label="Close settings">&#10005;</button>
+
+    <div class="set-head">
+      <div class="set-ico" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+      </div>
+      <div class="set-htext">
+        <div class="set-title" id="set-title">Detection settings</div>
+        <div class="set-sub">Tune what Guardian watches for &mdash; changes stay on this machine.</div>
+      </div>
+    </div>
+
+    <div class="set-body">
+      <div class="set-defaults-hint">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 16v-4M12 8h.01"/></svg>
+        <span>Sensible defaults are already on: every category is enabled at the lowest severity, and nothing is blocked (audit only). Loosen a category to cut noise, or switch to block mode to actively stop confirmed threats.</span>
+      </div>
+
+      <!-- Protection mode -->
+      <div class="set-group">
+        <div class="set-glabel">Protection mode</div>
+        <div class="set-row">
+          <div class="set-rl">
+            <div class="set-rt">Enforcement</div>
+            <div class="set-rh"><b id="set-mode-help">Audit &mdash; log &amp; report findings, never block.</b></div>
+          </div>
+          <div class="set-rc">
+            <div class="set-seg" role="group" aria-label="Protection mode">
+              <button type="button" id="set-mode-audit" class="active" aria-pressed="true">Audit</button>
+              <button type="button" id="set-mode-block" class="warn" aria-pressed="false">Block</button>
+            </div>
+          </div>
+        </div>
+        <div class="set-row" id="set-block-sev-row">
+          <div class="set-rl">
+            <div class="set-rt">Block at severity</div>
+            <div class="set-rh">Confirmed threats at or above this level are stopped.</div>
+          </div>
+          <div class="set-rc">
+            <select class="set-select" id="set-block-severity" aria-label="Block at severity"></select>
+          </div>
+        </div>
+      </div>
+
+      <!-- Threat categories -->
+      <div class="set-group">
+        <div class="set-glabel">Threat categories
+          <span class="set-gnote">toggle a category, or raise its minimum severity to cut noise</span>
+        </div>
+        <div id="set-categories"></div>
+      </div>
+
+      <!-- Protected files & folders -->
+      <div class="set-group">
+        <div class="set-glabel">Protected files &amp; folders
+          <span class="set-gnote">always block in block mode &middot; never leave this machine</span>
+        </div>
+        <div class="set-rh" style="margin:-4px 0 12px; color:var(--muted); font-size:12px; line-height:1.5;">
+          Any tool that touches a matching path is flagged as critical &mdash; and blocked when block mode is on. Use a glob (<code style="font-family:ui-monospace,Menlo,monospace;color:var(--mint)">~/.ssh/*</code>, <code style="font-family:ui-monospace,Menlo,monospace;color:var(--mint)">*.pem</code>) or a folder prefix (<code style="font-family:ui-monospace,Menlo,monospace;color:var(--mint)">~/secrets</code>).
+        </div>
+        <div class="paths-list" id="set-paths-list"></div>
+        <div class="path-add">
+          <input type="text" class="path-input" id="set-path-input" placeholder="~/.ssh/*  ·  *.pem  ·  ~/secrets" aria-label="Add a protected path" autocomplete="off" spellcheck="false" />
+          <button type="button" class="path-add-btn" id="set-path-add">Add</button>
+        </div>
+      </div>
+
+      <!-- Advanced -->
+      <div class="set-group">
+        <div class="set-glabel">Advanced</div>
+        <div class="set-row">
+          <div class="set-rl">
+            <div class="set-rt">Share sightings</div>
+            <div class="set-rh">Report matched public/community threats to the shared graph to strengthen consensus.</div>
+          </div>
+          <div class="set-rc">
+            <select class="set-select" id="set-report-severity" aria-label="Report at severity"></select>
+            <label class="set-toggle"><input type="checkbox" id="set-report" /><span class="set-track"></span></label>
+          </div>
+        </div>
+        <div class="set-row">
+          <div class="set-rl">
+            <div class="set-rt">Heuristic discovery</div>
+            <div class="set-rh">Surface low-signal candidates from built-in heuristics (not yet in any graph).</div>
+          </div>
+          <div class="set-rc">
+            <label class="set-toggle"><input type="checkbox" id="set-discover" /><span class="set-track"></span></label>
+          </div>
+        </div>
+        <div class="set-row">
+          <div class="set-rl">
+            <div class="set-rt">OSV vulnerability lookup</div>
+            <div class="set-rh">Check dependencies against the OSV database for known advisories.</div>
+          </div>
+          <div class="set-rc">
+            <label class="set-toggle"><input type="checkbox" id="set-osv" /><span class="set-track"></span></label>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="set-foot">
+      <span class="set-status" id="set-status" role="status" aria-live="polite"></span>
+      <button type="button" class="set-reset" id="set-reset">Reset to defaults</button>
+      <button type="button" class="set-save" id="set-save">Save changes</button>
+    </div>
   </div>
 </div>
 </body>
