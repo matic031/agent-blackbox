@@ -92,9 +92,13 @@ export function defaultGuardianHome(): string {
  * Python `DEFAULT_PROTECTED_PATHS`.
  */
 export const DEFAULT_PROTECTED_PATHS: readonly string[] = [
-  "~/.ssh/*",
-  "~/.aws/credentials",
-  "*.pem",
+  "~/.ssh/*", // SSH private keys
+  ".env", // environment files (any directory)
+  ".env.*", // env variants (.env.local, .env.production, ...)
+  "*.pem", // PEM-encoded keys / certificates
+  "*.key", // private key files
+  "*.p12", // PKCS#12 / PFX keystores
+  "~/.aws/credentials", // cloud credential store
 ];
 
 const DEFAULTS: GuardianConfig = {

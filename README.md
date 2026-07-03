@@ -103,6 +103,16 @@ plugins:
 
 Every detection is logged to the audit trail and shown live in the dashboard. Curators review community reports and promote the real ones - see the [curator guide](CURATOR_README.md) for that side of the workflow.
 
+### Optional: AI reviewer
+
+On top of the built-in pattern and graph detection, Guardian can use an LLM for a second opinion on prompt injection. It's off by default. The installer offers to set it up, or run it anytime:
+
+```bash
+hermes guardian setup-llm
+```
+
+You pick the provider (OpenAI or Anthropic), where the API key comes from (copied from Hermes's environment, from OpenClaw, or a key you paste), and the model. The reviewer only flags - it never blocks, and its verdicts stay on your machine (never shared to the community graph). Turn it off with `hermes guardian setup-llm --disable`.
+
 ### Try it
 
 Open the dashboard, then give your agent one of these and watch the finding land in the live feed:

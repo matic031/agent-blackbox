@@ -89,16 +89,6 @@ def _rule_source(rule: Dict[str, Any]) -> str:
     return src if src in ("public", "community") else "public"
 
 
-@dataclass
-class _RulesetProto:
-    """Structural stand-in used only for type hints — the real Ruleset lives in
-    ruleset.py but detection only reads these three attributes."""
-
-    injection: List[Dict[str, Any]] = field(default_factory=list)
-    escalation: List[Dict[str, Any]] = field(default_factory=list)
-    dependency: Dict[str, Dict[str, Any]] = field(default_factory=dict)
-
-
 def detect_injection(text: str, ruleset: Any) -> List[Finding]:
     """Match each cached injection regex against *text*.
 

@@ -444,12 +444,6 @@ export function normalizeArgShape(toolName: string, args: unknown): string | nul
   return null;
 }
 
-/** Convenience: the escalation identifier an invocation would produce (or null). */
-export function escalationIdentifierFor(toolName: string, args: unknown): string | null {
-  const shape = normalizeArgShape(toolName, args);
-  return shape ? escalationIdentifier(toolName, shape) : null;
-}
-
 // ---------------------------------------------------------------------------
 // Built-in injection heuristics (discovery layer — OWASP LLM01/LLM06)
 // Port of quads.py `_INJECTION_HEURISTICS` / `scan_injection_heuristics`.
@@ -1045,9 +1039,6 @@ export function parseDependencyInstalls(command: string): ParsedPackage[] {
   }
   return out;
 }
-
-/** Back-compat alias for callers expecting the old name. */
-export const detectDependencyInstalls = parseDependencyInstalls;
 
 // ---------------------------------------------------------------------------
 // Text flattening (injection scan helper) + evidence sampling

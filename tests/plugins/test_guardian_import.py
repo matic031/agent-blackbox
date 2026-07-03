@@ -7,6 +7,24 @@ cli = load_guardian("cli")
 quads = load_guardian("quads")
 
 
+def test_seed_entries_dedups_and_dry_run_spends_nothing():
+    # Two spellings of one npm package (npm lowercases names) + a distinct one,
+    # plus one already in the ledger. Dry-run must publish nothing and report the
+    # de-duplicated count so a curator sees the TRAC bill before spending it.
+    entries = [
+        {"type": "dependency", "ecosystem": "npm", "name": "evil", "version": "1.0.0"},
+        {"type": "dependency", "ecosystem": "npm", "name": "EVIL", "version": "1.0.0"},  # same id
+        {"type": "dependency", "ecosystem": "npm", "name": "evil", "version": "2.0.0"},
+        {"type": "dependency", "ecosystem": "npm", "name": "seen", "version": "9.0.0"},  # in ledger
+    ]
+    already = {"dep:npm:seen@9.0.0"}
+    seeded, skipped, errors, new_ids = cli._seed_entries(
+        None, None, entries, publish=False, already=already, dry_run=True
+    )
+    assert (seeded, skipped, errors) == (2, 2, 0)
+    assert new_ids == ["dep:npm:evil@1.0.0", "dep:npm:evil@2.0.0"]
+
+
 # A small bumblebee-shaped catalog: one package, three malicious versions.
 BUMBLEBEE = {
     "schema_version": "0.1.0",

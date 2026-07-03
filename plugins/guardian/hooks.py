@@ -19,7 +19,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, List, Optional
 
-from . import audit, config as config_mod, constants, detection, ruleset
+from . import audit, config as config_mod, constants, detection, quads, ruleset
 from .config import GuardianConfig
 from .dkg_client import DkgClient, DkgError
 
@@ -86,10 +86,11 @@ def _report_and_audit(cfg: GuardianConfig, event: str, findings: List[detection.
     except Exception:
         client = None
     for finding in finding_dicts:
-        # Custom (user-configured) rules are personal: they are audited in the
-        # local JSONL logs above but never leave this machine — no private WM
-        # KA, no community sighting.
-        if finding.get("source") == "custom":
+        # Custom (user-configured) rules and LLM second-opinions are personal:
+        # they are audited in the local JSONL logs above but never leave this
+        # machine — no private WM KA, no community sighting. The LLM verdict is
+        # a soft signal, not a verified threat, so it must not seed the graph.
+        if finding.get("source") in ("custom", "llm"):
             continue
         identifier = str(finding.get("identifier") or "")
         # Per-threat cooldown: a re-fire of the same identifier within the
@@ -105,8 +106,6 @@ def _report_and_audit(cfg: GuardianConfig, event: str, findings: List[detection.
 
 
 def _share_sighting(client: DkgClient, cfg: GuardianConfig, finding: Dict[str, Any]) -> None:
-    from . import quads
-
     try:
         reporter = _reporter_address(client)
         # For candidate (heuristic-only) findings, forward the privacy-safe
@@ -219,8 +218,6 @@ def on_pre_tool_call(
 def _record_file_access(tool_name: str, args: Any) -> None:
     """Log a file-access tool call to the visibility log (fail-open)."""
     try:
-        from . import quads
-
         access = quads.file_access_arg(tool_name, args)
         if access:
             audit.record_file_access(access["tool"], access["path"], access["mode"])
@@ -315,8 +312,51 @@ def on_pre_api_request(**kwargs: Any) -> None:
             "provider": kwargs.get("provider"),
         }
         _report_and_audit(cfg, "pre_api_request", findings, detail)
+        # Optional LLM second opinion — runs off-thread so it never delays the
+        # request, and only when the user has configured it.
+        if cfg.llm_ready:
+            _spawn_llm_review(cfg, text, detail)
     except Exception as exc:  # pragma: no cover - fail open
         logger.debug("guardian: pre_api_request failed: %s", exc)
+
+
+def _spawn_llm_review(cfg: GuardianConfig, text: str, detail: Dict[str, Any]) -> None:
+    """Ask the configured LLM for an injection second opinion on a daemon thread.
+
+    Fail-open and fully off the request path: a positive verdict becomes a local
+    ``source="llm"`` injection finding (audited + shown, never blocks, never
+    shared to the graph). Any error is swallowed.
+    """
+    import threading
+
+    from . import llm
+
+    def _run() -> None:
+        try:
+            verdict = llm.review_injection(text, cfg)
+            if not verdict:
+                return
+            reason = verdict.get("reason") or "LLM flagged prompt injection"
+            finding = detection.Finding(
+                identifier=f"injection:llm:{quads.stable_hash(reason, 12)}",
+                category="injection",
+                severity=verdict.get("severity", "high"),
+                title="Prompt injection (LLM review)",
+                evidence=reason,
+                matched=reason,
+                confirmed=False,
+                source="llm",
+            )
+            worthy = _flag_worthy(cfg, [finding])
+            if worthy:
+                _report_and_audit(cfg, "pre_api_request", worthy, {**detail, "llm": True})
+        except Exception as exc:  # pragma: no cover - fail open
+            logger.debug("guardian: LLM review failed: %s", exc)
+
+    try:
+        threading.Thread(target=_run, name="guardian-llm", daemon=True).start()
+    except Exception:  # pragma: no cover - fail open
+        pass
 
 
 _AUTO_ATTACH_INTERVAL_SECS = 24 * 60 * 60

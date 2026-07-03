@@ -40,6 +40,13 @@ def read_settings() -> Dict[str, Any]:
         "osv_lookup": cfg.osv_lookup,
         "categories": categories,
         "protected_paths": list(cfg.protected_paths),
+        "llm": {
+            "enabled": cfg.llm_enabled,
+            "provider": cfg.llm_provider,
+            "model": cfg.llm_model,
+            # Never expose the raw key; report only whether one is set.
+            "has_key": bool(cfg.llm_api_key),
+        },
         "severity_order": list(constants.SEVERITY_ORDER),
         "category_labels": {
             "injection": "Prompt injection",
@@ -123,6 +130,30 @@ def _validate(payload: Dict[str, Any]) -> Tuple[Dict[str, Any], List[str]]:
         else:
             errors.append("protected_paths must be a list")
 
+    if "llm" in payload:
+        raw = payload["llm"]
+        llm: Dict[str, Any] = {}
+        if isinstance(raw, dict):
+            if "enabled" in raw:
+                if isinstance(raw["enabled"], bool):
+                    llm["enabled"] = raw["enabled"]
+                else:
+                    errors.append("llm.enabled must be a boolean")
+            if "provider" in raw:
+                prov = str(raw["provider"]).strip().lower()
+                if prov in ("openai", "anthropic", ""):
+                    llm["provider"] = prov
+                else:
+                    errors.append(f"invalid llm.provider: {raw['provider']!r}")
+            if "model" in raw:
+                llm["model"] = str(raw["model"]).strip()
+            if "api_key" in raw:
+                llm["api_key"] = str(raw["api_key"]).strip()
+            if llm:
+                updates["llm"] = llm
+        else:
+            errors.append("llm must be an object")
+
     return updates, errors
 
 
@@ -189,8 +220,9 @@ def _dig(root: Dict[str, Any], keys: Tuple[str, ...]) -> Dict[str, Any]:
 def _apply(entry: Dict[str, Any], updates: Dict[str, Any]) -> None:
     """Apply validated *updates* onto the guardian config *entry* in place.
 
-    ``detection`` is deep-merged per category so tuning one category never
-    drops another; every other key is a straight overwrite.
+    ``detection`` and ``llm`` are deep-merged (so setting the model never drops
+    the key, and tuning one category never drops another); every other key is a
+    straight overwrite.
     """
     for key, value in updates.items():
         if key == "detection" and isinstance(value, dict):
@@ -204,5 +236,11 @@ def _apply(entry: Dict[str, Any], updates: Dict[str, Any]) -> None:
                     cur = {}
                     existing[cat] = cur
                 cur.update(setting)
+        elif key == "llm" and isinstance(value, dict):
+            existing = entry.get("llm")
+            if not isinstance(existing, dict):
+                existing = {}
+                entry["llm"] = existing
+            existing.update(value)
         else:
             entry[key] = value

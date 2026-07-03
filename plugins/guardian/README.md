@@ -135,6 +135,37 @@ rule, so they behave differently from graph/heuristic findings:
 - they are **never** shared to the community pool — `_report_and_audit` skips
   SWM/private-KA for `source=="custom"` and audits locally only.
 
+### Optional LLM reviewer
+
+An opt-in `llm` subtree adds an LLM second opinion on prompt injection over the
+observer path (`on_pre_api_request`). Off by default; every key has an env
+override.
+
+| key | default | env |
+|-----|---------|-----|
+| `llm.enabled` | `false` | `GUARDIAN_LLM_ENABLED` |
+| `llm.provider` | `""` (`openai` \| `anthropic`) | `GUARDIAN_LLM_PROVIDER` |
+| `llm.model` | `""` | `GUARDIAN_LLM_MODEL` |
+| `llm.api_key` | `""` | `GUARDIAN_LLM_API_KEY` |
+
+`GuardianConfig.llm_ready` is true only when enabled with a known provider,
+model, and key all set. When ready, `on_pre_api_request` spawns a daemon thread
+(`_spawn_llm_review`) that calls `llm.review_injection(text, cfg)`; a positive
+verdict becomes a `source="llm"` injection `Finding`. Like `custom`, an `llm`
+finding **never blocks** and is **never** shared to the graph - it is audited
+locally only (`_report_and_audit` skips SWM/private-KA for `source=="llm"`).
+
+The reviewer is a tiny stdlib `urllib` client (`llm.py`) for OpenAI
+(`/v1/chat/completions`) and Anthropic (`/v1/messages`); every path fails open
+to `None`, and reviewed text is capped and secret-redacted before it leaves the
+machine. Configure it interactively with `hermes guardian setup-llm` (which
+copies the key from Hermes's env, OpenClaw, or a pasted value) or disable with
+`hermes guardian setup-llm --disable`.
+
+> Enabling this sends the reviewed message text to the chosen provider, and the
+> key is stored in plaintext under `plugins.entries.guardian.llm.api_key`. Both
+> are inherent to the feature - hence opt-in.
+
 ### Settings API
 
 The loopback dashboard exposes the policy over HTTP (same `127.0.0.1` bind as
@@ -146,8 +177,9 @@ the rest of the dashboard):
   `severity_order`, and `category_labels`.
 - `POST /api/settings` (JSON body) → `write_settings(payload)` →
   `{ok, errors, settings}`; HTTP `400` when `ok` is false. Only known keys with
-  valid values are written; `detection` is deep-merged per category and all
-  unrelated config is preserved.
+  valid values are written; `detection` and `llm` are deep-merged and all
+  unrelated config is preserved. The `llm` view reports `has_key` (a bool),
+  never the raw key.
 
 ## CLI
 
@@ -164,6 +196,8 @@ hermes guardian curate approve <id>    # promote to curated threat, any of the f
 hermes guardian curate reject <id>     # reject locally (+ optional SWM false-positive)
 hermes guardian curate import --file … # bulk import a catalog (OSV enrichment for deps)
 hermes guardian dashboard [--port]     # start the loopback dashboard
+hermes guardian setup-llm              # configure the optional LLM injection reviewer
+hermes guardian setup-llm --disable    # turn the LLM reviewer off
 ```
 
 ## Dependencies

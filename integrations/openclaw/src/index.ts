@@ -44,7 +44,7 @@ import { GuardianConfig, categoryAllows, resolveConfig } from "./config.js";
 import { RulesetCache } from "./ruleset.js";
 import { GuardianSeverity, KIND_VULNERABILITY, SEVERITY_RANK, buildReportQuads, stableHash } from "./quads.js";
 import { lookup as osvLookup } from "./osv.js";
-import { redact, sanitizeText } from "./redact.js";
+import { sanitizeText } from "./redact.js";
 
 const PLUGIN_ID = "guardian";
 const FRAMEWORK = "openclaw" as const;
@@ -115,6 +115,18 @@ function flagWorthy(cfg: GuardianConfig, findings: Finding[]): Finding[] {
     out.push(f);
   }
   return out;
+}
+
+/**
+ * Injection scan shared by `before_agent_run` and `message_received`: detect
+ * graph-backed patterns, add built-in discovery candidates when enabled, then
+ * apply the user's flag policy. One place so the two hooks can't drift.
+ */
+function scanInjection(rt: GuardianRuntime, text: string): Finding[] {
+  const ruleset = rt.ruleset.get();
+  const findings = detectInjection(text, ruleset);
+  if (rt.cfg.discover) findings.push(...discoverInjection(text, ruleset));
+  return flagWorthy(rt.cfg, findings);
 }
 
 /**
@@ -318,11 +330,8 @@ function makeBeforeAgentRun(rt: GuardianRuntime) {
     event: PluginHookBeforeAgentRunEvent,
   ): Promise<PluginHookBeforeAgentRunResult> => {
     try {
-      const ruleset = rt.ruleset.get();
       const text = [event.prompt ?? "", ...collectText(event.messages)].join("\n");
-      let findings = detectInjection(text, ruleset);
-      if (rt.cfg.discover) findings.push(...discoverInjection(text, ruleset));
-      findings = flagWorthy(rt.cfg, findings);
+      const findings = scanInjection(rt, text);
       if (findings.length === 0) return { outcome: "pass" };
 
       for (const f of findings) observe(rt, "before_agent_run", f);
@@ -348,11 +357,8 @@ function makeBeforeAgentRun(rt: GuardianRuntime) {
 function makeMessageReceived(rt: GuardianRuntime) {
   return async (event: PluginHookMessageReceivedEvent): Promise<void> => {
     try {
-      const ruleset = rt.ruleset.get();
       const text = event.content ?? "";
-      const findings = detectInjection(text, ruleset);
-      if (rt.cfg.discover) findings.push(...discoverInjection(text, ruleset));
-      for (const f of flagWorthy(rt.cfg, findings)) observe(rt, "message_received", f);
+      for (const f of scanInjection(rt, text)) observe(rt, "message_received", f);
     } catch {
       /* fail-open — message_received is observation-only */
     }

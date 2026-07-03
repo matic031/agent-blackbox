@@ -11,11 +11,12 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import urllib.request
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from . import attach, audit, constants, quads, ruleset
+from . import attach, audit, constants, llm, quads, ruleset, settings
 from .config import GuardianConfig, load_guardian_config
 from .dkg_client import DkgClient, DkgError, extract_binding
 
@@ -75,7 +76,7 @@ def setup_cli(parser: argparse.ArgumentParser) -> None:
     report.set_defaults(func=_cmd_report)
 
     setup_graph = sub.add_parser("setup-graph", help="Curator: create + register the public threat CG")
-    setup_graph.add_argument("--network", default="testnet", help="Target network (informational)")
+    setup_graph.add_argument("--network", default="mainnet", help="Target network (informational)")
     setup_graph.set_defaults(func=_cmd_setup_graph)
 
     curate = sub.add_parser("curate", help="Curator: review + promote community threats")
@@ -114,11 +115,26 @@ def setup_cli(parser: argparse.ArgumentParser) -> None:
     )
     cimport.add_argument("--osv-enrich", action="store_true", help="OSV-enrich dependency entries before publish")
     cimport.add_argument("--no-publish", action="store_true", help="Share to SWM (the free local tier) only; skip vm/publish")
+    cimport.add_argument("--dry-run", action="store_true", help="Preview what WOULD publish after dedup; spend no TRAC")
+    cimport.add_argument("--check-graph", action="store_true", help="Also skip identifiers already on-chain (queries the VM once)")
+    cimport.add_argument("--epochs", type=int, default=1, help="Storage epochs per asset — higher = longer on-chain life, more TRAC (default 1)")
     cimport.set_defaults(func=_cmd_curate_import)
 
     dash = sub.add_parser("dashboard", help="Start the local Guardian dashboard")
     dash.add_argument("--port", type=int, help="Override dashboard port")
     dash.set_defaults(func=_cmd_dashboard)
+
+    setup_llm = sub.add_parser(
+        "setup-llm", help="Configure the optional LLM prompt-injection reviewer (provider/model/key)"
+    )
+    setup_llm.add_argument("--provider", choices=["openai", "anthropic"], help="Skip the prompt: set provider")
+    setup_llm.add_argument("--model", help="Skip the prompt: set model id (default: provider's recommended)")
+    setup_llm.add_argument(
+        "--key-source", choices=["hermes", "openclaw", "new"], help="Where to copy the API key from"
+    )
+    setup_llm.add_argument("--api-key", help="Skip the prompt: use this API key (with --key-source new)")
+    setup_llm.add_argument("--disable", action="store_true", help="Turn the LLM reviewer off and exit")
+    setup_llm.set_defaults(func=_cmd_setup_llm)
 
 
 # ---------------------------------------------------------------------------
@@ -385,7 +401,6 @@ def _cmd_curate_approve(args: argparse.Namespace) -> int:
         name=name,
         description=description,
         curated=True,
-        kind=fields.get("kind"),
         pattern=fields.get("pattern"),
         owasp_category=fields.get("owasp_category"),
         tool_name=fields.get("tool_name"),
@@ -461,10 +476,19 @@ def _cmd_curate_import(args: argparse.Namespace) -> int:
         print("No catalog JSON files found to import.")
         return 0
 
-    # While VM publish is blocked, --no-publish is the practical path: it shares
-    # to SWM only (the free local/community tier).
     publish = not args.no_publish
-    seeded, skipped, errors = 0, 0, 0
+    dry_run = getattr(args, "dry_run", False)
+
+    # Dedup — each mainnet VM publish costs TRAC, so never publish an identifier
+    # twice. Skip anything in the curator's seeded ledger (what we've published
+    # before), plus — with --check-graph — anything already on-chain. The set
+    # also grows in-run, so a repeat within a batch publishes at most once.
+    already = _load_seeded_ledger()
+    if getattr(args, "check_graph", False):
+        already |= _existing_graph_identifiers(client, cfg)
+
+    seeded = dup_skipped = errors = bad_files = 0
+    published_ids: List[str] = []
     for path in catalog_paths:
         try:
             catalog = json.loads(path.read_text(encoding="utf-8"))
@@ -472,22 +496,35 @@ def _cmd_curate_import(args: argparse.Namespace) -> int:
             if args.file:  # explicit single file: a bad file is a hard error
                 print(f"error: invalid JSON: {exc}")
                 return 2
-            skipped += 1  # in --dir mode, silently skip non-JSON/bad files
+            bad_files += 1  # in --dir mode, silently skip non-JSON/bad files
             continue
         entries = _flatten_catalog(catalog, forced_type=args.type)
         if not entries:
-            skipped += 1  # not a recognizable catalog
+            bad_files += 1  # not a recognizable catalog
             continue
         if args.osv_enrich:
             entries = _osv_enrich(entries)
-        s, e = _seed_entries(client, cfg, entries, publish=publish)
+        s, sk, e, ids = _seed_entries(
+            client, cfg, entries, publish=publish, already=already,
+            dry_run=dry_run, epochs=max(1, int(getattr(args, "epochs", 1) or 1)),
+        )
         seeded += s
+        dup_skipped += sk
         errors += e
+        published_ids += ids
         if args.dir:
-            print(f"  {path.name}: {s} seeded, {e} errors")
+            print(f"  {path.name}: {s} new, {sk} dup, {e} err")
 
-    tier = "VM (published)" if publish else "the local graph (SWM)"
-    print(f"Import complete: {seeded} threats seeded to {tier}, {skipped} skipped, {errors} errors.")
+    if not dry_run:
+        _append_seeded_ledger(published_ids)  # only successful publishes are recorded
+
+    if dry_run:
+        print(f"Dry run: {seeded} NEW threats would publish, {dup_skipped} skipped as duplicates, {errors} errors.")
+        print("  Nothing published — no TRAC spent. Dedup keeps the bill to genuinely-new threats only.")
+    else:
+        tier = "the public graph (mainnet VM)" if publish else "the local graph (SWM)"
+        tail = f", {bad_files} unreadable files" if bad_files else ""
+        print(f"Import complete: {seeded} new threats → {tier}, {dup_skipped} skipped as duplicates, {errors} errors{tail}.")
     return 0 if errors == 0 else 1
 
 
@@ -506,16 +543,81 @@ def _resolve_import_paths(args: argparse.Namespace) -> Optional[List[Path]]:
     return sorted(p for p in directory.glob("*.json") if p.is_file())
 
 
+def _seeded_ledger_path() -> Path:
+    """Curator-local record of every identifier already published (dedup)."""
+    return constants.guardian_home() / "seeded_identifiers.txt"
+
+
+def _load_seeded_ledger() -> set:
+    try:
+        return {
+            ln.strip()
+            for ln in _seeded_ledger_path().read_text(encoding="utf-8").splitlines()
+            if ln.strip()
+        }
+    except Exception:
+        return set()
+
+
+def _append_seeded_ledger(identifiers: List[str]) -> None:
+    if not identifiers:
+        return
+    path = _seeded_ledger_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write("\n".join(identifiers) + "\n")
+    except Exception:  # pragma: no cover - defensive
+        pass
+
+
+def _existing_graph_identifiers(client: DkgClient, cfg: GuardianConfig) -> set:
+    """Every threat identifier already on-chain (VM). Authoritative dedup set."""
+    try:
+        rows = client.query(
+            "PREFIX g: <http://umanitek.ai/ontology/guardian/> "
+            "SELECT DISTINCT ?identifier WHERE { ?t g:identifier ?identifier }",
+            cfg.context_graph_id,
+            view=constants.VIEW_VERIFIABLE_MEMORY,
+        )
+        return {extract_binding(r.get("identifier")) for r in rows if extract_binding(r.get("identifier"))}
+    except Exception:
+        return set()
+
+
 def _seed_entries(
-    client: DkgClient, cfg: GuardianConfig, entries: List[Dict[str, Any]], *, publish: bool
+    client: DkgClient,
+    cfg: GuardianConfig,
+    entries: List[Dict[str, Any]],
+    *,
+    publish: bool,
+    already: set,
+    dry_run: bool = False,
+    epochs: int = 1,
 ) -> tuple:
-    """Seed flattened *entries* as curated threats. Returns ``(seeded, errors)``."""
-    seeded, errors = 0, 0
+    """Seed flattened *entries* as curated threats, skipping duplicates.
+
+    *already* is the running set of identifiers NOT to publish (the seeded
+    ledger + optionally the on-chain set + anything seen earlier this run). It's
+    mutated in place so a repeated identifier within the same run is published at
+    most once — every skip saves a TRAC publish. Returns
+    ``(seeded, skipped, errors, new_ids)``.
+    """
+    seeded, skipped, errors = 0, 0, 0
+    new_ids: List[str] = []
     for entry in entries:
         try:
             category, ident, fields = _entry_to_threat(entry)
         except ValueError:
             errors += 1
+            continue
+        if ident in already:
+            skipped += 1
+            continue
+        already.add(ident)  # never publish the same identifier twice in one run
+        if dry_run:
+            seeded += 1
+            new_ids.append(ident)
             continue
         q = quads.build_threat_quads(
             category=category,
@@ -543,11 +645,12 @@ def _seed_entries(
         try:
             client.share_knowledge_asset(cfg.context_graph_id, ka_name, q)
             if publish:
-                client.publish(cfg.context_graph_id, ka_name, epochs=1)
+                client.publish(cfg.context_graph_id, ka_name, epochs=epochs)
             seeded += 1
+            new_ids.append(ident)
         except DkgError:
             errors += 1
-    return seeded, errors
+    return seeded, skipped, errors, new_ids
 
 
 def _cmd_dashboard(args: argparse.Namespace) -> int:
@@ -561,6 +664,144 @@ def _cmd_dashboard(args: argparse.Namespace) -> int:
     print(f"Starting Guardian dashboard on http://127.0.0.1:{port} (Ctrl-C to stop)")
     start_dashboard(port)
     return 0
+
+
+# ---------------------------------------------------------------------------
+# setup-llm: interactive picker for the optional LLM reviewer
+# ---------------------------------------------------------------------------
+
+#: Standard env var names each provider's key lives in (mirrors hermes auth).
+_LLM_KEY_ENV_VARS = {
+    "openai": ("OPENAI_API_KEY",),
+    "anthropic": ("ANTHROPIC_API_KEY", "ANTHROPIC_TOKEN"),
+}
+
+
+def _tty():
+    """Return an interactive /dev/tty handle, or None (piped / no terminal)."""
+    try:
+        return open("/dev/tty", "r+")
+    except Exception:
+        return None
+
+
+def _ask(prompt: str, tty) -> str:
+    """Print *prompt* and read one trimmed line from the tty (or stdin)."""
+    if tty is not None:
+        tty.write(prompt)
+        tty.flush()
+        line = tty.readline()
+        return line.strip() if line else ""
+    try:
+        return input(prompt).strip()
+    except EOFError:
+        return ""
+
+
+def _mask_key(key: str) -> str:
+    """Show a key as ``sk-a…wxyz`` — enough to recognize, not enough to leak."""
+    key = key or ""
+    if len(key) <= 8:
+        return "****"
+    return f"{key[:4]}…{key[-4:]}"
+
+
+def _env_key(provider: str) -> str:
+    """First non-empty value among *provider*'s standard key env vars."""
+    for name in _LLM_KEY_ENV_VARS.get(provider, ()):  # ordered, first wins
+        val = os.environ.get(name)
+        if val and val.strip():
+            return val.strip()
+    return ""
+
+
+def _resolve_key(source: str, provider: str) -> str:
+    """Resolve an API key for *provider* from the chosen *source*."""
+    if source == "new":
+        return ""
+    # "hermes" (default) and "openclaw" both read the environment the CLI runs in.
+    return _env_key(provider)
+
+
+def _cmd_setup_llm(args: argparse.Namespace) -> int:
+    """Configure the opt-in LLM prompt-injection reviewer.
+
+    Interactive by default (reads /dev/tty); fully scriptable via flags. Writes
+    ``plugins.entries.guardian.llm.*`` through the shared settings writer.
+    """
+    if args.disable:
+        result = settings.write_settings({"llm": {"enabled": False}})
+        print("LLM reviewer disabled." if result.get("ok") else f"error: {result.get('errors')}")
+        return 0 if result.get("ok") else 1
+
+    tty = _tty()
+    try:
+        # --- provider -------------------------------------------------------
+        provider = args.provider
+        if not provider:
+            if tty is None and not args.api_key:
+                print("error: setup-llm needs a terminal, or pass --provider/--model/--api-key.")
+                return 2
+            ans = _ask("AI provider for the reviewer — [1] Anthropic (default)  [2] OpenAI: ", tty)
+            provider = "openai" if ans in ("2", "openai") else "anthropic"
+
+        # --- key source + resolution ---------------------------------------
+        source = args.key_source
+        api_key = args.api_key or ""
+        if not api_key:
+            if not source:
+                ans = _ask(
+                    "API key — [1] from Hermes env (default)  [2] from OpenClaw  [3] paste a new key: ",
+                    tty,
+                )
+                source = {"2": "openclaw", "3": "new"}.get(ans, "hermes")
+            api_key = _resolve_key(source, provider)
+            if not api_key:
+                env_hint = " / ".join(_LLM_KEY_ENV_VARS.get(provider, ()))
+                if source != "new":
+                    print(f"  No {provider} key found in the environment ({env_hint}).")
+                api_key = _ask_secret("  Paste the API key: ", tty)
+
+        if not api_key:
+            print("error: no API key provided — nothing saved.")
+            return 2
+
+        # --- model ----------------------------------------------------------
+        model = (args.model or "").strip()
+        if not model:
+            default_model = llm.default_model(provider)
+            ans = _ask(f"Model id [{default_model}]: ", tty) if tty is not None else ""
+            model = ans or default_model
+
+        # --- persist --------------------------------------------------------
+        result = settings.write_settings({
+            "llm": {"enabled": True, "provider": provider, "model": model, "api_key": api_key},
+        })
+        if not result.get("ok"):
+            print(f"error: could not save settings: {result.get('errors')}")
+            return 1
+        print(
+            f"\nLLM reviewer enabled: provider={provider}  model={model}  key={_mask_key(api_key)}\n"
+            "It gives a second opinion on prompt injection over the observer path (never blocks).\n"
+            "Disable anytime with:  hermes guardian setup-llm --disable"
+        )
+        return 0
+    finally:
+        if tty is not None:
+            try:
+                tty.close()
+            except Exception:
+                pass
+
+
+def _ask_secret(prompt: str, tty) -> str:
+    """Read a secret without echoing when possible; fall back to a plain read."""
+    try:
+        import getpass
+
+        return getpass.getpass(prompt).strip()
+    except Exception:
+        return _ask(prompt, tty)
 
 
 # ---------------------------------------------------------------------------

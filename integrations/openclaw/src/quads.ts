@@ -112,9 +112,6 @@ export function threatUri(identifier: string): string {
   return `urn:guardian:threat:${slug(identifier)}`;
 }
 
-/** Back-compat alias. */
-export const threatUriFor = threatUri;
-
 /**
  * Per-submitter namespaced report subject URI:
  *   `urn:guardian:report:{addrLower}:{sha256(identifier)[:16]}`
@@ -123,11 +120,6 @@ export const threatUriFor = threatUri;
 export function reportUri(identifier: string, agentAddress: string): string {
   const addr = (agentAddress || "anonymous").toLowerCase();
   return `urn:guardian:report:${addr}:${stableHash(identifier, 16)}`;
-}
-
-/** Back-compat alias with the older (agentAddress, identifier) arg order. */
-export function reportUriFor(agentAddress: string, identifier: string): string {
-  return reportUri(identifier, agentAddress);
 }
 
 // ---------------------------------------------------------------------------
@@ -239,11 +231,6 @@ export function literal(value: string): string {
 export function datetimeLiteral(ts?: number): string {
   const iso = new Date(ts ?? Date.now()).toISOString(); // always UTC, ends in Z
   return `${literal(iso)}^^${XSD_DATETIME}`;
-}
-
-/** N-Triples xsd:dateTime typed literal from an epoch-ms timestamp. */
-export function literalIso(ts: number): string {
-  return datetimeLiteral(ts);
 }
 
 export interface ReportInput {

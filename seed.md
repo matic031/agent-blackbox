@@ -184,34 +184,81 @@ Aggregate + curate — don't reinvent. Priority order:
 For each source, map its fields into the split-format catalog above, then run it
 through the workflow below.
 
+### Hitting ~100k, high-precision
+
+Realistic volume, malware-first (blockable), toward the 100k target:
+
+| Source | Rough volume | Notes |
+|--------|-------------|-------|
+| **OSV `MAL-` malware advisories** (npm + PyPI + others) | ~90k–100k+ | The bulk. Confirmed-malicious, structured, provenance built in. This alone can carry the 100k. |
+| **GHSA malware-category** | thousands | Overlaps OSV; dedup handles it. |
+| **Socket.dev / bumblebee** | thousands | Freshest npm supply-chain worms; curate before publishing. |
+| **npm/PyPI takedown lists** | thousands | Already-removed = high precision. |
+| High-severity **vulnerabilities** (OSV non-`MAL`) | as many as you want, but `kind: vulnerability` | Flag-only; keep severity ≤ `high` so they never block. |
+
+Recommendation: **seed malware first** (the 90k+ from OSV `MAL-`), prove
+detection over a few batches, *then* layer in vulnerabilities as flag-only. That
+front-loads the blockable, high-value threats and de-risks the TRAC spend.
+
 ---
 
-## The seeding workflow
+## The seeding workflow (mainnet, batched)
+
+We publish **directly to mainnet** — the real public threat graph. Every VM
+publish costs TRAC, so the flow is built to spend TRAC only on genuinely-new
+threats. Target: **~100k assets, seeded in ~5k batches** so you can watch
+detection light up batch by batch.
 
 ```bash
-# 0. one-time: create the public graph (curator wallet only)
-hermes guardian setup-graph
+# 0. one-time: create the public graph on mainnet (curator wallet only)
+hermes guardian setup-graph --network mainnet
 
-# 1. stage a batch to the community tier (SWM) WITHOUT publishing on-chain yet
-hermes guardian curate import --file npm-malware-2026-07.json --osv-enrich --no-publish
+# 1. DRY RUN first — see how many are NEW after dedup. Spends no TRAC.
+hermes guardian curate import --file batch-01.json --osv-enrich --dry-run
+#   → "Dry run: 4,812 NEW threats would publish, 188 skipped as duplicates, 0 errors."
 
-# 2. review what you staged — grouped, with reporters + provenance
-hermes guardian curate list --pending
-hermes guardian curate show dep:npm:node-ipc@9.1.6
+# 2. publish the batch to mainnet. Dedup skips anything already seeded, so this
+#    only pays TRAC for new identifiers. Re-running a batch is safe — never
+#    double-publishes.
+hermes guardian curate import --file batch-01.json --osv-enrich
 
-# 3. promote the good ones to the PUBLIC graph (VM, on-chain)
-hermes guardian curate approve dep:npm:node-ipc@9.1.6 --severity critical
+# 3. (optional) also skip anything already on-chain — authoritative dedup if the
+#    local ledger was lost or you seed from a second machine.
+hermes guardian curate import --file batch-02.json --osv-enrich --check-graph
 
-# 4. reject a false positive; optionally publish a false-positive note
-hermes guardian curate reject dep:npm:some-legit-pkg@1.0.0 --dispute
+# 4. verify detection with a real agent before the next batch, then repeat.
+hermes guardian curate reject dep:npm:some-legit-pkg@1.0.0 --dispute   # pull a false positive fast
 ```
 
-**Always `--no-publish` on the first import.** It stages to SWM so you can review
-before anything hits the public, blockable graph. Publishing to VM is the
-irreversible, everyone-sees-it step — treat it like a release.
+### Deduplication — how TRAC is protected
 
-Dedup is automatic (one asset per canonical id), but **review for near-dupes**
-across ecosystems/case before approving a large batch.
+- **The identifier is the dedup key** (one asset per canonical id), and dedup is
+  enforced at *three* layers so you never pay to publish the same threat twice:
+  1. **In-batch** — the same id twice in one file publishes once.
+  2. **Seeded ledger** — `curate import` records every published identifier in
+     `$GUARDIAN_HOME/seeded_identifiers.txt` and skips it next time. Overlapping
+     batches and re-runs cost nothing.
+  3. **`--check-graph`** — optionally queries the VM once and skips everything
+     already on-chain (the authoritative set).
+- **Always `--dry-run` a batch first.** It applies all dedup and tells you the
+  exact number of *new* publishes — i.e. your TRAC bill — before you spend it.
+- Normalize inputs before import (lowercase npm names, strip junk) so two
+  spellings of the same package don't become two paid publishes.
+
+### Storage life vs cost (`--epochs`)
+
+A DKG asset is stored for the number of **epochs** you pay for, then expires
+unless renewed. `curate import` defaults to `--epochs 1` (cheapest), but a
+*persistent* public threat graph shouldn't evaporate after one epoch — decide
+your storage horizon up front:
+
+```bash
+hermes guardian curate import --file batch-01.json --epochs 12   # ~longer on-chain life, more TRAC
+```
+
+Higher epochs = longer life = more TRAC per asset, so at 100k assets this is your
+biggest cost lever. Pick an epoch count that matches how long a threat stays
+relevant, and plan a renewal pass for anything that must outlive it.
 
 ---
 
@@ -248,3 +295,8 @@ across ecosystems/case before approving a large batch.
    packages are in scope.
 3. **Proof shown in the UI:** the **official advisory page** *and* the on-chain
    **DKG UAL** — maximum verifiable provenance for every flagged threat.
+4. **Network:** publish **directly to mainnet** — no testnet. Reading is free;
+   only curators pay TRAC to publish.
+5. **Scale & cadence:** ~**100k assets**, seeded in ~**5k batches**, malware
+   first. `--dry-run` every batch to see the TRAC bill; three-layer dedup
+   ensures you only ever pay for genuinely-new threats.

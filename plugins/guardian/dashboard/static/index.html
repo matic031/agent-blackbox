@@ -319,17 +319,6 @@
     align-items: center;
     gap: 8px;
   }
-  .agent-you {
-    font-size: 10px;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    color: var(--mint);
-    background: rgba(128,202,156,0.12);
-    border: 1px solid rgba(128,202,156,0.30);
-    border-radius: 5px;
-    padding: 1px 7px;
-  }
   .agent-addr {
     font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
     font-size: 12px;
@@ -486,18 +475,6 @@
   tbody tr:last-child td { border-bottom: none; }
   tbody tr:hover { background: var(--elevated); }
   .col-time { color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
-  .col-cat { color: var(--text); white-space: nowrap; }
-  .col-target { color: var(--muted); }
-  .col-target .tool { color: var(--text); }
-  .col-evidence {
-    color: var(--muted);
-    font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
-    font-size: 12px;
-    max-width: 320px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
 
   .pill {
     display: inline-block;
@@ -892,7 +869,6 @@
   .reason { display: flex; flex-direction: column; gap: 3px; min-width: 0; max-width: 480px; }
   .reason-ev { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .reason-meta { color: var(--muted); font-size: 11.5px; display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
-  .reason-meta .src-badge { flex: 0 0 auto; }
   .audit-scroll { max-height: 480px; overflow-y: auto; }
   .audit-foot { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 16px; border-top: 1px solid var(--border); }
   .audit-count { font-size: 12px; color: var(--muted); font-weight: 500; }
@@ -1272,11 +1248,10 @@
       var reportsHtml = SHOW_AGENT_REPORTS
         ? '<div class="agent-reports"><strong>' + num(reports) + '</strong> report' + (reports === 1 ? '' : 's') + '</div>'
         : '';
-      var youTag = '';
       return '<div class="agent-card' + (isLocal ? ' local' : '') + '">' +
         '<span class="agent-avatar" style="--fw:' + fwColor(a.framework) + '">' + fwIcon(a.framework) + '</span>' +
         '<div class="agent-info">' +
-          '<div class="agent-fw">' + esc(fwLabel(a.framework)) + youTag + '</div>' +
+          '<div class="agent-fw">' + esc(fwLabel(a.framework)) + '</div>' +
           '<div class="agent-addr" title="' + esc(a.address) + '">' + esc(shortAddr(a.address)) + '</div>' +
           reportsHtml +
         '</div>' +
@@ -2085,6 +2060,12 @@
 
   // ---------- Audit trail (the full local history) ----------
   var AUDIT_PAGE = 100, AUDIT_MAX = 500, auditLoaded = AUDIT_PAGE;
+  // Shared empty-state row for both findings tables (same shield-check icon).
+  function emptyRow(strong, msg) {
+    return '<tr><td colspan="5"><div class="empty">' +
+      '<svg class="e-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/></svg>' +
+      '<strong>' + strong + '</strong>' + msg + '</div></td></tr>';
+  }
   function renderAuditTrail(data) {
     var list = asList(data);
     var total = (data && data.total != null) ? data.total : list.length;
@@ -2092,9 +2073,7 @@
     if (!body) return;
     if (!list.length) {
       auditRendered = [];
-      body.innerHTML = '<tr><td colspan="5"><div class="empty">' +
-        '<svg class="e-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/></svg>' +
-        '<strong>No threats detected yet</strong>Everything Guardian flags will be logged here.</div></td></tr>';
+      body.innerHTML = emptyRow("No threats detected yet", "Everything Guardian flags will be logged here.");
     } else {
       auditRendered = list;
       body.innerHTML = list.map(findingRowHTML).join("");
@@ -2128,9 +2107,7 @@
 
     if (!list.length) {
       findingsRendered = [];
-      body.innerHTML = '<tr><td colspan="5"><div class="empty">' +
-        '<svg class="e-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/></svg>' +
-        '<strong>No findings yet</strong>Guardian is watching.</div></td></tr>';
+      body.innerHTML = emptyRow("No findings yet", "Guardian is watching.");
       return;
     }
 
@@ -2169,7 +2146,6 @@
     }
     if (lastSync != null) {
       $("stat-sync").textContent = fmtAgo(lastSync);
-      $("stat-sync").style.fontSize = "22px";
       $("stat-sync-meta").textContent = "auto every " + (fmtInterval(interval) === "-" ? "cycle" : fmtInterval(interval));
     } else {
       $("stat-sync").textContent = "never";

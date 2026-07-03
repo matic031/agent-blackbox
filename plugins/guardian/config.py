@@ -28,9 +28,13 @@ _FALSE = {"0", "false", "no", "off"}
 #: agent rarely has a legitimate reason to read. Applied only when the config
 #: key is absent; an explicit (even empty) ``protected_paths`` list wins.
 DEFAULT_PROTECTED_PATHS: Tuple[str, ...] = (
-    "~/.ssh/*",
-    "~/.aws/credentials",
-    "*.pem",
+    "~/.ssh/*",          # SSH private keys
+    ".env",              # environment files (any directory)
+    ".env.*",            # env variants (.env.local, .env.production, ...)
+    "*.pem",             # PEM-encoded keys / certificates
+    "*.key",             # private key files
+    "*.p12",             # PKCS#12 / PFX keystores
+    "~/.aws/credentials",  # cloud credential store
 )
 
 
@@ -78,6 +82,14 @@ class GuardianConfig:
     discover: bool = True
     osv_lookup: bool = True
     auto_attach: bool = True
+    #: Optional LLM reviewer (opt-in, off by default). When enabled with a key
+    #: present, an LLM gives a second opinion on prompt injection over the
+    #: observer path. Provider is ``openai`` or ``anthropic``. Config keys:
+    #: ``plugins.entries.guardian.llm.{enabled,provider,model,api_key}``.
+    llm_enabled: bool = False
+    llm_provider: str = ""
+    llm_model: str = ""
+    llm_api_key: str = ""
     #: Per-category user policy: ``{category: {"enabled": bool, "min_severity": str}}``.
     #: Missing categories default to enabled at ``info`` (flag everything the
     #: graph knows). Config key: ``plugins.entries.guardian.detection.*``.
@@ -92,6 +104,16 @@ class GuardianConfig:
     def block_enabled(self) -> bool:
         """True when the plugin is allowed to block tool calls."""
         return self.mode.lower() == "block"
+
+    @property
+    def llm_ready(self) -> bool:
+        """True when the optional LLM reviewer is enabled and fully configured."""
+        return bool(
+            self.llm_enabled
+            and self.llm_provider in ("openai", "anthropic")
+            and self.llm_model
+            and self.llm_api_key
+        )
 
     def meets_block_threshold(self, severity: str) -> bool:
         """True when *severity* is at or above the configured block threshold."""
@@ -175,6 +197,17 @@ def load_guardian_config() -> GuardianConfig:
         report_min_severity = "high"
     categories = _normalize_categories(entry.get("detection"))
     protected_paths = _normalize_protected_paths(entry.get("protected_paths"))
+    llm_entry = entry.get("llm") if isinstance(entry.get("llm"), dict) else {}
+    llm_provider = str(
+        _env_or(llm_entry, env="GUARDIAN_LLM_PROVIDER", key="provider", default="")
+    ).strip().lower()
+    if llm_provider not in ("openai", "anthropic", ""):
+        llm_provider = ""
+    llm_model = str(_env_or(llm_entry, env="GUARDIAN_LLM_MODEL", key="model", default="")).strip()
+    llm_api_key = str(_env_or(llm_entry, env="GUARDIAN_LLM_API_KEY", key="api_key", default="")).strip()
+    llm_enabled = _as_bool(
+        _env_or(llm_entry, env="GUARDIAN_LLM_ENABLED", key="enabled", default=False), False
+    )
     return GuardianConfig(
         mode=mode,
         context_graph_id=str(
@@ -215,6 +248,10 @@ def load_guardian_config() -> GuardianConfig:
         ),
         categories=categories,
         protected_paths=protected_paths,
+        llm_enabled=llm_enabled,
+        llm_provider=llm_provider,
+        llm_model=llm_model,
+        llm_api_key=llm_api_key,
     )
 
 
