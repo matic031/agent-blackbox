@@ -435,6 +435,92 @@ PYEOF
     fi
 }
 
+read_guardian_mode() {
+    "$VENV_DIR/bin/python" - "$HERMES_HOME/config.yaml" <<'PYEOF'
+import sys, os
+cfg_path = sys.argv[1]
+try:
+    import yaml
+except Exception:
+    print("audit")
+    sys.exit(0)
+data = {}
+if os.path.exists(cfg_path):
+    with open(cfg_path) as f:
+        data = yaml.safe_load(f) or {}
+mode = (
+    data.get("plugins", {})
+    .get("entries", {})
+    .get("guardian", {})
+    .get("mode", "audit")
+)
+mode = str(mode).lower()
+print(mode if mode in ("audit", "block") else "audit")
+PYEOF
+}
+
+write_guardian_mode() {
+    local mode="$1"
+    "$VENV_DIR/bin/python" - "$HERMES_HOME/config.yaml" "$mode" <<'PYEOF'
+import sys, os
+cfg_path, mode = sys.argv[1], sys.argv[2]
+try:
+    import yaml
+except Exception:
+    print("  (PyYAML unavailable — could not save protection mode)")
+    sys.exit(1)
+if mode not in ("audit", "block"):
+    sys.exit(1)
+os.makedirs(os.path.dirname(cfg_path), exist_ok=True)
+data = {}
+if os.path.exists(cfg_path):
+    with open(cfg_path) as f:
+        data = yaml.safe_load(f) or {}
+guardian = data.setdefault("plugins", {}).setdefault("entries", {}).setdefault("guardian", {})
+guardian["mode"] = mode
+guardian.setdefault("block_severity", "critical")
+with open(cfg_path, "w") as f:
+    yaml.safe_dump(data, f, default_flow_style=False, sort_keys=False)
+PYEOF
+}
+
+configure_guardian_mode() {
+    heading "Choosing Guardian enforcement mode"
+    local current="${GUARDIAN_MODE:-}"
+    current="$(printf '%s' "$current" | tr '[:upper:]' '[:lower:]')"
+    if [ "$current" != "audit" ] && [ "$current" != "block" ]; then
+        current="$(read_guardian_mode 2>/dev/null || echo audit)"
+    fi
+    [ "$current" = "block" ] || current="audit"
+
+    if ! { [ -r /dev/tty ] && [ -w /dev/tty ]; }; then
+        GUARDIAN_SELECTED_MODE="$current"
+        step "Non-interactive install — keeping Guardian in $current mode."
+        return 0
+    fi
+
+    printf '  Choose how Guardian should react when it finds threats.\n' > /dev/tty
+    printf '    1) Audit — log and report findings, but do not stop actions. [recommended]\n' > /dev/tty
+    printf '    2) Block — stop confirmed threats at/above the configured severity.\n' > /dev/tty
+    printf '  Protection mode [1/2, Enter keeps %s]: ' "$current" > /dev/tty
+    local ans=""
+    read -r ans < /dev/tty || ans=""
+    case "$ans" in
+        2|b|B|block|BLOCK|Block) GUARDIAN_SELECTED_MODE="block" ;;
+        1|a|A|audit|AUDIT|Audit|"") GUARDIAN_SELECTED_MODE="$current" ;;
+        *)
+            warn "Unknown protection mode '$ans' — keeping $current."
+            GUARDIAN_SELECTED_MODE="$current"
+            ;;
+    esac
+
+    if write_guardian_mode "$GUARDIAN_SELECTED_MODE"; then
+        ok "Guardian protection mode set to: $GUARDIAN_SELECTED_MODE"
+    else
+        warn "Could not save Guardian protection mode. Set it later in the dashboard or config.yaml."
+    fi
+}
+
 # ── Auto-protect every local agent (best-effort, non-fatal) ─────────────────
 # Discovers every local Hermes home + OpenClaw workspace and enables Guardian
 # in each, so protection is on everywhere without per-instance setup.
@@ -484,11 +570,16 @@ setup_llm() {
 next_steps() {
     local docs_url="${REPO_URL%.git}"
     local path_note=""
+    local mode="${GUARDIAN_SELECTED_MODE:-$(read_guardian_mode 2>/dev/null || echo audit)}"
+    local mode_note="Audit-only by default - switch to Block anytime in the dashboard."
+    if [ "$mode" = "block" ]; then
+        mode_note="Block mode is on - confirmed threats at/above the block severity are stopped."
+    fi
     case ":$PATH:" in
         *":$HOME/.local/bin:"*) : ;;
         *) path_note=$'\n  First reload your shell so `hermes` is on PATH:  exec $SHELL -l' ;;
     esac
-    heading "🎉 Guardian is ready — it now protects all your local agents (audit mode)."
+    heading "🎉 Guardian is ready — it now protects all your local agents ($mode mode)."
     cat <<EOF
 ${path_note}
   ${BOLD}Start your agent${NC}   — Guardian watches every tool call automatically:
@@ -499,9 +590,7 @@ ${path_note}
 
   ${BOLD}Try it${NC}            - in a hermes chat, ask it to run:
        rm -rf ~/
-       Guardian flags this as an 'rm-rf-system-paths' escalation. Audit-only by
-       default - flip to blocking with  GUARDIAN_MODE=block  (or set
-       plugins.entries.guardian.mode: block in $HERMES_HOME/config.yaml).
+       Guardian flags this as an 'rm-rf-system-paths' escalation. $mode_note
 
   Docs & community:  $docs_url
 EOF
@@ -522,6 +611,7 @@ main() {
     link_hermes
     install_dkg
     enable_and_seed
+    configure_guardian_mode
     attach_all_agents
     sync_ruleset
     setup_llm
