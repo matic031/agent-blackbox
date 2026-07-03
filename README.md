@@ -42,7 +42,7 @@ ln -sf "$PWD/venv/bin/hermes" ~/.local/bin/hermes
 
 # 4. Local DKG node (optional - without it Umanitek Agent Guardian still runs, with an empty ruleset)
 npm i -g @origintrail-official/dkg
-dkg hermes setup --network testnet   # testnet only for the beta
+dkg hermes setup --network mainnet   # mainnet only - reading the public threat graph is free
 
 # 5. Enable Umanitek Agent Guardian and protect every local agent
 hermes plugins enable guardian

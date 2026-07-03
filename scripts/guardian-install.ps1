@@ -2,8 +2,8 @@
 # Umanitek Agent Guardian - one-command installer (Windows / PowerShell)
 # ============================================================================
 # Mirror of guardian-install.sh. Wires up the Guardian threat-graph plugin,
-# installs the OriginTrail DKG node CLI (Windows-native), bootstraps a funded
-# testnet node, enables the plugin, and seeds sensible config defaults.
+# installs the OriginTrail DKG node CLI (Windows-native), bootstraps a mainnet
+# node (read-only for users), enables the plugin, and seeds config defaults.
 #
 # NOTE: The Hermes agent itself is best run under WSL2 on Windows. The DKG CLI
 # (dkg) is Windows-native. This installer sets up the Python environment and
@@ -13,16 +13,19 @@
 # Usage:
 #   iwr -useb https://raw.githubusercontent.com/matic031/agent-guardian/feat/guardian/scripts/guardian-install.ps1 | iex
 #   # or, from a clone:
-#   .\scripts\guardian-install.ps1 [-SkipDkg] [-Network testnet]
+#   .\scripts\guardian-install.ps1 [-SkipDkg]
 #
 # Idempotent: safe to re-run. Optional steps (DKG node) never hard-fail.
 # ============================================================================
 
 param(
     [switch]$SkipDkg,
-    [string]$Network = "testnet",   # ALWAYS testnet (mainnet-gnosis is unfunded)
     [switch]$Help
 )
+
+# Mainnet only - the real public threat graph (reading is free; only curators
+# pay TRAC to publish). A valid dkg mainnet: mainnet-base (ETH gas) | mainnet-gnosis. No testnet.
+$Network = if ($env:GUARDIAN_DKG_NETWORK) { $env:GUARDIAN_DKG_NETWORK } else { "mainnet-base" }
 
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
@@ -56,13 +59,14 @@ function Show-Usage {
     @"
 Umanitek Agent Guardian installer (Windows)
 
-Usage: guardian-install.ps1 [-SkipDkg] [-Network testnet] [-Help]
+Usage: guardian-install.ps1 [-SkipDkg] [-Help]
 
 Options:
   -SkipDkg          Skip the DKG node install/bootstrap (plugin still installs)
-  -Network NET      DKG network for node bootstrap (default: testnet). ALWAYS
-                    use testnet for the beta; mainnet-gnosis is unfunded.
   -Help             Show this help and exit
+
+The DKG node always bootstraps on mainnet - the real public threat graph.
+Reading it is free; publishing costs TRAC. Guardian does not support testnet.
 
 Environment overrides:
   GUARDIAN_REPO_URL, GUARDIAN_REPO_BRANCH, HERMES_HOME, GUARDIAN_NODE_MAJOR
@@ -225,10 +229,10 @@ function Install-Dkg {
         }
     }
 
-    Write-Step "Bootstrapping a funded $Network node (dkg hermes setup --network $Network) ..."
-    Write-Step "  (non-interactive; requests faucet funds on testnet - this can take a minute)"
+    Write-Step "Bootstrapping a $Network node (dkg hermes setup --network $Network) ..."
+    Write-Step "  (non-interactive; reading the public threat graph is free - no funds needed)"
     try {
-        dkg hermes setup --network $Network
+        dkg hermes setup --network $Network --no-fund
         if ($LASTEXITCODE -ne 0) { throw "dkg exit $LASTEXITCODE" }
         Write-Ok "DKG node bootstrapped on $Network"
         $script:DkgReady = $true
@@ -256,7 +260,7 @@ function Sync-Ruleset {
 function Show-DkgManualHint {
     Write-Step "To set up the DKG node later:"
     Write-Host "      npm i -g '@origintrail-official/dkg'"
-    Write-Host "      dkg hermes setup --network $Network   # ALWAYS testnet for beta"
+    Write-Host "      dkg hermes setup --network $Network   # mainnet - the real public threat graph"
     Write-Host "      # then re-run:  hermes guardian sync"
 }
 

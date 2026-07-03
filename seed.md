@@ -211,7 +211,7 @@ detection light up batch by batch.
 
 ```bash
 # 0. one-time: create the public graph on mainnet (curator wallet only)
-hermes guardian setup-graph --network mainnet
+hermes guardian setup-graph --network mainnet-base
 
 # 1. DRY RUN first — see how many are NEW after dedup. Spends no TRAC.
 hermes guardian curate import --file batch-01.json --osv-enrich --dry-run
@@ -310,8 +310,9 @@ relying on that.)
    packages are in scope.
 3. **Proof shown in the UI:** the **official advisory page** *and* the on-chain
    **DKG UAL** — maximum verifiable provenance for every flagged threat.
-4. **Network:** publish **directly to mainnet** — no testnet. Reading is free;
-   only curators pay TRAC to publish.
+4. **Network:** publish **directly to mainnet** — no testnet. The valid dkg
+   networks are `mainnet-base` (Base, ETH gas) and `mainnet-gnosis` (Gnosis, xDAI
+   gas); we use **`mainnet-base`**. Reading is free; only curators pay TRAC.
 5. **Scale & cadence:** ~**100k assets**, seeded in ~**5k batches**, malware
    first. `--dry-run` every batch to see the TRAC bill; three-layer dedup
    ensures you only ever pay for genuinely-new threats.

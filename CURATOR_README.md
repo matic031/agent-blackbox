@@ -88,10 +88,10 @@ hermes guardian curate import --file ./deps.json --osv-enrich
 
 - It uses your DKG node and requires the curator wallet to be the authorized
   publisher — the network rejects anyone else.
-- On-chain publishing needs a storage-ACK quorum from core nodes. On networks
-  with no live cores (e.g. an empty testnet) the publish will not finalize —
-  use `--no-publish` to keep working locally until cores are available or you
-  publish on a network that has them.
+- On-chain publishing needs a storage-ACK quorum from mainnet core nodes. If
+  your node cannot reach them the publish will not finalize - use
+  `--no-publish` to keep working locally and publish once the node is
+  connected. Guardian is mainnet only; there is no testnet fallback.
 
 ## Contributing
 

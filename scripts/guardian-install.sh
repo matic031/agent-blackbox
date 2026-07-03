@@ -23,7 +23,7 @@ set -euo pipefail
 REPO_URL="${GUARDIAN_REPO_URL:-https://github.com/matic031/agent-guardian.git}"
 REPO_BRANCH="${GUARDIAN_REPO_BRANCH:-feat/guardian}"
 HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
-DKG_NETWORK="${GUARDIAN_DKG_NETWORK:-mainnet}"   # mainnet: the real public threat graph (reading is free; only curators pay TRAC to publish)
+DKG_NETWORK="${GUARDIAN_DKG_NETWORK:-mainnet-base}"   # a valid dkg mainnet (mainnet-base | mainnet-gnosis). Base uses ETH for gas. No testnet.
 NODE_MAJOR="${GUARDIAN_NODE_MAJOR:-22}"
 
 # ── Colors / echo helpers (DRY) ─────────────────────────────────────────────
@@ -64,13 +64,14 @@ Usage: guardian-install.sh [OPTIONS]
 Options:
   --skip-dkg     Skip the DKG node install/bootstrap (plugin still installs;
                  you can bootstrap the node later — see next-steps output)
-  --network NET  DKG network for node bootstrap (default: mainnet — the real
-                 public threat graph. Reading it is free; publishing costs TRAC).
   -h, --help     Show this help and exit
+
+The DKG node always bootstraps on mainnet — the real public threat graph.
+Reading it is free; publishing costs TRAC. Guardian does not support testnet.
 
 Environment overrides:
   GUARDIAN_REPO_URL, GUARDIAN_REPO_BRANCH, HERMES_HOME,
-  GUARDIAN_DKG_NETWORK, GUARDIAN_NODE_MAJOR, GUARDIAN_INSTALL_DIR
+  GUARDIAN_NODE_MAJOR, GUARDIAN_INSTALL_DIR
 
 This installer is idempotent — re-running it repairs a partial install.
 Optional steps (the DKG node) never hard-fail; you always get guidance.
@@ -82,7 +83,6 @@ SKIP_DKG=false
 while [ $# -gt 0 ]; do
     case "$1" in
         --skip-dkg) SKIP_DKG=true; shift ;;
-        --network)  DKG_NETWORK="${2:-mainnet}"; shift 2 ;;
         -h|--help)  usage; exit 0 ;;
         *) err "Unknown option: $1"; echo; usage; exit 1 ;;
     esac
@@ -345,7 +345,7 @@ install_dkg() {
 
     step "Bootstrapping a $DKG_NETWORK node (dkg hermes setup --network $DKG_NETWORK) ..."
     step "  (non-interactive; reading the public threat graph is free — no funds needed)"
-    if dkg hermes setup --network "$DKG_NETWORK"; then
+    if dkg hermes setup --network "$DKG_NETWORK" --no-fund; then
         ok "DKG node bootstrapped on $DKG_NETWORK"
         DKG_READY=true
     else

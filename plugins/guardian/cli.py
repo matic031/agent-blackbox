@@ -76,7 +76,10 @@ def setup_cli(parser: argparse.ArgumentParser) -> None:
     report.set_defaults(func=_cmd_report)
 
     setup_graph = sub.add_parser("setup-graph", help="Curator: create + register the public threat CG")
-    setup_graph.add_argument("--network", default="mainnet", help="Target network (informational)")
+    setup_graph.add_argument(
+        "--network", default="mainnet-base", choices=("mainnet-base", "mainnet-gnosis"),
+        help="Mainnet to register on (informational; the node's own network is what counts). No testnet.",
+    )
     setup_graph.set_defaults(func=_cmd_setup_graph)
 
     curate = sub.add_parser("curate", help="Curator: review + promote community threats")
