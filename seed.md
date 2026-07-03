@@ -260,6 +260,21 @@ Higher epochs = longer life = more TRAC per asset, so at 100k assets this is you
 biggest cost lever. Pick an epoch count that matches how long a threat stays
 relevant, and plan a renewal pass for anything that must outlive it.
 
+### Seeding bumblebee
+
+Bumblebee's `threat_intel/` is Socket-confirmed compromised packages — seed all
+of it. `--dir` imports every catalog; the importer auto-tags them `kind: malware`
+and repairs the malformed `@@scope` names so they match real installs:
+
+```bash
+hermes guardian curate import --dir ~/Desktop/bumblebee/threat_intel --dry-run   # preview (~2,937 threats)
+hermes guardian curate import --dir ~/Desktop/bumblebee/threat_intel             # publish to mainnet
+```
+
+(Worth fixing at the source too: ~26% of bumblebee packages carry a double-`@`
+(`@@antv/...`). The importer normalizes it, but cleaner upstream data avoids
+relying on that.)
+
 ---
 
 ## Maintenance

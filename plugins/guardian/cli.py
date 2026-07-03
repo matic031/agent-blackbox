@@ -1014,6 +1014,11 @@ def _flatten_bumblebee(catalog: Dict[str, Any]) -> List[Dict[str, Any]]:
             out.append(
                 {
                     "type": "dependency",
+                    # Bumblebee catalogs are Socket-confirmed *compromised*
+                    # packages (Shai-Hulud, GlassWorm, credential stealers,
+                    # typosquats) — malware, not mere vulnerabilities, so they
+                    # block in block mode.
+                    "kind": "malware",
                     "ecosystem": ecosystem,
                     "package": package,
                     "version": version,
@@ -1096,6 +1101,12 @@ def _entry_to_threat(entry: Dict[str, Any]) -> tuple:
         ver = str(entry.get("version") or entry.get("package_version") or "").strip()
         if not (eco and name and ver):
             raise ValueError("dependency needs ecosystem, name, version")
+        # Normalize a malformed leading ``@@`` scope (seen in bumblebee data:
+        # ``@@antv/a8``) down to a single ``@`` so the seeded identifier matches
+        # what an agent actually installs (``@antv/a8``) — otherwise the threat
+        # can never fire and the TRAC publish is wasted.
+        if name.startswith("@"):
+            name = "@" + name.lstrip("@")
         ident = quads.dependency_identifier(eco, name, ver)
         kind = str(entry.get("kind") or "").strip().lower() or None
         return "dependency", ident, {

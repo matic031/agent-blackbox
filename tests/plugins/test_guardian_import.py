@@ -7,6 +7,25 @@ cli = load_guardian("cli")
 quads = load_guardian("quads")
 
 
+def test_bumblebee_normalizes_double_at_and_tags_malware():
+    # Bumblebee ships npm scopes with a malformed double-@ (``@@antv/a8``).
+    # It must collapse to a single @ so the seeded id matches a real install,
+    # and be tagged malware (compromised packages block).
+    catalog = {
+        "entries": [{
+            "id": "socket-2026-05-19-antv", "name": "@@antv/a8 (compromised)",
+            "ecosystem": "npm", "package": "@@antv/a8", "versions": ["0.1.1"],
+            "severity": "critical", "source": "https://socket.dev/blog/antv-packages-compromised",
+        }]
+    }
+    entries = cli._flatten_catalog(catalog, forced_type=None)
+    assert len(entries) == 1
+    category, ident, fields = cli._entry_to_threat(entries[0])
+    assert ident == "dep:npm:@antv/a8@0.1.1"                       # @@ collapsed to @
+    assert ident == quads.dependency_identifier("npm", "@antv/a8", "0.1.1")  # matches real install
+    assert fields["kind"] == "malware"
+
+
 def test_seed_entries_dedups_and_dry_run_spends_nothing():
     # Two spellings of one npm package (npm lowercases names) + a distinct one,
     # plus one already in the ledger. Dry-run must publish nothing and report the
