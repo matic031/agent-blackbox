@@ -82,6 +82,9 @@ hermes guardian curate import --dir ./threats --no-publish
 hermes guardian curate import --file ./deps.json --osv-enrich
 ```
 
+The full step-by-step runbook — staging rehearsal through the production seed —
+lives in **[seed.md](seed.md)** (the single seeding guide).
+
 ## Publishing to the public graph (VM)
 
 `approve` (without `--no-publish`) writes on-chain, which means:

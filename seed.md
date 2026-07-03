@@ -277,6 +277,75 @@ relying on that.)
 
 ---
 
+## Step-by-step: rehearse on staging, then production
+
+Publishing to mainnet **registers the graph name on-chain** — once you seed under
+a name, it's spent. So **rehearse the whole pipeline under a throwaway `-staging`
+name first**, prove detection end-to-end, then run the real seed under the
+reserved production name.
+
+> ### ⚠️ Set two things before any seeding command
+> ```bash
+> export GUARDIAN_CONTEXT_GRAPH_ID="umanitek/guardian-threats-staging"   # NOT the production name
+> export GUARDIAN_HOME="$HOME/.guardian-staging"                         # isolate the dedup ledger
+> ```
+> Verify — `hermes guardian status | grep "context graph"` **must** end in
+> `-staging`. If it shows the bare production name, stop and re-export, or you'll
+> burn that name on-chain.
+>
+> **Why the separate `GUARDIAN_HOME`:** the dedup ledger
+> (`$GUARDIAN_HOME/seeded_identifiers.txt`) is a single global file, **not** keyed
+> by graph name. Seed staging against the default home and the production run
+> later sees every id as "already published" and skips them — leaving production
+> empty. A separate home keeps the staging ledger isolated.
+
+**0. Preconditions**
+- Curator wallet funded: **ETH** (gas) + **TRAC** (publish).
+- Local DKG node on **mainnet-base**, reachable: `dkg hermes setup --network mainnet-base`
+  → `curl -s http://127.0.0.1:9200/api/status`.
+- `hermes guardian status` runs.
+- A **small** first batch (`batch-01.json`, 20–50 known-bad packages) — enough to
+  prove detection. Save the 100k for production.
+
+**1. Isolated staging shell** — set the two env vars above; confirm the graph name.
+
+**2. Create + register the staging graph** (one-time, on-chain, small ETH/TRAC):
+```bash
+hermes guardian setup-graph --network mainnet-base
+```
+
+**3. Dry-run** (spends nothing — prints the TRAC bill):
+```bash
+hermes guardian curate import --file batch-01.json --osv-enrich --dry-run
+```
+Fix any `errors` first; zero errors + a sane new-count → proceed.
+
+**4. Publish the batch:**
+```bash
+hermes guardian curate import --file batch-01.json --osv-enrich --epochs 1
+```
+Re-running is safe — the ledger skips anything already published.
+
+**5. Verify a real catch:**
+```bash
+hermes guardian sync         # pull the new threats into the local ruleset
+hermes guardian dashboard    # Public tab shows your seeds
+```
+Then in an agent, `npm install <a-seeded-bad-package>@<seeded-version>` → it shows
+in live findings as a **confirmed public-graph match**. Add `GUARDIAN_MODE=block`
+to see it actually blocked.
+
+**6. Iterate** the remaining batches (steps 3–5 each). Lost the ledger / seeding
+from another machine? Add `--check-graph`. False positive? `curate reject <id> --dispute`.
+
+**7. Production run** — identical steps, only two things change:
+1. The **reserved production name** (not `-staging`).
+2. A **clean ledger** — use the default `GUARDIAN_HOME` (`unset` the staging one)
+   so production actually receives every threat. Plus a longer `--epochs` and the
+   full batch set.
+
+---
+
 ## Maintenance
 
 - **Freshness:** malicious packages get taken down and re-published under new
