@@ -24,6 +24,15 @@ logger = logging.getLogger(__name__)
 _TRUE = {"1", "true", "yes", "on"}
 _FALSE = {"0", "false", "no", "off"}
 
+#: Sensible out-of-the-box protected paths — high-signal credential stores an
+#: agent rarely has a legitimate reason to read. Applied only when the config
+#: key is absent; an explicit (even empty) ``protected_paths`` list wins.
+DEFAULT_PROTECTED_PATHS: Tuple[str, ...] = (
+    "~/.ssh/*",
+    "~/.aws/credentials",
+    "*.pem",
+)
+
 
 def _as_bool(value: Any, default: bool) -> bool:
     if isinstance(value, bool):
@@ -75,8 +84,9 @@ class GuardianConfig:
     categories: Mapping[str, Any] = field(default_factory=dict)
     #: User-defined protected path patterns (globs / prefixes). Access to a
     #: matching path is flagged locally (source="custom", never shared to SWM)
-    #: and blocks in block mode. Config key: ``protected_paths``.
-    protected_paths: Tuple[str, ...] = ()
+    #: and blocks in block mode. Config key: ``protected_paths``. Defaults to
+    #: :data:`DEFAULT_PROTECTED_PATHS` when the key is absent.
+    protected_paths: Tuple[str, ...] = DEFAULT_PROTECTED_PATHS
 
     @property
     def block_enabled(self) -> bool:
@@ -229,7 +239,14 @@ def _normalize_categories(raw: Any) -> Dict[str, Dict[str, Any]]:
 
 
 def _normalize_protected_paths(raw: Any) -> Tuple[str, ...]:
-    """Validate ``protected_paths`` into a tuple of non-empty pattern strings."""
+    """Validate ``protected_paths`` into a tuple of non-empty pattern strings.
+
+    A missing key (``None``) falls back to :data:`DEFAULT_PROTECTED_PATHS`; an
+    explicit list — including an empty one — is honoured verbatim so a user who
+    clears the list keeps it cleared.
+    """
+    if raw is None:
+        return DEFAULT_PROTECTED_PATHS
     if not isinstance(raw, (list, tuple)):
         return ()
     out = []

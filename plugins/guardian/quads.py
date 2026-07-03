@@ -198,13 +198,29 @@ def normalize_arg_shape(tool_name: str, args: Any) -> Optional[str]:
 # nomination layer: a prompt matching one that is NOT already in the graph is
 # auto-submitted as a *candidate* injection. Privacy: only the matched
 # substring (truncated) is ever carried off-box — never the surrounding prompt.
+# Anchored on the injection *structure* (override-verb + previous/your +
+# instruction-noun, or an exfil verb near a secret) so common real-world
+# phrasings match without firing on ordinary prose.
 _INJECTION_HEURISTICS = (
-    ("high", "LLM01", re.compile(r"ignore\s+(?:all\s+)?previous\s+instructions", re.IGNORECASE)),
-    ("high", "LLM01", re.compile(r"disregard\s+(?:all\s+)?(?:prior|previous|above)\s+(?:instructions|rules|prompts)", re.IGNORECASE)),
-    ("high", "LLM06", re.compile(r"(?:reveal|show|print|repeat|disclose)\b[\s\S]{0,40}\bsystem\s+prompt", re.IGNORECASE)),
+    # "ignore all previous instructions" and its many close variants:
+    # ignore/disregard/forget/skip/override + (all|any|the)? +
+    # previous/prior/above/earlier + instructions/messages/prompts/rules/context/...
+    ("high", "LLM01", re.compile(
+        r"(?:ignore|disregard|forget|skip|override)\s+(?:all\s+|any\s+|the\s+|these\s+)?"
+        r"(?:previous|prior|above|earlier|preceding|prior\s+)\s*"
+        r"(?:instruction|message|prompt|rule|context|direction|directive|command|guideline)s?",
+        re.IGNORECASE)),
+    # Exfiltrate the system prompt / instructions: reveal/show/give/tell/send/
+    # output/what-is + (within 40 chars) system prompt | your instructions | ...
+    ("high", "LLM06", re.compile(
+        r"(?:reveal|show|print|repeat|disclose|give|tell|share|send|output|expose|leak|"
+        r"what(?:'s|\s+is|\s+are)?|display)\b[\s\S]{0,40}\b"
+        r"(?:system\s+prompt|system\s+message|initial\s+(?:instruction|prompt)s?|"
+        r"your\s+(?:instructions|prompt|system\s+prompt|guidelines))",
+        re.IGNORECASE)),
     ("high", "LLM01", re.compile(r"you\s+are\s+now\b[\s\S]{0,40}\b(?:DAN|developer\s+mode|jailbroken|unrestricted)", re.IGNORECASE)),
-    ("medium", "LLM01", re.compile(r"pretend\s+(?:to\s+be|you\s+are)\b[\s\S]{0,40}\b(?:no\s+restrictions|unrestricted|without\s+rules)", re.IGNORECASE)),
-    ("high", "LLM06", re.compile(r"(?:exfiltrate|leak|send|upload|post)\b[\s\S]{0,40}\b(?:api\s*key|secret|token|credentials|password|env(?:ironment)?\s+variables)", re.IGNORECASE)),
+    ("high", "LLM01", re.compile(r"(?:pretend|act\s+as|roleplay|imagine)\s+(?:to\s+be\s+|you(?:'re|\s+are)\s+|as\s+)?[\s\S]{0,40}\b(?:no\s+restrictions|unrestricted|without\s+rules|no\s+rules|jailbroken|DAN\b)", re.IGNORECASE)),
+    ("high", "LLM06", re.compile(r"(?:exfiltrate|leak|send|upload|post|email|give\s+me|show\s+me)\b[\s\S]{0,40}\b(?:api\s*key|secret|token|credentials|password|env(?:ironment)?\s+variables?|\.env)", re.IGNORECASE)),
 )
 
 #: Truncation cap for the matched dangerous phrase carried on a candidate.

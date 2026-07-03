@@ -450,12 +450,13 @@ export function escalationIdentifierFor(toolName: string, args: unknown): string
 // prompt matching one NOT already in the graph is auto-submitted as a candidate.
 // Privacy: only the matched substring (truncated) is ever carried off-box.
 const INJECTION_HEURISTICS: ReadonlyArray<readonly [GuardianSeverity, string, RegExp]> = [
-  ["high", "LLM01", /ignore\s+(?:all\s+)?previous\s+instructions/i],
-  ["high", "LLM01", /disregard\s+(?:all\s+)?(?:prior|previous|above)\s+(?:instructions|rules|prompts)/i],
-  ["high", "LLM06", /(?:reveal|show|print|repeat|disclose)\b[\s\S]{0,40}\bsystem\s+prompt/i],
+  // "ignore all previous instructions" and close variants (see quads.py).
+  ["high", "LLM01", /(?:ignore|disregard|forget|skip|override)\s+(?:all\s+|any\s+|the\s+|these\s+)?(?:previous|prior|above|earlier|preceding|prior\s+)\s*(?:instruction|message|prompt|rule|context|direction|directive|command|guideline)s?/i],
+  // Exfiltrate the system prompt / instructions.
+  ["high", "LLM06", /(?:reveal|show|print|repeat|disclose|give|tell|share|send|output|expose|leak|what(?:'s|\s+is|\s+are)?|display)\b[\s\S]{0,40}\b(?:system\s+prompt|system\s+message|initial\s+(?:instruction|prompt)s?|your\s+(?:instructions|prompt|system\s+prompt|guidelines))/i],
   ["high", "LLM01", /you\s+are\s+now\b[\s\S]{0,40}\b(?:DAN|developer\s+mode|jailbroken|unrestricted)/i],
-  ["medium", "LLM01", /pretend\s+(?:to\s+be|you\s+are)\b[\s\S]{0,40}\b(?:no\s+restrictions|unrestricted|without\s+rules)/i],
-  ["high", "LLM06", /(?:exfiltrate|leak|send|upload|post)\b[\s\S]{0,40}\b(?:api\s*key|secret|token|credentials|password|env(?:ironment)?\s+variables)/i],
+  ["high", "LLM01", /(?:pretend|act\s+as|roleplay|imagine)\s+(?:to\s+be\s+|you(?:'re|\s+are)\s+|as\s+)?[\s\S]{0,40}\b(?:no\s+restrictions|unrestricted|without\s+rules|no\s+rules|jailbroken|DAN\b)/i],
+  ["high", "LLM06", /(?:exfiltrate|leak|send|upload|post|email|give\s+me|show\s+me)\b[\s\S]{0,40}\b(?:api\s*key|secret|token|credentials|password|env(?:ironment)?\s+variables?|\.env)/i],
 ];
 
 /** Truncation cap for the matched dangerous phrase carried on a candidate. */

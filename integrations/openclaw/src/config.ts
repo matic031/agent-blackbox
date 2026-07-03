@@ -68,6 +68,18 @@ export interface GuardianConfig {
   protectedPaths: string[];
 }
 
+/**
+ * Sensible out-of-the-box protected paths — high-signal credential stores an
+ * agent rarely has a legitimate reason to read. Applied only when the config
+ * key is absent; an explicit (even empty) `protected_paths` list wins. Mirrors
+ * Python `DEFAULT_PROTECTED_PATHS`.
+ */
+export const DEFAULT_PROTECTED_PATHS: readonly string[] = [
+  "~/.ssh/*",
+  "~/.aws/credentials",
+  "*.pem",
+];
+
 const DEFAULTS: GuardianConfig = {
   mode: "audit",
   contextGraphId: "umanitek/guardian-threats",
@@ -80,7 +92,7 @@ const DEFAULTS: GuardianConfig = {
   discover: true,
   osvLookup: true,
   categories: {},
-  protectedPaths: [],
+  protectedPaths: [...DEFAULT_PROTECTED_PATHS],
 };
 
 function str(value: unknown): string | undefined {
@@ -146,9 +158,12 @@ function normalizeCategories(
 
 /**
  * Validate `protected_paths` into a de-duplicated list of non-empty patterns
- * (capped at 100). Mirrors Python `_normalize_protected_paths`.
+ * (capped at 100). A missing key (`null`/`undefined`) falls back to
+ * `DEFAULT_PROTECTED_PATHS`; an explicit list — including an empty one — is
+ * honoured verbatim. Mirrors Python `_normalize_protected_paths`.
  */
 function normalizeProtectedPaths(raw: unknown): string[] {
+  if (raw == null) return [...DEFAULT_PROTECTED_PATHS];
   if (!Array.isArray(raw)) return [];
   const out: string[] = [];
   for (const item of raw) {

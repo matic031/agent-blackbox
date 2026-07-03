@@ -698,6 +698,10 @@
     background-size: 400% 100%; animation: mshimmer 1.3s ease infinite; }
   @keyframes mshimmer { 0% { background-position: 100% 0 } 100% { background-position: -100% 0 } }
   .modal-empty { padding: 8px 2px 4px; color: var(--muted); font-size: 13px; line-height: 1.6; }
+  .m-sech {
+    font-size: 10px; text-transform: uppercase; letter-spacing: .07em; color: var(--info);
+    margin: 18px 0 10px; padding-top: 14px; border-top: 1px solid var(--border);
+  }
 
   /* ---------- Settings panel (reuses .modal-overlay / .modal) ---------- */
   /* Wider than the threat modal — the policy form needs the room. */
@@ -878,16 +882,6 @@
   .set-save:focus-visible { outline: 2px solid var(--text); outline-offset: 2px; }
   .set-save:disabled { opacity: 0.55; cursor: default; filter: none; }
 
-  .set-defaults-hint {
-    display: flex; gap: 9px; align-items: flex-start;
-    margin: 0 0 2px; padding: 11px 13px;
-    background: color-mix(in srgb, var(--mint) 6%, transparent);
-    border: 1px solid color-mix(in srgb, var(--mint) 22%, transparent);
-    border-radius: 10px; font-size: 12px; color: var(--muted); line-height: 1.5;
-  }
-  .set-defaults-hint svg { flex: 0 0 auto; width: 15px; height: 15px; color: var(--mint); margin-top: 1px; }
-  .set-defaults-hint b { color: var(--text); font-weight: 600; }
-
   @media (max-width: 560px) {
     .set-row { flex-wrap: wrap; }
     .cat-row { flex-wrap: wrap; }
@@ -897,8 +891,13 @@
   /* ---------- Findings rows (Live findings + Audit trail) ---------- */
   .agent-tag { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; color: var(--fw, var(--muted)); white-space: nowrap; }
   .agent-tag .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--fw, var(--muted)); flex: 0 0 auto; }
+  .agent-tag-ico { width: 16px; height: 16px; display: inline-flex; align-items: center; justify-content: center; color: var(--fw, var(--muted)); flex: 0 0 auto; }
+  .agent-tag-ico svg { width: 16px; height: 16px; display: block; }
+  .agent-tag-ico img.fw-logo { width: 16px; height: 16px; object-fit: cover; border-radius: 4px; display: block; }
   .type-tag { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; color: var(--text); }
   .type-tag .dot { width: 7px; height: 7px; border-radius: 50%; flex: 0 0 auto; }
+  .type-tag-ico { width: 16px; height: 16px; display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto; }
+  .type-tag-ico svg { width: 16px; height: 16px; display: block; }
   .reason { display: flex; flex-direction: column; gap: 3px; min-width: 0; max-width: 480px; }
   .reason-ev { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .reason-meta { color: var(--muted); font-size: 11.5px; display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
@@ -909,6 +908,10 @@
   .load-more { font-size: 12px; font-weight: 600; color: var(--text); background: rgba(255,255,255,0.04); border: 1px solid var(--border); border-radius: 8px; padding: 6px 14px; cursor: pointer; transition: background .15s, border-color .15s; }
   .load-more:hover { background: rgba(255,255,255,0.08); border-color: #333; }
   .load-more[hidden] { display: none; }
+
+  /* finding rows open the detail modal */
+  tbody tr.row-link { cursor: pointer; }
+  tbody tr.row-link:focus-visible { outline: 2px solid var(--mint); outline-offset: -2px; }
 </style>
 </head>
 <body>
@@ -933,7 +936,7 @@
   <div class="banner" role="alert" aria-live="assertive">
     <div id="conn-banner" class="banner-inner">
       <svg class="b-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4M12 17h.01"/><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/></svg>
-      <span><strong>Cannot reach Guardian.</strong> The dashboard server is not responding &mdash; retrying every few seconds.</span>
+      <span><strong>Cannot reach Guardian.</strong> The dashboard server is not responding. Retrying every few seconds.</span>
     </div>
   </div>
 
@@ -957,18 +960,18 @@
       <div class="section-head">
         <h2>Threat graph</h2>
         <div class="tabs" role="tablist" aria-label="Threat graph tier">
-          <button class="tab active" id="tab-public" role="tab" aria-selected="true" data-tier="public" title="Curated by Umanitek &mdash; source of truth, blockable">
+          <button class="tab active" id="tab-public" role="tab" aria-selected="true" data-tier="public" title="Curated by Umanitek. Source of truth, blockable.">
             Public<span class="tab-count" id="count-public">0</span>
           </button>
-          <button class="tab" id="tab-community" role="tab" aria-selected="false" data-tier="community" title="Reported by agents across the network &mdash; flagged, never blocks">
+          <button class="tab" id="tab-community" role="tab" aria-selected="false" data-tier="community" title="Reported by agents across the network. Flagged, never blocks.">
             Community<span class="tab-count" id="count-community">0</span>
           </button>
-          <button class="tab" id="tab-local" role="tab" aria-selected="false" data-tier="local" title="This node's own graph &mdash; what your agent has seen">
+          <button class="tab" id="tab-local" role="tab" aria-selected="false" data-tier="local">
             Local<span class="tab-count" id="count-local">0</span>
           </button>
         </div>
       </div>
-      <div class="section-note" id="graph-tier-note" style="margin:-6px 0 12px;">curated by Umanitek &mdash; source of truth, blockable</div>
+      <div class="section-note" id="graph-tier-note" style="margin:-6px 0 12px;">curated by Umanitek. Source of truth, blockable.</div>
       <div class="panel">
         <div class="graph-body" id="graph-body">
           <div class="graph-stage">
@@ -1094,7 +1097,7 @@
           </table>
         </div>
         <div class="audit-foot">
-          <span class="audit-count" id="audit-shown">&mdash;</span>
+          <span class="audit-count" id="audit-shown">-</span>
           <button type="button" class="load-more" id="audit-more" hidden>Load more</button>
         </div>
       </div>
@@ -1119,6 +1122,11 @@
   var findingsCache = null;
   var findingsSort = "newest";   // "newest" | "severity"
 
+  // Row → finding lookup for the click-to-detail modal. Rebuilt on every
+  // render so each <tr data-idx> maps back to the object it was drawn from.
+  var findingsRendered = [];
+  var auditRendered = [];
+
   function $(id) { return document.getElementById(id); }
 
   function esc(s) {
@@ -1134,14 +1142,14 @@
   }
 
   function fmtTime(v) {
-    if (v == null) return "—";
+    if (v == null) return "-";
     var d = (typeof v === "number") ? new Date(v * (v < 1e12 ? 1000 : 1)) : new Date(v);
     if (isNaN(d.getTime())) return esc(v);
     return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
   }
 
   function fmtAgo(v) {
-    if (v == null) return "—";
+    if (v == null) return "-";
     var d = (typeof v === "number") ? new Date(v * (v < 1e12 ? 1000 : 1)) : new Date(v);
     if (isNaN(d.getTime())) return esc(v);
     var s = Math.max(0, Math.floor((Date.now() - d.getTime()) / 1000));
@@ -1156,7 +1164,7 @@
 
   function fmtInterval(sec) {
     sec = Number(sec);
-    if (!isFinite(sec) || sec <= 0) return "—";
+    if (!isFinite(sec) || sec <= 0) return "-";
     if (sec % 3600 === 0) return (sec / 3600) + "h";
     if (sec % 60 === 0) return (sec / 60) + "m";
     return sec + "s";
@@ -1164,7 +1172,7 @@
 
   function num(v) {
     var n = Number(v);
-    return isFinite(n) ? n.toLocaleString() : "—";
+    return isFinite(n) ? n.toLocaleString() : "-";
   }
 
   function shortAddr(a) {
@@ -1319,14 +1327,14 @@
   var TIER_LABEL = { public: "Public graph", community: "Community graph", local: "Local graph" };
   // Subtitle under the tab strip — what each trust tier means.
   var TIER_NOTE = {
-    public: "curated by Umanitek — source of truth, blockable",
-    community: "reported by agents across the network — flagged, never blocks",
-    local: "this node's own graph — what your agent has seen"
+    public: "curated by Umanitek. Source of truth, blockable.",
+    community: "reported by agents across the network. Flagged, never blocks.",
+    local: ""
   };
   // Per-tier empty-state message for the graph stage.
   var TIER_EMPTY = {
-    public: "No curated threats published yet &mdash; the curator publishes verified threats here.",
-    community: "No community-reported threats yet &mdash; agents across the network flag identifiers here.",
+    public: "No curated threats published yet.",
+    community: "No community-reported threats yet.",
     local: "No local threats yet."
   };
 
@@ -1595,7 +1603,7 @@
   }
 
   // ---------- Threat detail modal ----------
-  var TM = { node: null };
+  var TM = { node: null, finding: null };
   var THREAT_CACHE = {};   // tier|identifier -> detail (re-clicks are instant)
 
   function catIconSVG(ck, color) {
@@ -1615,10 +1623,10 @@
 
   function fmtDateFull(s) {
     if (!s) return "";
-    var d = new Date(s);
+    var d = (typeof s === "number") ? new Date(s * (s < 1e12 ? 1000 : 1)) : new Date(s);
     if (isNaN(d.getTime())) return String(s);
     try {
-      return d.toLocaleString(undefined, { year: "numeric", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+      return d.toLocaleString(undefined, { year: "numeric", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit" });
     } catch (e) { return String(s); }
   }
 
@@ -1659,6 +1667,29 @@
     return t;
   }
 
+  // Shared modal-body builders (threat modal + finding modal).
+  function gridHTML(rows) {
+    if (!rows.length) return "";
+    return '<div class="modal-grid">' + rows.map(function (r) {
+      var full = (r[0] === "Pattern" || r[0] === "Description" || r[0] === "Evidence") ? " full" : "";
+      return '<div class="cell' + full + '"><div class="m-k">' + esc(r[0]) + '</div>' +
+        '<div class="m-v' + (r[2] ? ' mono' : '') + '">' + esc(r[1]) + '</div></div>';
+    }).join("") + '</div>';
+  }
+  function refsHTML(refs) {
+    if (!Array.isArray(refs) || !refs.length) return "";
+    return '<div class="modal-refs"><div class="rh">Advisories &amp; references</div>' +
+      refs.map(function (u) {
+        return '<a href="' + esc(u) + '" target="_blank" rel="noopener noreferrer">' + linkIconSVG() + '<span>' + esc(u) + '</span></a>';
+      }).join("") + '</div>';
+  }
+  function reportersHTML(d) {
+    if (typeof d.reporters !== "number" || d.reporters <= 0) return "";
+    return '<div class="modal-reporters"><div class="big">' + d.reporters + '</div>' +
+      '<div class="rlabel"><b>' + d.reporters + ' agent' + (d.reporters === 1 ? '' : 's') + '</b> reported this threat' +
+      (d.framework ? ' &middot; ' + esc(d.framework) : '') + '</div></div>';
+  }
+
   function renderThreatDetail(d, node) {
     var cat = catKey(d.category || (node && node.cat));
     var color = CATS[cat].color;
@@ -1673,26 +1704,9 @@
     if (d.description) body += '<div class="modal-desc">' + esc(d.description) + '</div>';
 
     var rows = detailRows(d);
-    if (rows.length) {
-      body += '<div class="modal-grid">' + rows.map(function (r) {
-        var full = (r[0] === "Pattern" || r[0] === "Description") ? " full" : "";
-        return '<div class="cell' + full + '"><div class="m-k">' + esc(r[0]) + '</div>' +
-          '<div class="m-v' + (r[2] ? ' mono' : '') + '">' + esc(r[1]) + '</div></div>';
-      }).join("") + '</div>';
-    }
-
-    if (Array.isArray(d.references) && d.references.length) {
-      body += '<div class="modal-refs"><div class="rh">Advisories &amp; references</div>' +
-        d.references.map(function (u) {
-          return '<a href="' + esc(u) + '" target="_blank" rel="noopener noreferrer">' + linkIconSVG() + '<span>' + esc(u) + '</span></a>';
-        }).join("") + '</div>';
-    }
-
-    if (typeof d.reporters === "number" && d.reporters > 0) {
-      body += '<div class="modal-reporters"><div class="big">' + d.reporters + '</div>' +
-        '<div class="rlabel"><b>' + d.reporters + ' agent' + (d.reporters === 1 ? '' : 's') + '</b> reported this threat' +
-        (d.framework ? ' &middot; ' + esc(d.framework) : '') + '</div></div>';
-    }
+    body += gridHTML(rows);
+    body += refsHTML(d.references);
+    body += reportersHTML(d);
 
     if (!d.description && !rows.length && (!d.references || !d.references.length)) {
       body += '<div class="modal-empty">No further detail is stored for this threat in the ' +
@@ -1706,6 +1720,7 @@
     var overlay = $("threat-modal");
     if (!overlay) return;
     TM.node = node;
+    TM.finding = null;
     var cat = catKey(node.cat);
     var color = CATS[cat].color;
     var sev = node.severity || "info";
@@ -1715,6 +1730,7 @@
     $("tm-title").textContent = node.name || node.identifier || "Threat";
     $("tm-tags").innerHTML = modalTags(cat, sevClass(sev), false);
     $("tm-id").textContent = node.identifier || "";
+    var idrow = $("tm-idrow"); if (idrow) idrow.style.display = "";
     var copyBtn = $("tm-copy"); if (copyBtn) { copyBtn.textContent = "Copy"; copyBtn.classList.remove("ok"); }
     overlay.classList.add("open");
     overlay.setAttribute("aria-hidden", "false");
@@ -1742,6 +1758,85 @@
     overlay.classList.remove("open");
     overlay.setAttribute("aria-hidden", "true");
     TM.node = null;
+    TM.finding = null;
+  }
+
+  // ---------- Finding detail modal (rows in Live findings / Audit trail) ----------
+  var EVENT_LABEL = { pre_tool_call: "Pre-tool check", post_tool_call: "Post-tool check" };
+  var SRC_LONG = {
+    public: "Public graph match. Confirmed threat.",
+    community: "Community pool match. Flagged by agents.",
+    heuristic: "Built-in heuristic. Discovery candidate."
+  };
+
+  function findingTags(f) {
+    var sev = sevClass(f.severity);
+    var cat = catKey(f.category || f.type);
+    var meta = CATS[cat];
+    var sk = srcKey(f);
+    var sm = SRC_META[sk];
+    return '<span class="pill ' + sev + '">' + esc(sev) + '</span>' +
+      '<span class="m-tag"><span class="dot" style="background:' + meta.color + '"></span>' + esc(meta.name) + '</span>' +
+      '<span class="src-badge ' + sk + '" title="' + esc(sm.tip) + '">' + esc(sm.label) + '</span>';
+  }
+
+  // What Guardian itself recorded for this row — painted instantly, no fetch.
+  function findingBaseHTML(f) {
+    var rows = [];
+    function add(k, v, mono) { if (v !== undefined && v !== null && String(v) !== "") rows.push([k, String(v), !!mono]); }
+    add("Detected", fmtDateFull(f.time || f.ts || f.timestamp));
+    add("Agent", fwLabel(f.framework));
+    add("Tool", f.tool_name || f.tool, true);
+    add("Trigger", EVENT_LABEL[String(f.event || "")] || f.event);
+    add("Source", SRC_LONG[srcKey(f)]);
+    add("Evidence", f.evidence || f.matched, true);
+    return gridHTML(rows);
+  }
+
+  // Extra intel from the threat graph, appended below the finding's own facts.
+  function threatIntelHTML(d) {
+    var html = "";
+    if (d.description) html += '<div class="modal-desc" style="margin-bottom:12px">' + esc(d.description) + '</div>';
+    html += gridHTML(detailRows(d));
+    html += refsHTML(d.references);
+    html += reportersHTML(d);
+    if (!html) return "";
+    return '<div class="m-sech">From the threat graph</div>' + html;
+  }
+
+  function openFindingModal(f) {
+    var overlay = $("threat-modal");
+    if (!overlay) return;
+    TM.node = null;
+    TM.finding = f;
+    var cat = catKey(f.category || f.type);
+    var color = CATS[cat].color;
+    overlay.style.setProperty("--accent", color);
+    $("tm-ico").innerHTML = catIconSVG(cat, color);
+    $("tm-title").textContent = f.title || f.evidence || f.identifier || "Finding";
+    $("tm-tags").innerHTML = findingTags(f);
+    var id = f.identifier || "";
+    $("tm-id").textContent = id;
+    var idrow = $("tm-idrow"); if (idrow) idrow.style.display = id ? "" : "none";
+    var copyBtn = $("tm-copy"); if (copyBtn) { copyBtn.textContent = "Copy"; copyBtn.classList.remove("ok"); }
+    $("tm-body").innerHTML = findingBaseHTML(f);
+    overlay.classList.add("open");
+    overlay.setAttribute("aria-hidden", "false");
+
+    // Graph-matched findings get enriched with the threat's full record.
+    var sk = srcKey(f);
+    if (!id || sk === "heuristic") return;
+    var tier = sk === "public" ? "public" : "community";
+    var ckey = tier + "|" + id;
+    var apply = function (d) {
+      if (TM.finding !== f) return;   // user moved on
+      var intel = threatIntelHTML(d || {});
+      if (intel) $("tm-body").innerHTML = findingBaseHTML(f) + intel;
+    };
+    if (THREAT_CACHE[ckey]) { apply(THREAT_CACHE[ckey]); return; }
+    getJSON("/api/threat?tier=" + encodeURIComponent(tier) + "&identifier=" + encodeURIComponent(id))
+      .then(function (d) { THREAT_CACHE[ckey] = d || {}; apply(d); })
+      .catch(function () {});   // base facts are already on screen
   }
 
   function onNodeClick(node) {
@@ -1919,9 +2014,9 @@
 
   // Per-finding source badge (three-tier trust model).
   var SRC_META = {
-    public:    { label: "confirmed", tip: "Public graph match — confirmed threat curated by Umanitek (blockable in block mode)" },
-    community: { label: "community", tip: "Community-flagged — matched the shared community pool; reported to strengthen consensus, never blocks" },
-    heuristic: { label: "candidate", tip: "Built-in heuristic discovery candidate — not yet in any graph" }
+    public:    { label: "confirmed", tip: "Public graph match, curated by Umanitek. Blockable in block mode." },
+    community: { label: "community", tip: "Matched the shared community pool. Reported to strengthen consensus, never blocks." },
+    heuristic: { label: "candidate", tip: "Built-in heuristic discovery candidate. Not yet in any graph." }
   };
   function srcKey(f) {
     var s = String(f.source || "").toLowerCase();
@@ -1955,11 +2050,13 @@
 
   // Shared row renderer — Time · Agent · Severity · Type · Reasoning.
   function agentTag(fw) {
-    return '<span class="agent-tag" style="--fw:' + fwColor(fw) + '"><span class="dot"></span>' + esc(fwLabel(fw)) + '</span>';
+    return '<span class="agent-tag" style="--fw:' + fwColor(fw) + '">' +
+      '<span class="agent-tag-ico">' + fwIcon(fw) + '</span>' + esc(fwLabel(fw)) + '</span>';
   }
   function typeTag(cat) {
-    var m = CATS[catKey(cat)];
-    return '<span class="type-tag"><span class="dot" style="background:' + m.color + '"></span>' + esc(m.name) + '</span>';
+    var ck = catKey(cat);
+    var m = CATS[ck];
+    return '<span class="type-tag"><span class="type-tag-ico">' + catIconSVG(ck, m.color) + '</span>' + esc(m.name) + '</span>';
   }
   function reasonCell(f) {
     var ev = f.evidence || f.matched || f.title || "";
@@ -1969,12 +2066,15 @@
     if (why && why !== ev) parts.push(esc(why));
     if (tool) parts.push("via " + esc(tool));
     var meta = parts.join(" &middot; ");
-    return '<div class="reason"><div class="reason-ev" title="' + esc(ev) + '">' + esc(ev || "—") + '</div>' +
+    return '<div class="reason"><div class="reason-ev" title="' + esc(ev) + '">' + esc(ev || "-") + '</div>' +
       (meta ? '<div class="reason-meta">' + meta + '</div>' : '') + '</div>';
   }
-  function findingRowHTML(f) {
+  // Rows are clickable (and keyboard-focusable) — they open the detail modal.
+  // data-idx maps the row back to its object in findingsRendered/auditRendered.
+  function findingRowHTML(f, i) {
     var sev = sevClass(f.severity);
-    return '<tr>' +
+    return '<tr class="row-link" data-idx="' + i + '" tabindex="0" role="button" ' +
+      'aria-label="' + esc("View details: " + (f.title || f.evidence || "finding")) + '">' +
       '<td class="col-time">' + fmtTime(f.time || f.ts || f.timestamp) + '</td>' +
       '<td>' + agentTag(f.framework) + '</td>' +
       '<td><span class="pill ' + sev + '">' + esc(sev) + '</span></td>' +
@@ -1991,10 +2091,12 @@
     var body = $("audit-body");
     if (!body) return;
     if (!list.length) {
+      auditRendered = [];
       body.innerHTML = '<tr><td colspan="5"><div class="empty">' +
         '<svg class="e-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/></svg>' +
         '<strong>No threats detected yet</strong>Everything Guardian flags will be logged here.</div></td></tr>';
     } else {
+      auditRendered = list;
       body.innerHTML = list.map(findingRowHTML).join("");
     }
     var shown = Math.min(list.length, total);
@@ -2025,13 +2127,15 @@
     $("stat-findings-meta").textContent = crit > 0 ? (crit + " critical") : "across all sessions";
 
     if (!list.length) {
+      findingsRendered = [];
       body.innerHTML = '<tr><td colspan="5"><div class="empty">' +
         '<svg class="e-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/></svg>' +
         '<strong>No findings yet</strong>Guardian is watching.</div></td></tr>';
       return;
     }
 
-    body.innerHTML = sortedFindings(list).map(findingRowHTML).join("");
+    findingsRendered = sortedFindings(list);
+    body.innerHTML = findingsRendered.map(findingRowHTML).join("");
   }
 
   // ---------- Graph status (stats only) ----------
@@ -2057,8 +2161,8 @@
         modePill.className = "status-pill mode-" + mode;
         modePill.innerHTML = '<span class="sp-dot"></span>' + esc(mode) + ' mode';
         modePill.title = mode === "block"
-          ? "Block mode — confirmed public-graph threats are blocked"
-          : "Audit mode — findings are logged and reported, nothing is blocked";
+          ? "Block mode. Confirmed public-graph threats are blocked."
+          : "Audit mode. Findings are logged and reported, nothing is blocked.";
       } else {
         modePill.hidden = true;
       }
@@ -2066,7 +2170,7 @@
     if (lastSync != null) {
       $("stat-sync").textContent = fmtAgo(lastSync);
       $("stat-sync").style.fontSize = "22px";
-      $("stat-sync-meta").textContent = "auto every " + (fmtInterval(interval) === "—" ? "cycle" : fmtInterval(interval));
+      $("stat-sync-meta").textContent = "auto every " + (fmtInterval(interval) === "-" ? "cycle" : fmtInterval(interval));
     } else {
       $("stat-sync").textContent = "never";
       $("stat-sync-meta").textContent = "run guardian sync";
@@ -2128,6 +2232,28 @@
   }
   $("sort-newest").addEventListener("click", function () { setFindingsSort("newest"); });
   $("sort-severity").addEventListener("click", function () { setFindingsSort("severity"); });
+
+  // wire finding rows (Live findings + Audit trail) → detail modal.
+  // Delegated on the tbody, which survives the 4s poll's innerHTML rebuilds.
+  function wireFindingRows(bodyId, getList) {
+    var body = $(bodyId);
+    if (!body) return;
+    function openFrom(el) {
+      var tr = el && el.closest ? el.closest("tr[data-idx]") : null;
+      if (!tr) return;
+      var f = (getList() || [])[Number(tr.getAttribute("data-idx"))];
+      if (f) openFindingModal(f);
+    }
+    body.addEventListener("click", function (e) { openFrom(e.target); });
+    body.addEventListener("keydown", function (e) {
+      if ((e.key === "Enter" || e.key === " ") && e.target.matches && e.target.matches("tr[data-idx]")) {
+        e.preventDefault();
+        openFrom(e.target);
+      }
+    });
+  }
+  wireFindingRows("findings-body", function () { return findingsRendered; });
+  wireFindingRows("audit-body", function () { return auditRendered; });
 
   // wire audit-trail "load more"
   var auditMoreBtn = $("audit-more");
@@ -2237,8 +2363,8 @@
     ba.setAttribute("aria-pressed", block ? "false" : "true");
     bb.setAttribute("aria-pressed", block ? "true" : "false");
     $("set-mode-help").innerHTML = block
-      ? "Block — actively stop confirmed threats at or above the chosen severity."
-      : "Audit — log &amp; report findings, never block.";
+      ? "Stop confirmed threats at or above the chosen severity."
+      : "Log and report findings, never block.";
     // block-severity row is only meaningful in block mode
     var row = $("set-block-sev-row");
     row.style.display = block ? "" : "none";
@@ -2288,7 +2414,7 @@
     var host = $("set-paths-list");
     var paths = setState.protected_paths;
     if (!paths.length) {
-      host.innerHTML = '<div class="paths-empty">No protected paths yet &mdash; add one below.</div>';
+      host.innerHTML = '<div class="paths-empty">No protected paths yet.</div>';
       return;
     }
     host.innerHTML = paths.map(function (p, i) {
@@ -2398,7 +2524,7 @@
         // refresh in-memory settings from the server's authoritative view
         if (result.settings) setState = normalizeSettings(result.settings);
         renderAllSettings();
-        setStatus("Saved — changes are live.", "ok");
+        setStatus("Saved.", "ok");
       } else {
         var errs = Array.isArray(result.errors) && result.errors.length
           ? result.errors.join(" · ")
@@ -2406,7 +2532,7 @@
         setStatus(errs, "err");
       }
     }).catch(function () {
-      setStatus("Network error — settings not saved. Check the connection and retry.", "err");
+      setStatus("Network error. Settings not saved.", "err");
     }).then(function () {
       setSaving = false;
       btn.disabled = false;
@@ -2420,7 +2546,7 @@
     var labels = (window.__setLabels) || {};
     setState.category_labels = labels;
     renderAllSettings();
-    setStatus("Defaults restored — click Save to apply.", "ok");
+    setStatus("Defaults restored. Click Save to apply.", "ok");
   }
 
   function loadSettings(force) {
@@ -2434,7 +2560,7 @@
     }).catch(function () {
       if (!setState) setState = defaultSetState();
       renderAllSettings();
-      setStatus("Could not load settings — showing defaults.", "err");
+      setStatus("Could not load settings. Showing defaults.", "err");
     });
   }
 
@@ -2527,7 +2653,7 @@
         <div class="modal-tags" id="tm-tags"></div>
       </div>
     </div>
-    <div class="modal-id">
+    <div class="modal-id" id="tm-idrow">
       <code id="tm-id"></code>
       <button class="modal-copy" id="tm-copy">Copy</button>
     </div>
@@ -2546,23 +2672,18 @@
       </div>
       <div class="set-htext">
         <div class="set-title" id="set-title">Detection settings</div>
-        <div class="set-sub">Tune what Guardian watches for &mdash; changes stay on this machine.</div>
+        <div class="set-sub">Changes stay on this machine.</div>
       </div>
     </div>
 
     <div class="set-body">
-      <div class="set-defaults-hint">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 16v-4M12 8h.01"/></svg>
-        <span>Sensible defaults are already on: every category is enabled at the lowest severity, and nothing is blocked (audit only). Loosen a category to cut noise, or switch to block mode to actively stop confirmed threats.</span>
-      </div>
-
       <!-- Protection mode -->
       <div class="set-group">
         <div class="set-glabel">Protection mode</div>
         <div class="set-row">
           <div class="set-rl">
             <div class="set-rt">Enforcement</div>
-            <div class="set-rh"><b id="set-mode-help">Audit &mdash; log &amp; report findings, never block.</b></div>
+            <div class="set-rh"><b id="set-mode-help">Log and report findings, never block.</b></div>
           </div>
           <div class="set-rc">
             <div class="set-seg" role="group" aria-label="Protection mode">
@@ -2596,7 +2717,7 @@
           <span class="set-gnote">always block in block mode &middot; never leave this machine</span>
         </div>
         <div class="set-rh" style="margin:-4px 0 12px; color:var(--muted); font-size:12px; line-height:1.5;">
-          Any tool that touches a matching path is flagged as critical &mdash; and blocked when block mode is on. Use a glob (<code style="font-family:ui-monospace,Menlo,monospace;color:var(--mint)">~/.ssh/*</code>, <code style="font-family:ui-monospace,Menlo,monospace;color:var(--mint)">*.pem</code>) or a folder prefix (<code style="font-family:ui-monospace,Menlo,monospace;color:var(--mint)">~/secrets</code>).
+          Globs like <code style="font-family:ui-monospace,Menlo,monospace;color:var(--mint)">~/.ssh/*</code> or a folder prefix. Matches are flagged critical, blocked in block mode.
         </div>
         <div class="paths-list" id="set-paths-list"></div>
         <div class="path-add">
