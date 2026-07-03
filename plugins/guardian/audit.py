@@ -216,6 +216,24 @@ def local_frameworks() -> List[str]:
     return out
 
 
+def local_active_frameworks() -> List[str]:
+    """Frameworks with observed local Guardian activity.
+
+    Findings identify their framework explicitly through ``findings*.jsonl``.
+    Routine Hermes hooks write only ``audit.jsonl``; when that exists, Hermes is
+    active even if no threat has been found yet.
+    """
+    out = local_frameworks()
+    audit_path = _home() / "audit.jsonl"
+    if "hermes" not in out and audit_path.exists():
+        try:
+            if any(line.strip() for line in audit_path.read_text(encoding="utf-8").splitlines()):
+                out.insert(0, "hermes")
+        except Exception:
+            pass
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Recording
 # ---------------------------------------------------------------------------

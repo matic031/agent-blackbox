@@ -191,11 +191,12 @@ def create_app():
         except Exception as exc:  # pragma: no cover - fail open
             logger.debug("guardian dashboard: agent identity failed: %s", exc)
 
-        # Local protected agents: one per framework with a findings log here.
+        # Local active agents: one per framework that has emitted a local
+        # Guardian audit/finding event. Attachment alone is not a live signal.
         try:
-            local_fw = audit.local_frameworks() or ["hermes"]
+            local_fw = audit.local_active_frameworks()
         except Exception:  # pragma: no cover - fail open
-            local_fw = ["hermes"]
+            local_fw = []
         # Per-framework local finding counts (so the card shows real activity).
         counts_by_fw: "Dict[str, int]" = {}
         try:
