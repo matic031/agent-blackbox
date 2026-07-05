@@ -221,25 +221,29 @@ def detect_dependency(tool_name: str, args: Any, ruleset: Any) -> List[Finding]:
     seen: set = set()
     for dep in quads.parse_dependency_installs(command):
         version = dep.get("version") or ""
-        if not version:
-            continue
         eco = dep["ecosystem"].lower()
         name = quads.canonical_package_name(eco, dep["name"])
-        key = quads.dependency_key(eco, dep["name"], version)
-        rule = dependency_rules.get(key)
-        if not rule or key in seen:
+        # Exact pinned version first, then a package-level ``@*`` rule — whole-package
+        # malware / typosquats where EVERY version is bad, including an unpinned
+        # ``install <pkg>`` (which has no version to key on).
+        candidates = [quads.dependency_key(eco, dep["name"], version)] if version else []
+        candidates.append(quads.dependency_key(eco, dep["name"], "*"))
+        key = next((k for k in candidates if k in dependency_rules), None)
+        if key is None or key in seen:
             continue
         seen.add(key)
+        rule = dependency_rules[key]
         src = _rule_source(rule)
+        shown = version or "*"
         out.append(
             Finding(
-                identifier=rule.get("identifier", quads.dependency_identifier(eco, name, version)),
+                identifier=rule.get("identifier") or f"dep:{key}",
                 category="dependency",
                 severity=rule.get("severity", "high"),
-                title=rule.get("name") or f"Vulnerable dependency {name}@{version}",
+                title=rule.get("name") or f"Vulnerable dependency {name}@{shown}",
                 tool_name=tool_name or "",
                 matched=key,
-                evidence=f"{dep['ecosystem']}:{dep['name']}@{version}"
+                evidence=f"{dep['ecosystem']}:{dep['name']}@{shown}"
                 + (f" ({rule.get('advisoryId')})" if rule.get("advisoryId") else ""),
                 confirmed=src == "public",
                 source=src,
@@ -247,7 +251,7 @@ def detect_dependency(tool_name: str, args: Any, ruleset: Any) -> List[Finding]:
                 fields={
                     "ecosystem": eco,
                     "package_name": name,
-                    "package_version": version,
+                    "package_version": version or "*",
                     "advisory_id": rule.get("advisoryId"),
                     "kind": rule.get("kind"),
                 } if src == "community" else {},

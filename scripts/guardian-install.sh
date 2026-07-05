@@ -409,7 +409,9 @@ guardian = entries.setdefault("guardian", {})
 # Idempotent: only fill keys that are missing — never clobber user edits.
 defaults = {
     "mode": "audit",
-    "context_graph_id": "umanitek/guardian-threats",
+    # TEMPORARY: default to the STAGING graph while production is still being
+    # seeded. TODO(launch): switch back to "umanitek/guardian-threats" (production).
+    "context_graph_id": "umanitek/guardian-threats-staging",
     "dkg_url": "http://127.0.0.1:9200",
     "sync_interval": 300,
     "report": True,

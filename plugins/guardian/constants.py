@@ -81,7 +81,10 @@ SCHEMA_DATE_MODIFIED_PRED = "http://schema.org/dateModified"
 # ---------------------------------------------------------------------------
 
 #: Default public curated context-graph id (config key ``context_graph_id``).
-DEFAULT_CONTEXT_GRAPH_ID = "umanitek/guardian-threats"
+#: TEMPORARY: points at the STAGING graph while the production graph is still
+#: being seeded. TODO(launch): switch back to the production graph
+#: "umanitek/guardian-threats" before release.
+DEFAULT_CONTEXT_GRAPH_ID = "umanitek/guardian-threats-staging"
 
 #: Default local DKG node HTTP endpoint.
 DEFAULT_DKG_URL = "http://127.0.0.1:9200"

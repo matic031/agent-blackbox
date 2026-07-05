@@ -33,8 +33,13 @@ except Exception:  # pragma: no cover - yaml is a hard dep in practice
 
 # Files/dirs never copied into a target home's plugins/guardian/ — build
 # artifacts and the plugin's own tests have no business in a runtime home.
-_COPY_EXCLUDE_DIRS = {"__pycache__", "tests", ".pytest_cache"}
+_COPY_EXCLUDE_DIRS = {"__pycache__", "tests", ".pytest_cache", "node_modules"}
 _COPY_EXCLUDE_SUFFIXES = (".pyc", ".pyo")
+
+# The OpenClaw JS plugin is bundled inside an installed copy under this name so
+# OpenClaw always has something to load, even when Guardian was copied into a
+# user home with no sibling ``integrations/`` (see ``_openclaw_plugin_source``).
+_BUNDLED_OPENCLAW_DIRNAME = "_openclaw"
 
 
 # ---------------------------------------------------------------------------
@@ -216,22 +221,51 @@ def _needs_copy(dest: Path) -> bool:
         return False
 
 
+def _copy_ignore(_dir: str, names: List[str]) -> List[str]:
+    return [n for n in names if n in _COPY_EXCLUDE_DIRS or n.endswith(_COPY_EXCLUDE_SUFFIXES)]
+
+
 def _copy_plugin_tree(src: Path, dest: Path) -> None:
     """Copy the plugin tree from *src* to *dest*, excluding pycache/tests.
 
-    Replaces any existing copy so a version bump fully refreshes the files.
+    Replaces any existing copy so a version bump fully refreshes the files, and
+    bundles the OpenClaw JS plugin so an installed copy can still point OpenClaw
+    at it (an installed ``plugins/guardian`` has no sibling ``integrations/``).
     """
     if dest.exists():
         shutil.rmtree(dest)
+    shutil.copytree(src, dest, ignore=_copy_ignore)
+    _bundle_openclaw_plugin(src, dest)
 
-    def _ignore(_dir: str, names: List[str]) -> List[str]:
-        ignored: List[str] = []
-        for name in names:
-            if name in _COPY_EXCLUDE_DIRS or name.endswith(_COPY_EXCLUDE_SUFFIXES):
-                ignored.append(name)
-        return ignored
 
-    shutil.copytree(src, dest, ignore=_ignore)
+def _bundle_openclaw_plugin(src: Path, dest: Path) -> None:
+    """Ensure the OpenClaw JS plugin lives at ``dest/_openclaw``.
+
+    Sourced from the source copy's own bundle (a re-copy from another installed
+    copy) or the repo checkout (the first copy from ``integrations/openclaw``).
+    Best-effort: bundling must never break the Hermes/Python attach, so any
+    failure is logged and swallowed — OpenClaw attach then reports itself
+    unprotected via ``_openclaw_load_paths_entry`` rather than crashing.
+    """
+    dest_bundle = dest / _BUNDLED_OPENCLAW_DIRNAME
+    if _is_openclaw_plugin_dir(dest_bundle):
+        return  # copytree already carried a valid bundle over from *src*
+    for candidate in (src / _BUNDLED_OPENCLAW_DIRNAME, _repo_openclaw_dir()):
+        if not _is_openclaw_plugin_dir(candidate):
+            continue
+        try:
+            if dest_bundle.exists():
+                shutil.rmtree(dest_bundle)
+            shutil.copytree(candidate, dest_bundle, ignore=_openclaw_ignore)
+        except Exception as exc:  # pragma: no cover - best effort
+            logger.debug("guardian.attach: bundling OpenClaw plugin failed: %s", exc)
+        return
+
+
+def _openclaw_ignore(_dir: str, names: List[str]) -> List[str]:
+    """Exclude deps/build/test dirs from the bundled OpenClaw plugin."""
+    skip = {"node_modules", "dist", ".turbo", "test", "tests", "__pycache__"}
+    return [n for n in names if n in skip or n.endswith((".pyc", ".log", ".tsbuildinfo"))]
 
 
 # ---------------------------------------------------------------------------
@@ -336,15 +370,43 @@ def detach_hermes(home: Path, *, remove_files: bool = False, dry_run: bool = Fal
 # ---------------------------------------------------------------------------
 
 
-def _openclaw_load_paths_entry() -> Optional[str]:
-    """Absolute path to ``integrations/openclaw`` in this repo, or ``None``.
+def _repo_openclaw_dir() -> Path:
+    """The OpenClaw JS plugin in a repo checkout (sibling ``integrations/``)."""
+    return _repo_root() / "integrations" / "openclaw"
 
-    Guardian may have been copied into a user home (no sibling ``integrations/``),
-    in which case there is nothing to point OpenClaw at — the caller records the
-    intent and logs a clear note.
+
+def _bundled_openclaw_dir() -> Path:
+    """The OpenClaw JS plugin bundled inside this (possibly installed) copy."""
+    return _plugin_source_dir() / _BUNDLED_OPENCLAW_DIRNAME
+
+
+def _is_openclaw_plugin_dir(path: Path) -> bool:
+    """True when *path* is the OpenClaw plugin (identified by its manifest)."""
+    try:
+        return (path / "openclaw.plugin.json").is_file()
+    except Exception:
+        return False
+
+
+def _openclaw_plugin_source() -> Optional[Path]:
+    """Locate the OpenClaw JS plugin wherever this Guardian copy runs from.
+
+    An installed copy (``~/.hermes/plugins/guardian``) has no sibling
+    ``integrations/``, so the plugin is bundled into ``_openclaw`` at copy time
+    and checked first; a repo checkout finds it via ``integrations/openclaw``.
+    Returns ``None`` only when neither exists (e.g. a bare package with no repo),
+    which the caller reports as an unprotected OpenClaw rather than a crash.
     """
-    candidate = _repo_root() / "integrations" / "openclaw"
-    return str(candidate) if candidate.is_dir() else None
+    for candidate in (_bundled_openclaw_dir(), _repo_openclaw_dir()):
+        if _is_openclaw_plugin_dir(candidate):
+            return candidate
+    return None
+
+
+def _openclaw_load_paths_entry() -> Optional[str]:
+    """Absolute path OpenClaw should load the Guardian plugin from, or ``None``."""
+    src = _openclaw_plugin_source()
+    return str(src) if src is not None else None
 
 
 def attach_openclaw(workspace: Path, *, dry_run: bool = False) -> Dict[str, Any]:

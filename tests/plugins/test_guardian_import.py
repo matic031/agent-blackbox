@@ -53,6 +53,27 @@ def test_seed_entries_dedups_and_dry_run_spends_nothing():
     assert no_pub_ids == []
 
 
+def test_seed_entries_limit_caps_new_publishes_for_batching():
+    # Batch seeding on mainnet costs real TRAC, so --limit stops after N NEW
+    # publishes — a curator verifies each batch before paying for the next.
+    # Duplicates don't count toward the limit; untouched entries are left for a
+    # later run (the ledger resumes them, so it never double-pays).
+    entries = [
+        {"type": "dependency", "ecosystem": "npm", "name": "seen", "version": "1.0.0"},  # dup
+        {"type": "dependency", "ecosystem": "npm", "name": "a", "version": "1.0.0"},
+        {"type": "dependency", "ecosystem": "npm", "name": "b", "version": "1.0.0"},
+        {"type": "dependency", "ecosystem": "npm", "name": "c", "version": "1.0.0"},  # past the limit
+    ]
+    already = {"dep:npm:seen@1.0.0"}
+    seeded, skipped, errors, new_ids = cli._seed_entries(
+        None, None, entries, publish=True, already=already, dry_run=True, limit=2
+    )
+    assert (seeded, skipped, errors) == (2, 1, 0)
+    assert new_ids == ["dep:npm:a@1.0.0", "dep:npm:b@1.0.0"]
+    # 'c' was never processed, so a follow-up run picks it up next.
+    assert "dep:npm:c@1.0.0" not in already
+
+
 # A small bumblebee-shaped catalog: one package, three malicious versions.
 BUMBLEBEE = {
     "schema_version": "0.1.0",

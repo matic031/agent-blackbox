@@ -502,8 +502,9 @@
   .pill.low { color: var(--low); background: rgba(59,130,246,0.12); border-color: rgba(59,130,246,0.35); }
   .pill.info { color: var(--info); background: rgba(148,163,184,0.12); border-color: rgba(148,163,184,0.35); }
 
-  /* Per-finding source badge: public = confirmed threat (strongest),
-     community = community-flagged, heuristic = discovery candidate. */
+  /* Per-finding source badge — shows each threat's true origin:
+     public/community = the two graph tiers; heuristic/custom/llm/secret = the
+     four LOCAL sources (never came from a graph). */
   .src-badge {
     display: inline-block;
     font-size: 10px;
@@ -518,6 +519,9 @@
   .src-badge.public { color: #0D0D0D; background: var(--mint); border-color: var(--mint); }
   .src-badge.community { color: var(--medium); background: rgba(245,158,11,0.12); border-color: rgba(245,158,11,0.35); }
   .src-badge.heuristic { color: var(--info); background: rgba(148,163,184,0.10); border-color: rgba(148,163,184,0.30); }
+  .src-badge.custom { color: #3B82F6; background: rgba(59,130,246,0.12); border-color: rgba(59,130,246,0.35); }
+  .src-badge.llm { color: #8B5CF6; background: rgba(139,92,246,0.12); border-color: rgba(139,92,246,0.35); }
+  .src-badge.secret { color: #EF4444; background: rgba(239,68,68,0.14); border-color: rgba(239,68,68,0.40); }
 
   /* ---------- Empty states ---------- */
   .empty {
@@ -2089,11 +2093,15 @@
   // Severity rank for the "Severity" sort (higher = more severe, sorts first).
   var SEV_RANK = { critical: 5, high: 4, medium: 3, low: 2, info: 1 };
 
-  // Per-finding source badge (three-tier trust model).
+  // Per-finding source badge — every threat's true origin (graph tiers + the
+  // local-only sources, which never fold into public/candidate).
   var SRC_META = {
     public:    { label: "confirmed", tip: "Public graph match, curated by Umanitek. Blockable in block mode." },
     community: { label: "community", tip: "Matched the shared community pool. Reported to strengthen consensus, never blocks." },
-    heuristic: { label: "candidate", tip: "Built-in heuristic discovery candidate. Not yet in any graph." }
+    heuristic: { label: "candidate", tip: "Built-in heuristic discovery — not yet in any graph. Local; nominated to the community pool." },
+    custom:    { label: "your rule", tip: "Matched one of your own protected paths. Local only — never shared." },
+    llm:       { label: "AI review", tip: "Flagged by the optional LLM injection reviewer. Local only — never blocks or shares." },
+    secret:    { label: "secret", tip: "Secret exposure caught locally. Never leaves your machine." }
   };
   function srcKey(f) {
     var s = String(f.source || "").toLowerCase();

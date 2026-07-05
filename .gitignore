@@ -159,3 +159,5 @@ testing.md
 # Accidental literal-tilde dir (unexpanded HERMES_HOME=~/... from a subprocess)
 /~/
 /.claude
+
+catalogs/

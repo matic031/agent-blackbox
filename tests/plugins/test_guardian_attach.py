@@ -227,6 +227,40 @@ def test_attach_openclaw_dry_run_writes_nothing(fake_env):
     assert (ws / "openclaw.json").read_text() == before
 
 
+def test_copy_plugin_tree_bundles_openclaw(tmp_path):
+    # An installed copy has no sibling integrations/, so the OpenClaw JS plugin
+    # must be bundled INTO the copy — otherwise OpenClaw has nothing to load
+    # (the "Attach failed" root cause). _copy_plugin_tree pulls it from the repo.
+    dest = tmp_path / "plugins" / "guardian"
+    attach._copy_plugin_tree(attach._plugin_source_dir(), dest)
+    bundle = dest / "_openclaw"
+    assert (bundle / "openclaw.plugin.json").is_file()
+    assert (bundle / "src" / "index.ts").is_file()
+    assert not (bundle / "node_modules").exists()  # deps excluded from the bundle
+
+
+def test_openclaw_load_path_resolves_from_installed_copy(tmp_path, monkeypatch):
+    # Regression for the attach failure: when Guardian runs from an installed
+    # copy (no sibling repo), the load path must resolve to the BUNDLED plugin,
+    # not return None — None made attach_openclaw report ok=False ("Attach
+    # failed") for every installed user.
+    installed = tmp_path / "plugins" / "guardian"
+    attach._copy_plugin_tree(attach._plugin_source_dir(), installed)  # bundles _openclaw
+    monkeypatch.setattr(attach, "_plugin_source_dir", lambda: installed)
+    # repo_root is now tmp_path — no integrations/openclaw there.
+    assert not (attach._repo_root() / "integrations" / "openclaw").exists()
+    assert attach._openclaw_load_paths_entry() == str(installed / "_openclaw")
+
+
+def test_openclaw_plugin_source_none_without_bundle_or_repo(tmp_path, monkeypatch):
+    # A bare copy with neither a bundle nor a repo sibling resolves to None (an
+    # honest "unprotected"), never a crash.
+    bare = tmp_path / "plugins" / "guardian"
+    bare.mkdir(parents=True)
+    monkeypatch.setattr(attach, "_plugin_source_dir", lambda: bare)
+    assert attach._openclaw_load_paths_entry() is None
+
+
 def test_detach_openclaw_removes_block(fake_env):
     ws = fake_env["openclaw_ws"]
     attach.attach_openclaw(ws)

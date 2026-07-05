@@ -91,10 +91,12 @@ def setup_cli(parser: argparse.ArgumentParser) -> None:
 
     clist = csub.add_parser("list", help="List candidate threats grouped by distinct reporters")
     clist.add_argument("--pending", action="store_true", help="Only show non-curated candidates")
+    clist.add_argument("--json", action="store_true", help="Emit machine-readable JSON (for an agent curator to parse)")
     clist.set_defaults(func=_cmd_curate_list)
 
     cshow = csub.add_parser("show", help="Show one threat/candidate and its reporters")
     cshow.add_argument("identifier")
+    cshow.add_argument("--json", action="store_true", help="Emit machine-readable JSON (for an agent curator to parse)")
     cshow.set_defaults(func=_cmd_curate_show)
 
     capprove = csub.add_parser("approve", help="Promote a candidate to a curated threat (share + publish)")
@@ -125,6 +127,7 @@ def setup_cli(parser: argparse.ArgumentParser) -> None:
     cimport.add_argument("--dry-run", action="store_true", help="Preview what WOULD publish after dedup; spend no TRAC")
     cimport.add_argument("--check-graph", action="store_true", help="Also skip identifiers already on-chain (queries the VM once)")
     cimport.add_argument("--epochs", type=int, default=1, help="Storage epochs per asset — higher = longer on-chain life, more TRAC (default 1)")
+    cimport.add_argument("--limit", type=int, help="Publish at most N NEW threats this run (batch seeding). Re-run to continue — the seeded ledger resumes where you left off, so it never double-pays.")
     cimport.set_defaults(func=_cmd_curate_import)
 
     dash = sub.add_parser("dashboard", help="Start the local Guardian dashboard")
@@ -349,22 +352,51 @@ ORDER BY DESC(?reporters)
 LIMIT 200
 """
     rows = client.query(sparql, cfg.context_graph_id, view=constants.VIEW_SHARED_WORKING_MEMORY)
-    if not rows:
-        print("No community reports found (empty graph or node unreachable).")
-        return 0
     rejected = _load_rejected()  # locally-rejected candidates stay hidden
-    print(f"{'reporters':>9}  {'sev':<8}  {'curated':<7}  identifier")
+    items: List[Dict[str, Any]] = []
     for row in rows:
         ident = extract_binding(row.get("identifier"))
         if ident in rejected:
             continue
-        reporters = extract_binding(row.get("reporters")) or "0"
-        sev = extract_binding(row.get("sev")) or "-"
         curated = extract_binding(row.get("cur")).lower() == "true"
         if args.pending and curated:
             continue
-        print(f"{reporters:>9}  {sev:<8}  {'yes' if curated else 'no':<7}  {ident}")
+        items.append({
+            "identifier": ident,
+            "reporters": int(extract_binding(row.get("reporters")) or "0"),
+            "severity": extract_binding(row.get("sev")) or "info",
+            "curated": curated,
+        })
+    if getattr(args, "json", False):
+        print(json.dumps(items, indent=2))
+        return 0
+    if not rows:
+        print("No community reports found (empty graph or node unreachable).")
+        return 0
+    print(f"{'reporters':>9}  {'sev':<8}  {'curated':<7}  identifier")
+    for it in items:
+        print(f"{it['reporters']:>9}  {it['severity']:<8}  {'yes' if it['curated'] else 'no':<7}  {it['identifier']}")
     return 0
+
+
+# Report predicate IRI -> friendly field name. Reports carry these privacy-safe
+# threat fields for candidates (see quads.build_report_quads), so a curator (or
+# an agent curator) can judge WHAT the threat is, not just who reported it.
+_REPORT_FIELD_NAMES = {
+    constants.PATTERN_PRED: "pattern",
+    constants.OWASP_CATEGORY_PRED: "owasp",
+    constants.TOOL_NAME_PRED: "tool",
+    constants.ARG_SHAPE_PRED: "arg_shape",
+    constants.PACKAGE_ECOSYSTEM_PRED: "ecosystem",
+    constants.PACKAGE_NAME_PRED: "package",
+    constants.PACKAGE_VERSION_PRED: "version",
+    constants.SCHEMA_IDENTIFIER_PRED: "advisory",
+    constants.KIND_PRED: "kind",
+    constants.CATEGORY_PRED: "file_category",
+    constants.SKILL_NAME_PRED: "skill",
+    constants.SKILL_VERSION_PRED: "skill_version",
+    constants.DANGER_SHAPE_PRED: "danger_shape",
+}
 
 
 def _cmd_curate_show(args: argparse.Namespace) -> int:
@@ -384,12 +416,39 @@ SELECT ?reporter ?severity ?framework WHERE {{
 LIMIT 200
 """
     rows = client.query(sparql, cfg.context_graph_id, view=constants.VIEW_SHARED_WORKING_MEMORY)
+    reports = [{
+        "reporter": extract_binding(r.get("reporter")),
+        "severity": extract_binding(r.get("severity")) or None,
+        "framework": extract_binding(r.get("framework")) or None,
+    } for r in rows]
+
+    # The privacy-safe threat fields forwarded on the reports (what the threat IS).
+    fields: Dict[str, str] = {}
+    try:
+        frows = client.query(
+            'PREFIX g: <http://umanitek.ai/ontology/guardian/> '
+            f'SELECT ?p ?o WHERE {{ ?report a g:ThreatReport . ?report g:identifier "{esc}" . ?report ?p ?o . }}',
+            cfg.context_graph_id, view=constants.VIEW_SHARED_WORKING_MEMORY,
+        )
+        for fr in frows:
+            name = _REPORT_FIELD_NAMES.get(extract_binding(fr.get("p")))
+            val = extract_binding(fr.get("o"))
+            if name and val and name not in fields:
+                fields[name] = val
+    except DkgError:
+        pass
+
+    if getattr(args, "json", False):
+        print(json.dumps({
+            "identifier": ident, "reporters": len(reports), "reports": reports, "fields": fields,
+        }, indent=2))
+        return 0
     print(f"Threat: {ident}")
-    print(f"  reporters: {len(rows)}")
-    for row in rows:
-        print(f"    - {extract_binding(row.get('reporter'))} "
-              f"[{extract_binding(row.get('severity')) or '-'}] "
-              f"via {extract_binding(row.get('framework')) or '-'}")
+    print(f"  reporters: {len(reports)}")
+    if fields:
+        print("  fields: " + ", ".join(f"{k}={v}" for k, v in fields.items()))
+    for r in reports:
+        print(f"    - {r['reporter']} [{r['severity'] or '-'}] via {r['framework'] or '-'}")
     return 0
 
 
@@ -504,9 +563,15 @@ def _cmd_curate_import(args: argparse.Namespace) -> int:
     if getattr(args, "check_graph", False):
         already |= _existing_graph_identifiers(client, cfg)
 
+    # --limit caps NEW publishes across the whole run (batch seeding). Thread the
+    # remaining budget through each file so a --dir run stops at the batch size.
+    limit = getattr(args, "limit", None)
+    remaining = limit
     seeded = dup_skipped = errors = bad_files = 0
     published_ids: List[str] = []
     for path in catalog_paths:
+        if remaining is not None and remaining <= 0:
+            break
         try:
             catalog = json.loads(path.read_text(encoding="utf-8"))
         except Exception as exc:
@@ -524,24 +589,32 @@ def _cmd_curate_import(args: argparse.Namespace) -> int:
         s, sk, e, ids = _seed_entries(
             client, cfg, entries, publish=publish, already=already,
             dry_run=dry_run, epochs=max(1, int(getattr(args, "epochs", 1) or 1)),
+            limit=remaining,
         )
         seeded += s
         dup_skipped += sk
         errors += e
         published_ids += ids
+        if remaining is not None:
+            remaining -= s
         if args.dir:
             print(f"  {path.name}: {s} new, {sk} dup, {e} err")
 
     if not dry_run:
         _append_seeded_ledger(published_ids)  # only successful publishes are recorded
 
+    capped = limit is not None and seeded >= limit
     if dry_run:
         print(f"Dry run: {seeded} NEW threats would publish, {dup_skipped} skipped as duplicates, {errors} errors.")
         print("  Nothing published — no TRAC spent. Dedup keeps the bill to genuinely-new threats only.")
+        if capped:
+            print(f"  (Showing the next {limit} — the batch --limit. Drop --dry-run to publish exactly these.)")
     else:
         tier = "the public graph (mainnet VM)" if publish else "the local graph (SWM)"
         tail = f", {bad_files} unreadable files" if bad_files else ""
         print(f"Import complete: {seeded} new threats → {tier}, {dup_skipped} skipped as duplicates, {errors} errors{tail}.")
+        if capped:
+            print(f"  Batch --limit ({limit}) reached. Verify this batch, then re-run the SAME command to publish the next {limit} — the ledger resumes automatically.")
     return 0 if errors == 0 else 1
 
 
@@ -625,18 +698,23 @@ def _seed_entries(
     already: set,
     dry_run: bool = False,
     epochs: int = 1,
+    limit: Optional[int] = None,
 ) -> tuple:
     """Seed flattened *entries* as curated threats, skipping duplicates.
 
     *already* is the running set of identifiers NOT to publish (the seeded
     ledger + optionally the on-chain set + anything seen earlier this run). It's
     mutated in place so a repeated identifier within the same run is published at
-    most once — every skip saves a TRAC publish. Returns
+    most once — every skip saves a TRAC publish. *limit*, when set, stops after
+    that many NEW threats so a catalog can be seeded in verifiable batches;
+    untouched entries are left for a later run (the ledger resumes them). Returns
     ``(seeded, skipped, errors, new_ids)``.
     """
     seeded, skipped, errors = 0, 0, 0
     new_ids: List[str] = []
     for entry in entries:
+        if limit is not None and seeded >= limit:
+            break
         try:
             category, ident, fields = _entry_to_threat(entry)
         except ValueError:

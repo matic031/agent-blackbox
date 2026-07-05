@@ -330,24 +330,28 @@ export function detectDependency(
   const out: Finding[] = [];
   const seen = new Set<string>();
   for (const dep of installs) {
-    if (!dep.version) continue; // ruleset keys are pinned versions
     const eco = dep.ecosystem.toLowerCase();
     const name = dep.name.toLowerCase();
-    const key = `${eco}:${name}@${dep.version}`;
-    const rule = dependencyRules[key];
-    if (!rule || seen.has(key)) continue;
+    // Exact pinned version first, then a package-level `@*` rule — whole-package
+    // malware / typosquats where every version is bad, incl. an unpinned install.
+    const candidates = dep.version ? [`${eco}:${name}@${dep.version}`] : [];
+    candidates.push(`${eco}:${name}@*`);
+    const key = candidates.find((k) => dependencyRules[k]);
+    if (!key || seen.has(key)) continue;
     seen.add(key);
+    const rule = dependencyRules[key];
     const src = ruleSource(rule);
+    const shown = dep.version || "*";
     out.push({
-      identifier: rule.identifier || dependencyIdentifier(eco, name, dep.version),
+      identifier: rule.identifier || `dep:${key}`,
       category: "dependency",
       severity: rule.severity,
-      title: rule.name || `Vulnerable dependency ${name}@${dep.version}`,
+      title: rule.name || `Vulnerable dependency ${name}@${shown}`,
       toolName: toolName || "",
       matched: key,
       evidence: rule.advisoryId
-        ? `${dep.ecosystem}:${dep.name}@${dep.version} (${rule.advisoryId})`
-        : `${dep.ecosystem}:${dep.name}@${dep.version}`,
+        ? `${dep.ecosystem}:${dep.name}@${shown} (${rule.advisoryId})`
+        : `${dep.ecosystem}:${dep.name}@${shown}`,
       confirmed: src === "public",
       source: src,
       kind: rule.kind,
@@ -356,7 +360,7 @@ export function detectDependency(
           ? {
               ecosystem: eco,
               packageName: name,
-              packageVersion: dep.version,
+              packageVersion: dep.version || "*",
               advisoryId: rule.advisoryId,
             }
           : {},

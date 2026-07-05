@@ -105,10 +105,32 @@ def test_detect_dependency_matches_pinned():
 def test_detect_dependency_ignores_unpinned_and_unknown():
     key = "npm:event-stream@3.3.6"
     rs = _ruleset(dependency={key: {"identifier": "dep:npm:event-stream@3.3.6", "severity": "critical", "name": "x"}})
-    # Unpinned → no version to key on.
+    # Unpinned → only a package-level `@*` rule could match, and none exists here.
     assert detection.detect_dependency("terminal", {"command": "npm install event-stream"}, rs) == []
     # Different version → not in ruleset.
     assert detection.detect_dependency("terminal", {"command": "npm install event-stream@4.0.0"}, rs) == []
+
+
+def test_detect_dependency_package_level_star():
+    # A package-level `@*` rule (whole-package malware / typosquat) matches ANY
+    # pinned version AND an unpinned install — the case the version-pinned scheme
+    # missed (the ~200k-advisory unlock).
+    rs = _ruleset(dependency={"npm:evil-pkg@*": {
+        "identifier": "dep:npm:evil-pkg@*", "ecosystem": "npm", "packageName": "evil-pkg",
+        "kind": "malware", "severity": "critical", "name": "typosquat", "source": "public",
+    }})
+    for cmd in ("npm install evil-pkg@2.1.0", "npm install evil-pkg"):
+        findings = detection.detect_dependency("terminal", {"command": cmd}, rs)
+        assert len(findings) == 1, cmd
+        assert findings[0].identifier == "dep:npm:evil-pkg@*"
+        assert findings[0].confirmed is True  # source: public → blockable
+    # An exact `@version` rule still takes precedence when both are present.
+    rs2 = _ruleset(dependency={
+        "npm:evil-pkg@*": {"identifier": "dep:npm:evil-pkg@*", "severity": "high", "name": "star", "source": "public"},
+        "npm:evil-pkg@2.1.0": {"identifier": "dep:npm:evil-pkg@2.1.0", "severity": "critical", "name": "exact", "source": "public"},
+    })
+    f = detection.detect_dependency("terminal", {"command": "npm install evil-pkg@2.1.0"}, rs2)
+    assert len(f) == 1 and f[0].identifier == "dep:npm:evil-pkg@2.1.0"
 
 
 def test_detect_all_combines_categories():
