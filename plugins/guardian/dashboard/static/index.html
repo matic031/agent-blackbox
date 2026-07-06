@@ -3481,6 +3481,7 @@
     if (!input) return;
     var text = input.value.trim();
     if (!text) return;
+    var history = chatHistory();
     input.value = "";
     chatAdd("user", text);
     var waitIndex = 0;
@@ -3491,7 +3492,7 @@
       pending.textContent = CHAT_WAIT_MESSAGES[waitIndex];
     }, 2600);
     setChatBusy(true);
-    postJSON("/api/guardian-chat", { message: text }).then(function (res) {
+    postJSON("/api/guardian-chat", { message: text, history: history }).then(function (res) {
       var body = res.body || {};
       clearInterval(waitTimer);
       if (pending && pending.parentNode) pending.parentNode.removeChild(pending);

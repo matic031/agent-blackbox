@@ -180,6 +180,29 @@ def create_app():
             lines.append(line.rstrip())
         return "\n".join(lines).strip()
 
+    def _chat_prompt(message: str, history: Any) -> str:
+        turns: List[str] = []
+        if isinstance(history, list):
+            for item in history[-16:]:
+                if not isinstance(item, dict):
+                    continue
+                role = str(item.get("role") or "").strip().lower()
+                text = str(item.get("text") or "").strip()
+                if role not in {"user", "guardian"} or not text:
+                    continue
+                label = "User" if role == "user" else "Guardian"
+                turns.append(f"{label}: {text[:2500]}")
+        if not turns:
+            return message
+        context = "\n\n".join(turns)
+        return (
+            "Use the recent Guardian dashboard chat context below to answer the user's latest message. "
+            "Resolve references like 'these', 'it', and 'that' from the context when possible. "
+            "Do not repeat the whole context unless needed.\n\n"
+            f"Recent chat context:\n{context}\n\n"
+            f"Latest user message:\n{message}"
+        )
+
     @app.post("/api/guardian-chat")
     def guardian_chat(payload: Dict[str, Any] = Body(...)) -> Any:
         """Run one scoped Guardian assistant turn through the managed profile."""
@@ -188,10 +211,11 @@ def create_app():
             return JSONResponse({"ok": False, "error": "Message is required."}, status_code=400)
         if len(message) > 4000:
             return JSONResponse({"ok": False, "error": "Message is too long."}, status_code=400)
+        query = _chat_prompt(message, (payload or {}).get("history"))
         hermes = shutil.which("hermes") or os.environ.get("HERMES_BIN") or "hermes"
         try:
             proc = subprocess.run(
-                [hermes, "guardian", "chat", "--query", message, "--quiet"],
+                [hermes, "guardian", "chat", "--query", query, "--quiet"],
                 cwd=str(attach._repo_root()),
                 text=True,
                 capture_output=True,
