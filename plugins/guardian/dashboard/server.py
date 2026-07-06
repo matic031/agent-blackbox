@@ -257,6 +257,23 @@ def create_app():
         except Exception as exc:  # pragma: no cover - fail open
             logger.debug("guardian dashboard: agent identity failed: %s", exc)
 
+        attach_state: Dict[str, List[Dict[str, Any]]] = {"hermes": [], "openclaw": []}
+        try:
+            attach_state = attach.attach_all(dry_run=True)
+        except Exception as exc:  # pragma: no cover - fail open
+            logger.debug("guardian dashboard: attach-state enumeration failed: %s", exc)
+        attach_rows = attach_state.get("hermes", []) + attach_state.get("openclaw", [])
+        known_local_fw = {
+            str(row.get("kind") or "").lower()
+            for row in attach_rows
+            if row.get("target")
+        }
+        protected_local_fw = {
+            str(row.get("kind") or "").lower()
+            for row in attach_rows
+            if row.get("target") and row.get("already")
+        }
+
         # Local active agents: one per framework that has emitted a local
         # Guardian audit/finding event. Attachment alone is not a live signal.
         try:
@@ -272,6 +289,8 @@ def create_app():
         except Exception:  # pragma: no cover - fail open
             pass
         for fw in local_fw:
+            if fw in known_local_fw and fw not in protected_local_fw:
+                continue
             key = (fw, local_addr.lower())
             found[key] = {
                 "framework": fw,
@@ -316,11 +335,11 @@ def create_app():
         # entry for the local wallet (from active-frameworks or reporter query)
         # gets absorbed here so the same framework doesn't render twice.
         try:
-            attached: List[Tuple[str, str]] = []
-            for h in attach.discover_hermes_homes():
-                attached.append(("hermes", str(h)))
-            for w in attach.discover_openclaw_workspaces():
-                attached.append(("openclaw", str(w)))
+            attached = [
+                (str(row.get("kind") or "").lower(), str(row.get("target") or ""))
+                for row in attach_rows
+                if row.get("already") and row.get("target")
+            ]
             fw_with_ws = {fw for fw, _ in attached}
             local_addr_lc = local_addr.lower()
             for k in list(found.keys()):
@@ -354,8 +373,10 @@ def create_app():
         targets: List[Dict[str, Any]] = []
         try:
             for row in attach.attach_all(openclaw=False, dry_run=True).get("hermes", []):
+                row["protected"] = bool(row.get("already"))
                 targets.append(row)
             for row in attach.attach_all(hermes=False, dry_run=True).get("openclaw", []):
+                row["protected"] = bool(row.get("already"))
                 targets.append(row)
         except Exception as exc:  # pragma: no cover - fail open
             logger.debug("guardian dashboard: attach target discovery failed: %s", exc)
@@ -376,6 +397,25 @@ def create_app():
                 rows.append(attach.attach_hermes(Path(target)))
             elif kind == "openclaw":
                 rows.append(attach.attach_openclaw(Path(target)))
+        ok = all(row.get("ok") for row in rows) if rows else False
+        return JSONResponse({"ok": ok, "targets": rows}, status_code=200 if ok else 400)
+
+    @app.post("/api/agents/protection")
+    def save_agent_protection(payload: Dict[str, Any] = Body(...)) -> Any:
+        """Apply desired Guardian protection state for selected local targets."""
+        rows: List[Dict[str, Any]] = []
+        for item in payload.get("targets") or []:
+            if not isinstance(item, dict):
+                continue
+            kind = str(item.get("kind") or "").lower()
+            target = str(item.get("target") or "").strip()
+            enabled = bool(item.get("enabled"))
+            if not target:
+                continue
+            if kind == "hermes":
+                rows.append(attach.attach_hermes(Path(target)) if enabled else attach.detach_hermes(Path(target)))
+            elif kind == "openclaw":
+                rows.append(attach.attach_openclaw(Path(target)) if enabled else attach.detach_openclaw(Path(target)))
         ok = all(row.get("ok") for row in rows) if rows else False
         return JSONResponse({"ok": ok, "targets": rows}, status_code=200 if ok else 400)
 
