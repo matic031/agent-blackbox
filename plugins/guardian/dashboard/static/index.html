@@ -1423,13 +1423,14 @@
     }
     box.innerHTML = attachTargets.map(function (t, i) {
       var label = fwLabel(t.kind || "agent");
+      var checked = t.protected ? " checked" : "";
       return '<div class="attach-row">' +
         '<span style="display:flex;align-items:center;gap:10px;min-width:0;">' +
           '<span class="agent-avatar" style="--fw:' + fwColor(t.kind) + '">' + fwIcon(t.kind) + '</span>' +
           '<span class="agent-info"><span class="agent-fw">' + esc(label) + '</span>' +
           '<span class="attach-path" title="' + esc(t.target || "") + '">' + esc(t.target || "") + '</span></span>' +
         '</span>' +
-        '<label class="set-toggle"><input type="checkbox" class="attach-enabled" data-i="' + i + '" checked aria-label="Attach ' + esc(label) + '" /><span class="set-track"></span></label>' +
+        '<label class="set-toggle"><input type="checkbox" class="attach-enabled" data-i="' + i + '"' + checked + ' aria-label="Protect ' + esc(label) + '" /><span class="set-track"></span></label>' +
       '</div>';
     }).join("");
     if (status) status.textContent = note || "Changes apply after agent restart.";
@@ -1446,23 +1447,24 @@
   }
 
   function attachSelected() {
-    var checks = document.querySelectorAll(".attach-enabled:checked");
+    var checks = document.querySelectorAll(".attach-enabled");
     var targets = Array.prototype.map.call(checks, function (c) {
-      return attachTargets[Number(c.getAttribute("data-i"))];
+      var t = attachTargets[Number(c.getAttribute("data-i"))];
+      if (!t) return null;
+      return { kind: t.kind, target: t.target, enabled: !!c.checked };
     }).filter(Boolean);
     var note = $("attach-status");
-    if (note) note.textContent = targets.length ? "Attaching..." : "Select at least one agent.";
+    if (note) note.textContent = targets.length ? "Saving..." : "No local agents found.";
     if (!targets.length) return;
-    postJSON("/api/attach", { targets: targets }).then(function (res) {
+    postJSON("/api/agents/protection", { targets: targets }).then(function (res) {
       if (res.ok) {
-        attachWaiting = true;
         closeAttachModal();
-        renderAgents({ agents: [] });
+        poll();
       } else if (note) {
-        note.textContent = "Attach failed.";
+        note.textContent = "Save failed.";
       }
     }).catch(function () {
-      if (note) note.textContent = "Attach failed.";
+      if (note) note.textContent = "Save failed.";
     });
   }
 
@@ -3062,7 +3064,6 @@
     if (e.target && e.target.id === "attach-open") openAttachModal();
     if (e.target && e.target.id === "attach-close") closeAttachModal();
     if (e.target && e.target.id === "attach-cancel") closeAttachModal();
-    if (e.target && e.target.id === "attach-scan") scanAttachTargets();
     if (e.target && e.target.id === "attach-apply") attachSelected();
     if (e.target && e.target.id === "attach-modal") closeAttachModal();
     if (e.target && e.target.id === "activity-close") closeActivityModal();
@@ -3138,9 +3139,8 @@
     </div>
     <div class="set-foot">
       <span class="set-status" id="attach-status"></span>
-      <button type="button" class="set-cancel" id="attach-scan">Scan again</button>
       <button type="button" class="set-cancel" id="attach-cancel">Cancel</button>
-      <button type="button" class="set-save" id="attach-apply">Attach selected</button>
+      <button type="button" class="set-save" id="attach-apply">Save changes</button>
     </div>
   </div>
 </div>
