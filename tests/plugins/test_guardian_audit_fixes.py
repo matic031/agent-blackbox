@@ -96,6 +96,9 @@ class _Pager:
                  "packageName": {"value": f"pkg{i}"}, "packageVersion": {"value": "1.0"},
                  "severity": {"value": "critical"}} for i in range(off, min(off + lim, self.n))]
 
+    def query_store(self, sparql, on_error=None):
+        return []  # community tier (SWM) empty
+
 
 def test_ruleset_sync_is_uncapped(monkeypatch):
     monkeypatch.setattr(ruleset_mod, "_write_cache", lambda rs: None)
@@ -112,8 +115,10 @@ def test_partial_tier_error_preserves_public_rules(monkeypatch):
 
     class _Partial:
         def query(self, sparql, cg_id, view=None, on_error=None):
-            if view == constants.VIEW_VERIFIABLE_MEMORY:
-                return on_error  # VM (public) transiently errors
+            return on_error  # VM (public) transiently errors
+
+        def query_store(self, sparql, on_error=None):
+            # community tier (SWM) still loads fresh from the store
             return [{"identifier": {"value": "injection:c1"}, "pattern": {"value": "x"}, "severity": {"value": "high"}}]
 
     rs = ruleset_mod.refresh(config_mod.GuardianConfig(), _Partial())

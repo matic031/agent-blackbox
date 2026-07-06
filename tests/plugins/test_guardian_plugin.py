@@ -95,7 +95,8 @@ def test_guardian_chat_profile_writes_identity_and_attaches(tmp_path, monkeypatc
     soul = (profile_dir / "SOUL.md").read_text(encoding="utf-8")
     assert "You are Guardian" in soul
     assert "connected agents" in soul
-    assert "http://127.0.0.1:9700/api/agents" in soul
+    assert "http://127.0.0.1:9700" in soul  # dashboard API base
+    assert "/api/agents" in soul            # connected-agents endpoint
     assert "Hermes default identity" in (profile_dir / "SOUL.md.before-guardian-chat").read_text(
         encoding="utf-8"
     )

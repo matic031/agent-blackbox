@@ -64,7 +64,8 @@ def test_share_knowledge_asset_payload(monkeypatch):
     assert body["alsoShareSwm"] is True
     # Auth header present.
     assert any(v == "Bearer tok" for v in cap["headers"].values())
-    assert cap["timeout"] == dkg_client._TIMEOUT
+    # Shares that also write to SWM use the longer store timeout, not the read one.
+    assert cap["timeout"] == dkg_client._STORE_TIMEOUT
 
 
 def test_register_context_graph_sends_policies(monkeypatch):
