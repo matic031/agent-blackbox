@@ -2,8 +2,8 @@
  * Umanitek Agent Guardian — OpenClaw plugin.
  *
  * Mirrors the hermes guardian plugin's detection and reports sightings to the
- * SAME local DKG node / threat graph. Detection rules come ONLY from the synced
- * threat graph (ruleset.ts); on an empty graph nothing is detected — by design.
+ * same local DKG threat graph. Rules come ONLY from the synced graph
+ * (ruleset.ts); on an empty graph nothing is detected — by design.
  *
  * Hooks:
  *   before_tool_call   — detect escalation/dependency/injection over params;
@@ -13,8 +13,7 @@
  *   message_received   — observe inbound content for injection sightings
  *   session_start/end  — lifecycle observation
  *
- * Everything is fail-open: any error in a handler is swallowed and the agent
- * loop proceeds. Threat pushes to the DKG are deterministic HTTP calls only.
+ * Fail-open: any handler error is swallowed and the agent loop proceeds.
  */
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk/plugin-entry";
@@ -39,7 +38,7 @@ import {
   discoverDependencyCandidates,
 } from "./detection.js";
 import { DkgClient, DkgError } from "./dkgClient.js";
-import { recordFinding } from "./audit.js";
+import { recordFinding, type ConvTurn, type FindingContext } from "./audit.js";
 import { GuardianConfig, categoryAllows, resolveConfig } from "./config.js";
 import { RulesetCache } from "./ruleset.js";
 import { GuardianSeverity, KIND_VULNERABILITY, SEVERITY_RANK, buildReportQuads, stableHash } from "./quads.js";
@@ -52,8 +51,6 @@ const FRAMEWORK = "openclaw" as const;
 /**
  * Idempotent-registration guard. OpenClaw has NO unsubscribe primitive, so a
  * second `register(api)` for the same plugin id must not double-wire hooks.
- * Keyed by a stable per-process token so reloads with a fresh api still wire
- * once. We track the api object identity in a WeakSet plus a module flag.
  */
 const registeredApis = new WeakSet<object>();
 let registeredOnce = false;
@@ -66,18 +63,101 @@ interface GuardianRuntime {
   reporterAddress?: string;
   log: (level: "debug" | "warn", msg: string, meta?: unknown) => void;
   dailyReports: { date: string; count: number };
-  /**
-   * Per-identifier report cooldown stamps (identifier → epoch ms of the last
-   * outbound sighting). A re-fire of the same identifier within
-   * `REPORT_COOLDOWN_MS` adds no signal and is not re-reported. Mirrors
-   * Python `audit.REPORT_COOLDOWN_SECS` / `allow_report`.
-   */
+  /** Per-identifier cooldown stamps (identifier → epoch ms of last sighting). Mirrors Python `audit.allow_report`. */
   recentReports: Map<string, number>;
+  /**
+   * Per-session conversation transcript (last N turns) so a tool-call finding —
+   * which has no conversation access at `before_tool_call` — can still show the
+   * surrounding turns. Local-only, bounded. Mirrors Python `hooks._last_convo`.
+   */
+  transcript: Map<string, ConvTurn[]>;
 }
 
-/** Re-reporting the same identifier within this window adds no signal (the
- * sighting KA name is stable per identifier+reporter, so a re-share only
- * refreshes dateModified) — skip it. Mirrors Python audit.REPORT_COOLDOWN_SECS. */
+// --- Conversation context capture (local-only, redacted) -------------------
+//
+// Attach a redacted `context` snapshot to a finding so the dashboard modal can
+// render the whole turn, not just the evidence fragment. Redaction + capping
+// happen in `audit.boundedContext`; this stays LOCAL-only, never in
+// `Finding.fields` or an SWM sighting.
+
+const CONTEXT_TURNS = 12;
+const MAX_TRACKED_SESSIONS = 256;
+
+/** Best-effort session id off any hook event (absent on some hooks/SDKs). */
+function sessionIdOf(event: unknown): string {
+  const sid = (event as { sessionId?: unknown } | null | undefined)?.sessionId;
+  return typeof sid === "string" ? sid : "";
+}
+
+/** Flatten a message's `content` (string or a list of text parts) to text. */
+function messageText(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    return content
+      .map((it) =>
+        typeof it === "string"
+          ? it
+          : it && typeof it === "object" && typeof (it as { text?: unknown }).text === "string"
+            ? (it as { text: string }).text
+            : "",
+      )
+      .filter(Boolean)
+      .join("\n");
+  }
+  return "";
+}
+
+function normalizeRole(role: unknown): string {
+  const r = String(role ?? "").toLowerCase();
+  return r === "user" || r === "assistant" || r === "system" || r === "tool" ? r : "user";
+}
+
+/**
+ * Build `[{role, text}]` from a conversation `messages` array; falls back to
+ * `prompt` when messages are unavailable. Mirrors Python `hooks._conversation_turns`.
+ */
+function turnsFromMessages(messages: unknown, prompt?: unknown): ConvTurn[] {
+  const turns: ConvTurn[] = [];
+  const arr = Array.isArray(messages) ? messages : [];
+  for (const m of arr.slice(-CONTEXT_TURNS * 3)) {
+    if (!m || typeof m !== "object") continue;
+    const text = messageText((m as { content?: unknown }).content).trim();
+    if (!text) continue;
+    turns.push({ role: normalizeRole((m as { role?: unknown }).role), text });
+  }
+  if (!turns.length) {
+    const p = String(prompt ?? "").trim();
+    if (p) turns.push({ role: "user", text: p });
+  }
+  return turns.slice(-CONTEXT_TURNS);
+}
+
+/** Replace the session transcript with the canonical conversation (bounded). */
+function setTranscript(rt: GuardianRuntime, sessionId: string, turns: ConvTurn[]): void {
+  if (!sessionId || !turns.length) return;
+  if (!rt.transcript.has(sessionId) && rt.transcript.size >= MAX_TRACKED_SESSIONS) rt.transcript.clear();
+  rt.transcript.set(sessionId, turns.slice(-CONTEXT_TURNS));
+}
+
+/** Append one turn to the session transcript (bounded). */
+function appendTranscript(rt: GuardianRuntime, sessionId: string, turn: ConvTurn): void {
+  if (!sessionId || !turn.text) return;
+  let buf = rt.transcript.get(sessionId);
+  if (!buf) {
+    if (rt.transcript.size >= MAX_TRACKED_SESSIONS) rt.transcript.clear();
+    buf = [];
+    rt.transcript.set(sessionId, buf);
+  }
+  buf.push(turn);
+  if (buf.length > CONTEXT_TURNS) buf.splice(0, buf.length - CONTEXT_TURNS);
+}
+
+function recentTranscript(rt: GuardianRuntime, sessionId: string): ConvTurn[] {
+  return sessionId ? (rt.transcript.get(sessionId) ?? []).slice() : [];
+}
+
+/** Re-report window. The KA name is stable per identifier+reporter, so a re-share
+ * only refreshes dateModified — skip it. Mirrors Python audit.REPORT_COOLDOWN_SECS. */
 const REPORT_COOLDOWN_MS = 6 * 3600 * 1000;
 
 /** Drop expired cooldown stamps so the map stays small. */
@@ -90,16 +170,11 @@ function pruneRecentReports(rt: GuardianRuntime, now: number): void {
 
 /**
  * Apply the user's detection policy to raw findings. Two layers:
+ *   1. Per-category policy (`detection.<category>.{enabled,minSeverity}`).
+ *   2. Heuristic gate — discovery candidates additionally need `reportMinSeverity`.
  *
- *   1. Per-category policy (`detection.<category>.{enabled,minSeverity}`) — a
- *      disabled category never flags; a category floor drops anything below it
- *      (e.g. "only critical dependency vulns").
- *   2. Heuristic gate — built-in discovery candidates additionally need
- *      `reportMinSeverity`; they are nominations, not confirmed threats.
- *
- * Graph-backed findings (public / community) skip the heuristic gate. User
- * custom rules (`source === "custom"`) bypass the category policy entirely —
- * the user explicitly asked for them. Mirrors Python `hooks._flag_worthy`.
+ * Custom rules (`source === "custom"`) bypass the category policy; graph-backed
+ * findings skip the heuristic gate. Mirrors Python `hooks._flag_worthy`.
  */
 function flagWorthy(cfg: GuardianConfig, findings: Finding[]): Finding[] {
   const out: Finding[] = [];
@@ -130,10 +205,9 @@ function scanInjection(rt: GuardianRuntime, text: string): Finding[] {
 }
 
 /**
- * Resolve (and cache on the runtime) the reporter agent address from the node.
- * Definitive source is `GET /api/agent/identity`; fails open to "node". We do
- * NOT derive the reporter from the auth token — the node's true agent address is
- * what namespaces the per-submitter report URI.
+ * Resolve + cache the reporter agent address via `GET /api/agent/identity`;
+ * fails open to "node". NOT derived from the auth token — the node's true agent
+ * address namespaces the per-submitter report URI.
  */
 async function resolveReporter(rt: GuardianRuntime): Promise<string> {
   if (rt.reporterAddress !== undefined) return rt.reporterAddress;
@@ -163,13 +237,10 @@ function underDailyCap(rt: GuardianRuntime): boolean {
  * carry NO observed content.
  */
 async function reportSighting(rt: GuardianRuntime, finding: Finding): Promise<void> {
-  // Custom (user-configured) rules are personal: they are surfaced/blocked
-  // locally but NEVER leave this machine — no community sighting. Mirrors
-  // Python `_report_and_audit` skipping `source == "custom"`.
+  // Custom rules stay local — NEVER shared. Mirrors Python `_report_and_audit`.
   if (finding.source === "custom") return;
   if (!rt.cfg.report) return;
-  // Per-threat cooldown: a re-fire of the same identifier within the window
-  // adds no signal — skip the sighting. Mirrors Python `audit.allow_report`.
+  // Per-threat cooldown: skip a re-fire within the window. Mirrors Python `audit.allow_report`.
   const now = Date.now();
   const last = rt.recentReports.get(finding.identifier);
   if (last !== undefined && now - last < REPORT_COOLDOWN_MS) {
@@ -180,16 +251,14 @@ async function reportSighting(rt: GuardianRuntime, finding: Finding): Promise<vo
     rt.log("debug", "guardian: daily report cap reached, dropping sighting");
     return;
   }
-  // Stamp before the share (like Python's allow_report) so a burst of re-fires
-  // can't queue N identical shares while the first is in flight.
+  // Stamp before the share so a burst of re-fires can't queue N shares in flight.
   rt.recentReports.set(finding.identifier, now);
   pruneRecentReports(rt, now);
   try {
     const reporter = await resolveReporter(rt);
-    // For candidate (heuristic-only) findings, forward the privacy-safe threat
-    // fields so a curator can promote the candidate directly. `fields` only ever
-    // holds signatures (pattern/category/shape/...), never raw prompts, paths,
-    // or file/skill source. Mirrors Python `_share_sighting`.
+    // Forward candidate threat fields so a curator can promote directly. `fields`
+    // only ever holds signatures (pattern/category/shape/...), never raw prompts,
+    // paths, or file/skill source. Mirrors Python `_share_sighting`.
     const quads = buildReportQuads({
       identifier: finding.identifier,
       category: finding.category,
@@ -198,10 +267,8 @@ async function reportSighting(rt: GuardianRuntime, finding: Finding): Promise<vo
       framework: FRAMEWORK,
       candidate: finding.fields,
     });
-    // KA name matches Python hooks._share_sighting exactly:
-    // "report-" + stableHash(identifier + reporter, 16). Hashing in the
-    // reporter keeps two reporters of the same threat from colliding on one
-    // KA name while staying stable per (identifier, reporter).
+    // KA name matches Python hooks._share_sighting: hashing in the reporter keeps
+    // two reporters of one threat from colliding, stable per (identifier, reporter).
     const name = `report-${stableHash(finding.identifier + reporter, 16)}`;
     await rt.client.shareKnowledgeAsset(rt.cfg.contextGraphId, name, quads);
     rt.dailyReports.count += 1;
@@ -215,13 +282,10 @@ async function reportSighting(rt: GuardianRuntime, finding: Finding): Promise<vo
 }
 
 /**
- * Findings that can block at or above the block threshold: CONFIRMED public-graph
- * matches (`source === "public"`) and the user's own custom rules
- * (`source === "custom"`). Community-pool matches and discovery candidates never
- * block — they only alert/report. A `vulnerability`-kind threat NEVER blocks
- * (a legit-but-vulnerable package must keep working) — only active `malware` is
- * stopped. Mirrors Python's `pre_tool_call` blocking filter
- * (`(f.confirmed or f.source == "custom") and f.kind != KIND_VULNERABILITY`).
+ * Findings that can block at/above the block threshold: confirmed public-graph
+ * matches and custom rules. Community matches and discovery candidates only
+ * alert/report. A `vulnerability`-kind threat NEVER blocks — only active malware
+ * is stopped. Mirrors Python's `pre_tool_call` blocking filter.
  */
 function meetsBlock(finding: Finding, cfg: GuardianConfig): boolean {
   return (
@@ -245,15 +309,19 @@ function blockMessage(findings: Finding[]): string {
 }
 
 /**
- * Surface a flagged finding: write it to the local findings log (so the shared
- * Guardian dashboard shows OpenClaw detections) AND report the sighting to the
- * community graph. Local recording covers EVERY flagged finding — including
- * `source === "custom"`, which stays local; `reportSighting` itself skips
- * custom and applies the daily cap / per-identifier cooldown.
+ * Surface a flagged finding: record it locally AND report the sighting. Local
+ * recording covers EVERY finding; `reportSighting` skips custom rules and applies
+ * the daily cap / per-identifier cooldown.
  */
-function observe(rt: GuardianRuntime, event: string, finding: Finding, toolName?: string): void {
+function observe(
+  rt: GuardianRuntime,
+  event: string,
+  finding: Finding,
+  toolName?: string,
+  context?: FindingContext,
+): void {
   try {
-    recordFinding(rt.cfg.guardianHome, event, finding, toolName);
+    recordFinding(rt.cfg.guardianHome, event, finding, toolName, context);
   } catch {
     /* fail-open — local logging must never break the loop */
   }
@@ -269,18 +337,15 @@ function makeBeforeToolCall(rt: GuardianRuntime) {
     try {
       const ruleset: Ruleset = rt.ruleset.get();
       const params = (event.params ?? {}) as Record<string, unknown>;
-      // detectAll covers escalation + dependency + injection, plus the built-in
-      // discovery layer (candidate injection / file-access / skill) when
-      // `discover` is enabled. detectCustomFileAccess adds the user's own
-      // protected-path rules (source="custom"). flagWorthy then applies the
-      // per-category policy + heuristic gate (custom rules bypass both).
-      // Mirrors Python `detect_all` + `detect_custom_fileaccess` + `_flag_worthy`.
+      // detectAll (+ discovery layer when enabled) + custom protected-path rules,
+      // then flagWorthy applies policy. Mirrors Python detect_all +
+      // detect_custom_fileaccess + _flag_worthy.
       const raw = detectAll(event.toolName, params, ruleset, rt.cfg.discover);
       raw.push(...detectCustomFileAccess(event.toolName, params, rt.cfg.protectedPaths));
       const findings: Finding[] = flagWorthy(rt.cfg, raw);
 
-      // Dependency OSV auto-discovery runs OFF the blocking path (best-effort,
-      // fail-open) so a network lookup never delays or breaks the tool call.
+      // OSV auto-discovery runs OFF the blocking path so a network lookup never
+      // delays the tool call. Fail-open.
       if (rt.cfg.discover && rt.cfg.osvLookup) {
         void discoverDependencyCandidates(event.toolName, params, ruleset, osvLookup)
           .then((candidates) => {
@@ -293,12 +358,19 @@ function makeBeforeToolCall(rt: GuardianRuntime) {
 
       if (findings.length === 0) return;
 
+      // Conversation context: surrounding transcript turns + the scanned tool
+      // input (for a `message` reply tool this input IS the agent's response).
+      const ctx: FindingContext = {};
+      const turns = recentTranscript(rt, sessionIdOf(event));
+      if (turns.length) ctx.turns = turns;
+      const inputText = collectText(params).join("\n");
+      if (inputText.trim()) ctx.input = inputText;
+      const context = ctx.turns || ctx.input ? ctx : undefined;
+
       // Record locally + report every finding (fire-and-forget; never blocks).
-      for (const f of findings) observe(rt, "before_tool_call", f, event.toolName);
+      for (const f of findings) observe(rt, "before_tool_call", f, event.toolName, context);
 
       if (rt.cfg.mode === "block") {
-        // Confirmed graph findings and the user's own custom rules can block
-        // (see meetsBlock).
         const blocking = findings.filter((f) => meetsBlock(f, rt.cfg));
         if (blocking.length > 0) {
           return { block: true, blockReason: blockMessage(blocking) };
@@ -332,9 +404,14 @@ function makeBeforeAgentRun(rt: GuardianRuntime) {
     try {
       const text = [event.prompt ?? "", ...collectText(event.messages)].join("\n");
       const findings = scanInjection(rt, text);
+
+      // Warm the per-session transcript so later tool-call findings can show it.
+      const turns = turnsFromMessages(event.messages, event.prompt);
+      setTranscript(rt, sessionIdOf(event), turns);
       if (findings.length === 0) return { outcome: "pass" };
 
-      for (const f of findings) observe(rt, "before_agent_run", f);
+      const context: FindingContext | undefined = turns.length ? { turns } : undefined;
+      for (const f of findings) observe(rt, "before_agent_run", f, undefined, context);
 
       if (rt.cfg.mode === "block") {
         const blocking = findings.filter((f) => meetsBlock(f, rt.cfg));
@@ -358,7 +435,18 @@ function makeMessageReceived(rt: GuardianRuntime) {
   return async (event: PluginHookMessageReceivedEvent): Promise<void> => {
     try {
       const text = event.content ?? "";
-      for (const f of scanInjection(rt, text)) observe(rt, "message_received", f);
+      // Record the inbound message as a user turn so a later finding can show it.
+      const sid = sessionIdOf(event);
+      if (text) appendTranscript(rt, sid, { role: "user", text });
+      const found = scanInjection(rt, text);
+      if (!found.length) return;
+      const turns = recentTranscript(rt, sid);
+      const context: FindingContext | undefined = turns.length
+        ? { turns }
+        : text
+          ? { turns: [{ role: "user", text }] }
+          : undefined;
+      for (const f of found) observe(rt, "message_received", f, undefined, context);
     } catch {
       /* fail-open — message_received is observation-only */
     }
@@ -393,9 +481,6 @@ function buildRuntime(api: OpenClawPluginApi): GuardianRuntime {
     contextGraphId: cfg.contextGraphId,
     ttlSeconds: cfg.syncInterval,
   });
-  // Reporter address is resolved lazily from the node (GET /api/agent/identity),
-  // cached on the runtime, and fails open to "node". It is NOT derived from the
-  // auth token — the node's true agent address namespaces the per-submitter URI.
   const log = (level: "debug" | "warn", msg: string, meta?: unknown) => {
     try {
       const logger = api.logger as unknown as Record<string, ((m: string, x?: unknown) => void) | undefined>;
@@ -412,6 +497,7 @@ function buildRuntime(api: OpenClawPluginApi): GuardianRuntime {
     log,
     dailyReports: { date: today(), count: 0 },
     recentReports: new Map<string, number>(),
+    transcript: new Map<string, ConvTurn[]>(),
   };
 }
 
@@ -455,8 +541,8 @@ export default definePluginEntry({
   name: "Umanitek Agent Guardian",
   description:
     "Mirrors hermes guardian detection in OpenClaw and reports sightings to the local DKG threat graph.",
-  // No exclusive `kind` — Guardian is a hook-only policy/observability plugin
-  // and must not claim a singleton slot (memory | context-engine).
+  // No exclusive `kind` — hook-only plugin, must not claim a singleton slot
+  // (memory | context-engine).
   register,
 });
 

@@ -11,8 +11,7 @@ Routes:
   the curated Umanitek threat graph), ``community`` (shared-working-memory,
   the community pool), ``local`` (working-memory, this node's own graph).
 
-FastAPI/uvicorn come from the hermes ``[web]`` extra — imported lazily so the
-rest of the plugin has no web dependency. Served on ``127.0.0.1`` only.
+FastAPI/uvicorn come from the hermes ``[web]`` extra, imported lazily. Loopback only.
 """
 
 from __future__ import annotations
@@ -84,11 +83,9 @@ def create_app():
 
     @app.on_event("startup")
     def _start_rescanner() -> None:
-        # NB: intentionally do NOT pre-seed ``known`` — attach is idempotent
-        # (already-attached workspaces return ``{already: True}``), so letting
-        # the first iteration walk every workspace is the safer default. If the
-        # CLI-level attach missed anything (e.g. server started via a different
-        # entry point), we still self-heal on the first tick.
+        # Do NOT pre-seed ``known``: attach is idempotent, so the first
+        # iteration walks every workspace and self-heals anything the
+        # CLI-level attach missed.
         t = threading.Thread(target=_rescan_loop, name="guardian-rescan", daemon=True)
         t.start()
         logger.info("guardian rescan: background thread started (interval %.1fs)", _RESCAN_INTERVAL_SEC)
@@ -113,12 +110,81 @@ def create_app():
         except (TypeError, ValueError):
             return 0
 
+    # ---- non-blocking node reads -------------------------------------------
+    # Node-backed reads are served stale-while-revalidate: the handler returns
+    # the last good value instantly while a background thread recomputes it, and
+    # every node call is gated on a cached liveness probe. A slow or dead node
+    # never makes a poll wait. TTLs are generous: the poll serves from cache, so
+    # the node is queried at most once per TTL per key, and graph data changes
+    # slowly enough that ~20s of staleness is invisible.
+    _SWR_TTL = 20.0         # refresh a cached node read at most this often
+    _REACH_TTL = 15.0       # re-probe node liveness at most this often
+    # Per-route liveness timeout; /api/status can take a couple seconds under
+    # load, and a probe that's too tight would wrongly report a busy node as down.
+    _REACH_TIMEOUT = 5.0
+    _swr_lock = threading.Lock()
+    _swr_state: Dict[str, Dict[str, Any]] = {}   # key -> {"val", "ts"}
+    _swr_busy: Set[str] = set()
+    _reach: Dict[str, Any] = {"ok": False, "ts": -1e9, "busy": False}
+
+    def _node_reachable(cfg: Any) -> bool:
+        """Cached DKG node liveness, refreshed off the request path.
+
+        Returns the last probe result immediately (``False`` until the first
+        lands) and spawns a background re-probe past ``_REACH_TTL``. Never
+        blocks the caller, so gating a node query on this is free."""
+        now = time.monotonic()
+        with _swr_lock:
+            stale = (now - _reach["ts"]) >= _REACH_TTL
+            spawn = stale and not _reach["busy"]
+            if spawn:
+                _reach["busy"] = True
+            cur = bool(_reach["ok"])
+        if spawn:
+            def _probe() -> None:
+                ok = False
+                try:
+                    ok = DkgClient(url=cfg.dkg_url).reachable(timeout=_REACH_TIMEOUT)
+                except Exception:  # pragma: no cover - fail open
+                    ok = False
+                with _swr_lock:
+                    _reach["ok"] = ok
+                    _reach["ts"] = time.monotonic()
+                    _reach["busy"] = False
+            threading.Thread(target=_probe, name="guardian-reach", daemon=True).start()
+        return cur
+
+    def _swr(key: str, producer: Any, default: Any, ttl: float = _SWR_TTL) -> Any:
+        """Return the cached value for ``key`` instantly, refreshing in the
+        background past ``ttl``; ``default`` until the first refresh lands.
+        ``producer`` runs off the request path, so it may block on the node."""
+        now = time.monotonic()
+        with _swr_lock:
+            entry = _swr_state.get(key)
+            fresh = entry is not None and (now - entry["ts"]) < ttl
+            cur = entry["val"] if entry is not None else default
+            spawn = (not fresh) and (key not in _swr_busy)
+            if spawn:
+                _swr_busy.add(key)
+        if spawn:
+            def _run() -> None:
+                try:
+                    val = producer()
+                except Exception as exc:  # pragma: no cover - fail open
+                    logger.debug("guardian dashboard: swr %s failed: %s", key, exc)
+                    val = None
+                with _swr_lock:
+                    if val is not None:
+                        _swr_state[key] = {"val": val, "ts": time.monotonic()}
+                    _swr_busy.discard(key)
+            threading.Thread(target=_run, name="guardian-swr", daemon=True).start()
+        return cur
+
     @app.get("/", response_class=HTMLResponse)
     def index() -> Any:
         html = _STATIC_DIR / "index.html"
         if html.exists():
-            # Never cache the SPA shell — it's a live tool that updates in place,
-            # so a browser should always fetch the current dashboard, not a stale copy.
+            # Never cache the SPA shell; always fetch the current dashboard.
             return FileResponse(str(html), headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
         return HTMLResponse("<h1>Guardian</h1><p>dashboard assets missing</p>", status_code=200)
 
@@ -157,8 +223,8 @@ def create_app():
     def post_settings(payload: Dict[str, Any] = Body(...)) -> Any:
         """Validate + persist detection policy under plugins.entries.guardian.*.
 
-        Loopback-only (same bind as the whole dashboard); writes are validated
-        server-side in :mod:`settings` so a malformed body can't corrupt config.
+        Loopback-only; writes are validated server-side in :mod:`settings` so a
+        malformed body can't corrupt config.
         """
         try:
             result = settings.write_settings(payload)
@@ -242,52 +308,57 @@ def create_app():
             "total": audit.count_audit(),
         }
 
+    @app.get("/api/local-activity")
+    def local_activity(sessions: int = Query(60, ge=1, le=200)) -> Any:
+        """Local threat activity as sessions -> tool calls -> threats.
+
+        Reconstructed from this machine's event logs, never the DKG node.
+        """
+        data = audit.read_local_activity(max_sessions=sessions)
+        return {"mode": load_guardian_config().mode, **data}
+
     @app.get("/api/graph-status")
     def graph_status() -> Any:
         cfg = load_guardian_config()
         rs = ruleset.get(cfg)
         counts = rs.counts()
-        curated = 0
-        sightings = 0
-        community = 0
-        reachable = False
-        try:
+        # Community + sightings come from the synced ruleset cache, NOT the
+        # shared-working-memory view, which does O(slice) trust work and times
+        # out (HTTP 500) on a large pool.
+        community = rs.source_count("community")
+
+        # curated + sightings + liveness are the only node-dependent bits left.
+        # Serve them stale-while-revalidate and skip them when the node is down.
+        def _node_counts() -> Any:
+            # None (not {}) when unreachable so _swr keeps the default and
+            # retries next poll instead of caching "down" for the whole TTL.
+            if not _node_reachable(cfg):
+                return None
             client = DkgClient(url=cfg.dkg_url)
-            reachable = client.reachable()
-            curated = _count_query(
-                client,
-                cfg,
-                "SELECT (COUNT(DISTINCT ?t) AS ?n) WHERE { ?t g:curated \"true\" . }",
-                constants.VIEW_VERIFIABLE_MEMORY,
-            )
-            sightings = _count_query(
-                client,
-                cfg,
-                "SELECT (COUNT(DISTINCT ?r) AS ?n) WHERE "
-                "{ ?r a <http://umanitek.ai/ontology/guardian/ThreatReport> . }",
-                constants.VIEW_SHARED_WORKING_MEMORY,
-            )
-            community = _count_query(
-                client,
-                cfg,
-                "SELECT (COUNT(DISTINCT ?identifier) AS ?n) WHERE "
-                "{ ?t g:identifier ?identifier . }",
-                constants.VIEW_SHARED_WORKING_MEMORY,
-            )
-        except Exception as exc:  # pragma: no cover - fail open
-            logger.debug("guardian dashboard: graph-status query failed: %s", exc)
-        # Field names chosen to match what static/index.html reads.
+            return {
+                "node_reachable": True,
+                "curated": _count_query(
+                    client,
+                    cfg,
+                    "SELECT (COUNT(DISTINCT ?t) AS ?n) WHERE { ?t g:curated \"true\" . }",
+                    constants.VIEW_VERIFIABLE_MEMORY,
+                ),
+                "sightings": ruleset.community_report_count(client, cfg),
+            }
+
+        g = _swr("graph-status", _node_counts,
+                 {"node_reachable": False, "curated": 0, "sightings": 0})
         return {
             "mode": cfg.mode,
             "context_graph_id": cfg.context_graph_id,
             "dkg_url": cfg.dkg_url,
-            "node_reachable": reachable,
+            "node_reachable": g["node_reachable"],
             "sync_interval": cfg.sync_interval,
             "last_sync": rs.synced_at,
             "ruleset": counts,
-            "curated": curated,
+            "curated": g["curated"],
             "community": community,
-            "sightings": sightings,
+            "sightings": g["sightings"],
             "findings_logged": audit.count_findings(),
         }
 
@@ -296,25 +367,27 @@ def create_app():
         """Local protected agents + distinct threat reporters in SWM.
 
         A "protected agent" is any framework that has written findings into this
-        shared guardian home (Hermes always; OpenClaw once it detects). Each is
-        shown separately even when several share one node wallet — so a Hermes
-        and an OpenClaw on the same machine are two agents, not one.
-
-        Fail-open: on any query failure we still return whatever we resolved.
+        shared guardian home. Each is shown separately even when several share
+        one node wallet, so a Hermes and an OpenClaw on one machine are two
+        agents. Fail-open.
         """
         cfg = load_guardian_config()
         # Keyed by (framework, lowercased-address) so the same wallet under two
         # frameworks shows as two agents, and the same wallet+framework folds.
         found: "Dict[tuple, Dict[str, Any]]" = {}
 
-        # Resolve this node's wallet once (shared by every local framework).
-        local_addr = ""
-        try:
-            client = DkgClient(url=cfg.dkg_url)
-            identity = client.agent_identity() or {}
-            local_addr = str(identity.get("agentAddress") or identity.get("agentDid") or "")
-        except Exception as exc:  # pragma: no cover - fail open
-            logger.debug("guardian dashboard: agent identity failed: %s", exc)
+        # This node's wallet, shared by every local framework. Live node call,
+        # so served through the SWR cache.
+        def _load_identity() -> Any:
+            if not _node_reachable(cfg):
+                return None   # retry next poll; don't cache a "down" as empty
+            try:
+                ident = DkgClient(url=cfg.dkg_url).agent_identity() or {}
+                return str(ident.get("agentAddress") or ident.get("agentDid") or "")
+            except Exception as exc:  # pragma: no cover - fail open
+                logger.debug("guardian dashboard: agent identity failed: %s", exc)
+                return None
+        local_addr = _swr("agent-identity", _load_identity, "") or ""
 
         attach_state: Dict[str, List[Dict[str, Any]]] = {"hermes": [], "openclaw": []}
         try:
@@ -339,7 +412,7 @@ def create_app():
             local_fw = audit.local_active_frameworks()
         except Exception:  # pragma: no cover - fail open
             local_fw = []
-        # Per-framework local finding counts (so the card shows real activity).
+        # Per-framework local finding counts.
         counts_by_fw: "Dict[str, int]" = {}
         try:
             for row in audit.read_findings(limit=100000):
@@ -359,19 +432,27 @@ def create_app():
                 "is_local": True,
             }
 
-        # Distinct reporters of threats from the shared graph (may include
-        # remote agents on other machines). Same-wallet+framework folds in.
-        try:
-            client = DkgClient(url=cfg.dkg_url)
-            sparql = (
-                "PREFIX g: <http://umanitek.ai/ontology/guardian/> "
-                "SELECT ?reporter ?framework (COUNT(?r) AS ?n) WHERE { "
-                "?r a g:ThreatReport . "
-                "OPTIONAL { ?r g:reporter ?reporter } "
-                "OPTIONAL { ?r g:framework ?framework } "
-                "} GROUP BY ?reporter ?framework"
-            )
-            rows = client.query(sparql, cfg.context_graph_id, view=constants.VIEW_SHARED_WORKING_MEMORY)
+        # Distinct threat reporters from the shared graph (may include remote
+        # agents). Groups over the slow shared-working-memory view, so served
+        # stale-while-revalidate; rows are cached raw and merged fresh below.
+        def _load_reporters() -> Any:
+            if not _node_reachable(cfg):
+                return None   # keep default cached briefly; retry next poll
+            try:
+                client = DkgClient(url=cfg.dkg_url)
+                sparql = (
+                    "PREFIX g: <http://umanitek.ai/ontology/guardian/> "
+                    "SELECT ?reporter ?framework (COUNT(?r) AS ?n) WHERE { "
+                    "?r a g:ThreatReport . "
+                    "OPTIONAL { ?r g:reporter ?reporter } "
+                    "OPTIONAL { ?r g:framework ?framework } "
+                    "} GROUP BY ?reporter ?framework"
+                )
+                rows = client.query(sparql, cfg.context_graph_id, view=constants.VIEW_SHARED_WORKING_MEMORY)
+            except Exception as exc:  # pragma: no cover - fail open
+                logger.debug("guardian dashboard: agents query failed: %s", exc)
+                return None  # transient failure — keep the last cached reporters
+            reporters: List[Dict[str, Any]] = []
             for row in rows:
                 addr = extract_binding(row.get("reporter"))
                 if not addr:
@@ -381,18 +462,20 @@ def create_app():
                     n = int(extract_binding(row.get("n")) or "0")
                 except (TypeError, ValueError):
                     n = 0
-                key = (fw, str(addr).lower())
-                if key in found:
-                    found[key]["reports"] = max(found[key].get("reports", 0), n)
-                else:
-                    found[key] = {"framework": fw, "address": str(addr), "reports": n}
-        except Exception as exc:  # pragma: no cover - fail open
-            logger.debug("guardian dashboard: agents query failed: %s", exc)
+                reporters.append({"framework": fw, "address": str(addr), "count": n})
+            return reporters
+
+        for rep in (_swr("agents-reporters", _load_reporters, []) or []):
+            fw, addr, n = rep["framework"], rep["address"], rep["count"]
+            key = (fw, addr.lower())
+            if key in found:
+                found[key]["reports"] = max(found[key].get("reports", 0), n)
+            else:
+                found[key] = {"framework": fw, "address": addr, "reports": n}
 
         # Attached local workspaces — one card per protected workspace, so two
-        # OpenClaw profiles on the same node wallet render as two agents. Any
-        # entry for the local wallet (from active-frameworks or reporter query)
-        # gets absorbed here so the same framework doesn't render twice.
+        # OpenClaw profiles on one node wallet render as two agents. Local-wallet
+        # entries are absorbed here so the same framework doesn't render twice.
         try:
             attached = [
                 (str(row.get("kind") or "").lower(), str(row.get("target") or ""))
@@ -512,58 +595,86 @@ def create_app():
                 "skill": "skill",
             }.get(prefix, "other")
 
-        seen: "Dict[str, Dict[str, Any]]" = {}
-        try:
-            client = DkgClient(url=cfg.dkg_url)
-            sparql = (
-                "PREFIX g: <http://umanitek.ai/ontology/guardian/> "
-                "PREFIX schema: <http://schema.org/> "
-                "SELECT ?identifier ?severity ?name ?category WHERE { "
-                "?t g:identifier ?identifier . "
-                "OPTIONAL { ?t g:severity ?severity } "
-                "OPTIONAL { ?t schema:name ?name } "
-                "}"
-            )
-            rows = client.query(sparql, cfg.context_graph_id, view=view)
-            for row in rows:
-                identifier = extract_binding(row.get("identifier"))
-                if not identifier or identifier in seen:
-                    continue
-                seen[identifier] = {
-                    "identifier": identifier,
-                    "category": _category(identifier),
-                    "severity": (extract_binding(row.get("severity")) or "info").lower(),
-                    "name": extract_binding(row.get("name")) or "",
+        # Community tab: serve from the synced ruleset cache; the
+        # shared-working-memory view times out on a large pool.
+        if tier == "community":
+            rs = ruleset.get(cfg)
+            threats = [
+                {
+                    "identifier": r.get("identifier"),
+                    "category": cat,
+                    "severity": str(r.get("severity") or "info").lower(),
+                    "name": r.get("name") or "",
                 }
-        except Exception as exc:  # pragma: no cover - fail open
-            logger.debug("guardian dashboard: graph query failed: %s", exc)
+                for cat, r in rs.iter_rules()
+                if r.get("source") == "community"
+            ]
+            return {"tier": tier, "threats": threats}
 
-        return {"tier": tier, "threats": list(seen.values())}
+        # Public/local tiers read a live node view; served stale-while-revalidate.
+        def _load() -> Any:
+            if not _node_reachable(cfg):
+                return None   # keep the default (empty) cached briefly; retry next poll
+            seen: "Dict[str, Dict[str, Any]]" = {}
+            try:
+                client = DkgClient(url=cfg.dkg_url)
+                sparql = (
+                    "PREFIX g: <http://umanitek.ai/ontology/guardian/> "
+                    "PREFIX schema: <http://schema.org/> "
+                    "SELECT ?identifier ?severity ?name ?category WHERE { "
+                    "?t g:identifier ?identifier . "
+                    "OPTIONAL { ?t g:severity ?severity } "
+                    "OPTIONAL { ?t schema:name ?name } "
+                    "}"
+                )
+                rows = client.query(sparql, cfg.context_graph_id, view=view)
+                for row in rows:
+                    identifier = extract_binding(row.get("identifier"))
+                    if not identifier or identifier in seen:
+                        continue
+                    seen[identifier] = {
+                        "identifier": identifier,
+                        "category": _category(identifier),
+                        "severity": (extract_binding(row.get("severity")) or "info").lower(),
+                        "name": extract_binding(row.get("name")) or "",
+                    }
+            except Exception as exc:  # pragma: no cover - fail open
+                logger.debug("guardian dashboard: graph query failed: %s", exc)
+            return {"tier": tier, "threats": list(seen.values())}
+
+        return _swr("graph:" + tier, _load, {"tier": tier, "threats": []})
 
     @app.get("/api/reports")
     def reports(limit: int = Query(50, ge=1, le=200)) -> Any:
         cfg = load_guardian_config()
-        out: List[Dict[str, Any]] = []
-        try:
-            client = DkgClient(url=cfg.dkg_url)
-            sparql = (
-                "PREFIX g: <http://umanitek.ai/ontology/guardian/> "
-                "SELECT ?identifier (COUNT(DISTINCT ?reporter) AS ?reporters) "
-                "(SAMPLE(?severity) AS ?sev) WHERE { "
-                "?r a g:ThreatReport . ?r g:identifier ?identifier . ?r g:reporter ?reporter . "
-                "OPTIONAL { ?r g:severity ?severity . } } "
-                f"GROUP BY ?identifier ORDER BY DESC(?reporters) LIMIT {int(limit)}"
-            )
-            rows = client.query(sparql, cfg.context_graph_id, view=constants.VIEW_SHARED_WORKING_MEMORY)
-            for row in rows:
-                out.append({
-                    "identifier": extract_binding(row.get("identifier")),
-                    "reporters": int(extract_binding(row.get("reporters")) or "0"),
-                    "severity": extract_binding(row.get("sev")) or "info",
-                })
-        except Exception as exc:  # pragma: no cover - fail open
-            logger.debug("guardian dashboard: reports query failed: %s", exc)
-        return {"reports": out}
+
+        # Node-backed sightings list, served stale-while-revalidate.
+        def _load() -> Any:
+            if not _node_reachable(cfg):
+                return None   # keep the default (empty) cached briefly; retry next poll
+            out: List[Dict[str, Any]] = []
+            try:
+                client = DkgClient(url=cfg.dkg_url)
+                sparql = (
+                    "PREFIX g: <http://umanitek.ai/ontology/guardian/> "
+                    "SELECT ?identifier (COUNT(DISTINCT ?reporter) AS ?reporters) "
+                    "(SAMPLE(?severity) AS ?sev) WHERE { "
+                    "?r a g:ThreatReport . ?r g:identifier ?identifier . ?r g:reporter ?reporter . "
+                    "OPTIONAL { ?r g:severity ?severity . } } "
+                    f"GROUP BY ?identifier ORDER BY DESC(?reporters) LIMIT {int(limit)}"
+                )
+                rows = client.query(sparql, cfg.context_graph_id, view=constants.VIEW_SHARED_WORKING_MEMORY)
+                for row in rows:
+                    out.append({
+                        "identifier": extract_binding(row.get("identifier")),
+                        "reporters": int(extract_binding(row.get("reporters")) or "0"),
+                        "severity": extract_binding(row.get("sev")) or "info",
+                    })
+            except Exception as exc:  # pragma: no cover - fail open
+                logger.debug("guardian dashboard: reports query failed: %s", exc)
+            return {"reports": out}
+
+        return _swr(f"reports:{limit}", _load, {"reports": []})
 
     # Predicate IRI -> friendly detail key, for the single-threat lookup.
     _DETAIL_FIELDS = {
@@ -589,9 +700,9 @@ def create_app():
 
     @app.get("/api/threat")
     def threat(identifier: str = Query(..., min_length=1), tier: str = Query("community")) -> Any:
-        """Full detail for ONE threat — a targeted point-lookup (scales to any
-        graph size). ``tier`` ∈ public | community | local (legacy ``local``
-        callers get this node's working memory). Fail-open."""
+        """Full detail for ONE threat via a targeted point-lookup.
+
+        ``tier`` ∈ public | community | local. Fail-open."""
         cfg = load_guardian_config()
         tier, view = _tier_view(tier, default="community")
         prefix = identifier.split(":", 1)[0].lower() if ":" in identifier else ""
@@ -605,20 +716,21 @@ def create_app():
             "references": [],
             "found": False,
         }
-        # A threat and its ThreatReports share g:identifier. A single bare
-        # point-lookup returns both; we separate them in Python. This is far
-        # cheaper than a SPARQL ``FILTER NOT EXISTS`` (which re-scans the whole
-        # shared-memory view per candidate row — ~3x slower here) and folds the
+        # A threat and its ThreatReports share g:identifier; one point-lookup
+        # returns both and we separate them in Python. Far cheaper than a SPARQL
+        # FILTER NOT EXISTS (~3x slower, re-scans the view per row) and folds the
         # reporter count into the same round-trip.
         lit = identifier.replace("\\", "\\\\").replace('"', '\\"')
         rdf_type = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"
         try:
-            client = DkgClient(url=cfg.dkg_url)
+            # Skip the point-lookup on an unreachable node so opening a threat
+            # can't hang on a dead node.
+            client = DkgClient(url=cfg.dkg_url) if _node_reachable(cfg) else None
             rows = client.query(
                 _PREFIX + f'SELECT ?t ?p ?o WHERE {{ ?t g:identifier "{lit}" . ?t ?p ?o }}',
                 cfg.context_graph_id,
                 view=view,
-            )
+            ) if client else []
             subjects: Dict[str, List[Any]] = {}
             for row in rows:
                 subjects.setdefault(extract_binding(row.get("t")), []).append(
@@ -647,6 +759,35 @@ def create_app():
         except Exception as exc:  # pragma: no cover - fail open
             logger.debug("guardian dashboard: threat detail query failed: %s", exc)
         return detail
+
+    @app.on_event("startup")
+    def _warm_node_caches() -> None:
+        """Prime the SWR node caches at boot so the first load shows data
+        instead of a "Loading…" window. Off-thread, fail-open."""
+        def _warm() -> None:
+            try:
+                cfg = load_guardian_config()
+                # Probe liveness synchronously first and seed the cache, so the
+                # reads below see the node's true state, not the cold default.
+                try:
+                    ok = DkgClient(url=cfg.dkg_url).reachable(timeout=_REACH_TIMEOUT)
+                except Exception:  # pragma: no cover - fail open
+                    ok = False
+                with _swr_lock:
+                    _reach["ok"] = ok
+                    _reach["ts"] = time.monotonic()
+                    _reach["busy"] = False
+                # Touch each cached endpoint to warm it. Two passes: the first
+                # spawns the refresh, the second lands it.
+                for _ in range(2):
+                    graph_status()
+                    graph("public")
+                    reports(50)
+                    agents()
+                    time.sleep(2.5)
+            except Exception as exc:  # pragma: no cover - best effort
+                logger.debug("guardian dashboard: cache warm failed: %s", exc)
+        threading.Thread(target=_warm, name="guardian-warm", daemon=True).start()
 
     return app
 

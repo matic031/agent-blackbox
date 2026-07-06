@@ -39,14 +39,16 @@ logger = logging.getLogger(__name__)
 # cap) so the local detector loads the WHOLE curated graph — spam is controlled
 # by curator approvals, not by truncating detection. ``ORDER BY`` gives a stable
 # order so LIMIT/OFFSET pages don't overlap or skip rows.
-_THREATS_SELECT = """
-PREFIX g: <http://umanitek.ai/ontology/guardian/>
+_THREATS_HEAD = """PREFIX g: <http://umanitek.ai/ontology/guardian/>
 PREFIX schema: <http://schema.org/>
 SELECT ?identifier ?severity ?name ?pattern ?toolName ?argShape
        ?packageName ?packageVersion ?packageEcosystem ?advisoryId ?curated
        ?category ?skillName ?skillVersion ?dangerShape ?kind
-WHERE {
-  ?threat g:identifier ?identifier .
+"""
+
+# Threat-matching graph patterns, shared by the plain query (VM view) and the
+# shared-memory-scoped community query.
+_THREATS_BODY = """  ?threat g:identifier ?identifier .
   OPTIONAL { ?threat g:kind ?kind . }
   OPTIONAL { ?threat g:severity ?severity . }
   OPTIONAL { ?threat schema:name ?name . }
@@ -62,18 +64,72 @@ WHERE {
   OPTIONAL { ?threat g:skillName ?skillName . }
   OPTIONAL { ?threat g:skillVersion ?skillVersion . }
   OPTIONAL { ?threat g:dangerShape ?dangerShape . }
-}
-ORDER BY ?identifier
 """
 
-#: Rows fetched per page when syncing a tier. One SPARQL round-trip each.
+_THREATS_SELECT = f"{_THREATS_HEAD}WHERE {{\n{_THREATS_BODY}}}\nORDER BY ?identifier\n"
+
+# Rows fetched per page when syncing a tier. One SPARQL round-trip each.
 _PAGE_SIZE = 5000
-#: Safety ceiling so a misbehaving node can never spin the pager forever.
+# Safety ceiling so a misbehaving node can never spin the pager forever.
 _MAX_ROWS = 1_000_000
 
 
 def _threats_sparql(limit: int, offset: int) -> str:
     return f"{_THREATS_SELECT}LIMIT {int(limit)} OFFSET {int(offset)}"
+
+
+# Lean field set for the community tier: only the fields ``_row_to_rule`` can't
+# derive from the identifier. dep/skill/fileaccess parse their details from the
+# id; injection needs ``pattern`` and escalation ``toolName``/``argShape``.
+# Fewer OPTIONAL joins keep the scoped read a few seconds vs the full query's ~11s.
+_COMMUNITY_SELECT = """PREFIX g: <http://umanitek.ai/ontology/guardian/>
+PREFIX schema: <http://schema.org/>
+SELECT ?identifier ?severity ?kind ?name ?pattern ?toolName ?argShape
+"""
+_COMMUNITY_BODY = """  ?threat g:identifier ?identifier .
+  OPTIONAL { ?threat g:severity ?severity . }
+  OPTIONAL { ?threat g:kind ?kind . }
+  OPTIONAL { ?threat schema:name ?name . }
+  OPTIONAL { ?threat g:pattern ?pattern . }
+  OPTIONAL { ?threat g:toolName ?toolName . }
+  OPTIONAL { ?threat g:argShape ?argShape . }
+"""
+# Read in a single scoped query — no OFFSET paging, which would re-scan every
+# slice per page. A cap hit is logged, never silently truncated; production
+# scale needs the node's SWM view indexed (see the seed runbook).
+_COMMUNITY_MAX_ROWS = 50_000
+
+
+def _shared_memory_sparql(cg_id: str, limit: int) -> str:
+    """The lean threats query scoped to a context graph's shared-memory slices.
+
+    Run against the local store via :meth:`DkgClient.query_store` for the
+    community tier (see there for why). No ORDER BY — a single read, no paging.
+    """
+    prefix = f"did:dkg:context-graph:{cg_id}/_shared_memory"
+    return (
+        f"{_COMMUNITY_SELECT}WHERE {{\n  GRAPH ?g {{\n{_COMMUNITY_BODY}  }}\n"
+        f'  FILTER(STRSTARTS(STR(?g), "{prefix}"))\n}}\n'
+        f"LIMIT {int(limit)}"
+    )
+
+
+def community_report_count(client: DkgClient, cfg: GuardianConfig) -> int:
+    """Fast count of outbound sightings (``ThreatReport``s) in the community
+    pool, via a scoped store read (not the view). Fail-open to 0."""
+    prefix = f"did:dkg:context-graph:{cfg.context_graph_id}/_shared_memory"
+    sparql = (
+        "SELECT (COUNT(DISTINCT ?r) AS ?n) WHERE { GRAPH ?g { "
+        "?r a <http://umanitek.ai/ontology/guardian/ThreatReport> } "
+        f'FILTER(STRSTARTS(STR(?g), "{prefix}")) }}'
+    )
+    rows = client.query_store(sparql, on_error=None)
+    if not rows:
+        return 0
+    try:
+        return int(extract_binding(rows[0].get("n")) or 0)
+    except (ValueError, TypeError):
+        return 0
 
 
 @dataclass
@@ -95,6 +151,25 @@ class Ruleset:
             "fileaccess": len(self.fileaccess),
             "skill": len(self.skill),
         }
+
+    def iter_rules(self):
+        """Yield ``(category, rule)`` for every rule across all categories, so
+        callers (e.g. the dashboard) can filter/count by ``rule["source"]``
+        straight from the synced cache instead of re-querying the node."""
+        for r in self.injection:
+            yield "injection", r
+        for r in self.escalation:
+            yield "escalation", r
+        for r in self.dependency.values():
+            yield "dependency", r
+        for r in self.fileaccess:
+            yield "fileaccess", r
+        for r in self.skill:
+            yield "skill", r
+
+    def source_count(self, source: str) -> int:
+        """How many rules are tagged with *source* (``public`` | ``community``)."""
+        return sum(1 for _cat, r in self.iter_rules() if r.get("source") == source)
 
 
 # ---------------------------------------------------------------------------
@@ -332,6 +407,22 @@ def _fetch_tier(client: DkgClient, cg_id: str, view: str) -> Optional[List[Dict[
     the caller can preserve a tier's last-good rules through a transient failure
     instead of wiping them.
     """
+    # Community tier: one scoped store read (see ``query_store``). No OFFSET
+    # paging, which would re-scan every slice; a cap hit is logged, not truncated.
+    if view == constants.VIEW_SHARED_WORKING_MEMORY:
+        rows = client.query_store(
+            _shared_memory_sparql(cg_id, _COMMUNITY_MAX_ROWS), on_error=_QUERY_ERROR
+        )
+        if rows is _QUERY_ERROR:
+            return None
+        if len(rows) >= _COMMUNITY_MAX_ROWS:
+            logger.warning(
+                "guardian: community read hit the %d-row cap; some shared-memory "
+                "threats may be missing until the node's SWM view is indexed",
+                _COMMUNITY_MAX_ROWS,
+            )
+        return rows
+
     rows: List[Dict[str, Any]] = []
     offset = 0
     while offset < _MAX_ROWS:

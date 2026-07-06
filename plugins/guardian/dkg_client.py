@@ -12,7 +12,9 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -22,14 +24,12 @@ from . import constants
 logger = logging.getLogger(__name__)
 
 _TIMEOUT = 3.0
-#: SPARQL reads fan out across every shared-memory asset in the graph, so a
-#: large curated graph can take a few seconds to evaluate. This is only ever
-#: hit by the background ruleset refresh and the dashboard — never the hot hook
-#: path, which serves a cached ruleset — so a generous ceiling is safe.
+# Read path: a large graph can take a few seconds to evaluate. Only the
+# background refresh and the dashboard hit it, never the cached hot hook path.
 _QUERY_TIMEOUT = 30.0
-#: On-chain ops (CG register, VM publish) need block confirmation — far longer
-#: than the short read timeout. Used only by :meth:`register_context_graph` and
-#: :meth:`publish`.
+# Community tier reads scale with the pool, so a longer ceiling than the node API.
+_STORE_TIMEOUT = 60.0
+# On-chain ops (CG register, VM publish) wait for block confirmation.
 _ONCHAIN_TIMEOUT = 180.0
 Quad = Dict[str, str]
 
@@ -133,15 +133,17 @@ class DkgClient:
 
     # -- status ------------------------------------------------------------
 
-    def status(self) -> Dict[str, Any]:
+    def status(self, timeout: Optional[float] = None) -> Dict[str, Any]:
         """Return node status; raises :class:`DkgError` if unreachable.
 
         ``GET /api/status`` is the public (no-auth) liveness endpoint; older
-        daemons are probed via ``/api/info`` then ``/api/health``.
+        daemons are probed via ``/api/info`` then ``/api/health``. Pass
+        ``timeout`` for a fast liveness probe (e.g. the dashboard) so a dead
+        node fails in a second or two rather than the default read timeout.
         """
         for route in ("/api/status", "/api/info", "/api/health"):
             try:
-                return self._request("GET", route)
+                return self._request("GET", route, timeout=timeout)
             except DkgError:
                 continue
         raise DkgError("node unreachable on /api/status, /api/info, /api/health")
@@ -154,9 +156,9 @@ class DkgClient:
         """
         return self._request("GET", "/api/agent/identity")
 
-    def reachable(self) -> bool:
+    def reachable(self, timeout: Optional[float] = None) -> bool:
         try:
-            self.status()
+            self.status(timeout=timeout)
             return True
         except DkgError:
             return False
@@ -202,6 +204,7 @@ class DkgClient:
                 "POST",
                 "/api/knowledge-assets",
                 {"contextGraphId": cg_id, "name": name, "quads": quads, "alsoShareSwm": True},
+                timeout=_STORE_TIMEOUT,
             )
         except DkgError as exc:
             if _is_already_finalized(exc):
@@ -214,6 +217,7 @@ class DkgClient:
             "POST",
             "/api/knowledge-assets",
             {"contextGraphId": cg_id, "name": name, "quads": quads, "alsoShareSwm": False},
+            timeout=_STORE_TIMEOUT,
         )
 
     def publish(self, cg_id: str, name: str, epochs: int = 1) -> Dict[str, Any]:
@@ -254,6 +258,63 @@ class DkgClient:
             logger.debug("guardian: query failed: %s", exc)
             return [] if on_error is None else on_error
         return normalize_bindings(result)
+
+    def query_store(self, sparql: str, on_error: Any = None) -> Any:
+        """Run a SPARQL SELECT against the node's local triple store directly,
+        bypassing the ``/api/query`` view layer. Fail-open like :meth:`query`.
+
+        The ``shared-working-memory`` view does per-slice trust work that times
+        out (HTTP 500) once the pool holds thousands of slices; the raw store
+        answers the same scoped query in milliseconds. Used only for the
+        community tier, which is flag-only and doesn't need the view's
+        verification. Workaround for a node-side view-scaling limit — see the
+        seed runbook.
+        """
+        store_url = self._store_url()
+        if not store_url:
+            return on_error
+        data = urllib.parse.urlencode({"query": sparql}).encode("utf-8")
+        last_exc: Optional[Exception] = None
+        # Retry with backoff: a heavy scoped read can blip when many agents hit
+        # the store at once, and a short pause lets it drain.
+        for attempt in range(3):
+            if attempt:
+                time.sleep(attempt)
+            try:
+                req = urllib.request.Request(
+                    store_url,
+                    data=data,
+                    headers={
+                        "Accept": "application/sparql-results+json",
+                        "Content-Type": "application/x-www-form-urlencoded",
+                    },
+                    method="POST",
+                )
+                with urllib.request.urlopen(req, timeout=_STORE_TIMEOUT) as resp:
+                    return normalize_bindings(json.loads(resp.read().decode("utf-8")))
+            except Exception as exc:  # noqa: BLE001 — reads fail open, same as query()
+                last_exc = exc
+        logger.debug("guardian: store query failed after 3 attempts: %s", last_exc)
+        return on_error
+
+    def _store_url(self) -> Optional[str]:
+        """The node's local SPARQL query endpoint (``storeUrl`` from status).
+
+        Only a resolved URL is cached — never a transient status failure, which
+        would otherwise poison the client for its lifetime and silently empty
+        the community tier. Returns ``None`` (callers fail open) when unresolved.
+        """
+        url = getattr(self, "_store_url_cache", None)
+        if url:
+            return url
+        try:
+            resolved = self.status().get("storeUrl")
+        except DkgError:
+            resolved = None
+        if isinstance(resolved, str) and resolved:
+            self._store_url_cache = resolved
+            return resolved
+        return None
 
     def register_agent(self, name: str, framework: str = "hermes") -> Dict[str, Any]:
         """Register a new agent on the node → ``{agentAddress, authToken, ...}``."""

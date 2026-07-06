@@ -1,14 +1,10 @@
 /**
  * Local findings log for the OpenClaw plugin.
  *
- * The Guardian dashboard's "Live findings" table reads JSONL logs from the
- * shared guardian home. The Python (Hermes) plugin writes `findings.jsonl`;
- * this module writes `findings.openclaw.jsonl` into the SAME home (see
- * `config.guardianHome`, set by `hermes guardian attach`) so the one dashboard
- * surfaces OpenClaw detections alongside Hermes'. Line shape matches the Python
- * `audit.record` finding line so `audit.read_findings` flattens it unchanged.
- *
- * Best-effort and fail-open — a logging error must never break the agent loop.
+ * Writes `findings.openclaw.jsonl` into the shared guardian home so the one
+ * dashboard surfaces OpenClaw detections alongside Hermes'. Line shape matches
+ * the Python `audit.record` line so `audit.read_findings` flattens it unchanged.
+ * Fail-open — a logging error must never break the agent loop.
  */
 import { appendFileSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -19,6 +15,53 @@ const FRAMEWORK = "openclaw" as const;
 const LOG_FILE = "findings.openclaw.jsonl";
 const LOG_MAX_BYTES = 8 * 1024 * 1024; // trim at 8 MB (matches Python)
 const LOG_KEEP_BYTES = 4 * 1024 * 1024; // keep most-recent ~4 MB after trimming
+
+/** One conversation turn shown on a finding (redacted + capped before storage). */
+export interface ConvTurn {
+  role: string;
+  text: string;
+}
+
+/**
+ * Local-only conversation snapshot attached to a finding for the dashboard modal.
+ * Every field is optional and already redacted. Mirrors Python `_bounded_context`.
+ */
+export interface FindingContext {
+  turns?: ConvTurn[];
+  input?: string;
+  result?: string;
+  truncated?: boolean;
+}
+
+// Bounds mirror plugins/guardian/audit.py.
+const CTX_MAX_TURNS = 16;
+const CTX_TURN_CHARS = 3000;
+const CTX_FIELD_CHARS = 6000;
+
+/**
+ * Normalize, redact + bound a raw conversation context for storage. Every text
+ * field runs through `sanitizeText` so this is safe even if a caller forgot to
+ * redact. Returns `undefined` when empty. Mirrors Python `_bounded_context`.
+ */
+export function boundedContext(ctx: FindingContext | undefined): FindingContext | undefined {
+  if (!ctx || typeof ctx !== "object") return undefined;
+  const out: FindingContext = {};
+  if (Array.isArray(ctx.turns) && ctx.turns.length) {
+    const turns: ConvTurn[] = [];
+    for (const t of ctx.turns.slice(-CTX_MAX_TURNS)) {
+      if (!t || typeof t !== "object") continue;
+      const text = sanitizeText(String(t.text ?? ""), CTX_TURN_CHARS);
+      if (!text) continue;
+      turns.push({ role: String(t.role ?? "user").slice(0, 32), text });
+    }
+    if (turns.length) out.turns = turns;
+  }
+  if (typeof ctx.input === "string" && ctx.input) out.input = sanitizeText(ctx.input, CTX_FIELD_CHARS);
+  if (typeof ctx.result === "string" && ctx.result) out.result = sanitizeText(ctx.result, CTX_FIELD_CHARS);
+  if (!out.turns && !out.input && !out.result) return undefined;
+  if (ctx.truncated) out.truncated = true;
+  return out;
+}
 
 /** UTC `YYYY-MM-DDTHH:MM:SSZ` — matches Python `time.strftime(...gmtime())`. */
 function isoNow(): string {
@@ -31,18 +74,23 @@ export function recordFinding(
   event: string,
   finding: Finding,
   toolName?: string,
+  context?: FindingContext,
 ): void {
   try {
     if (!home) return;
     mkdirSync(home, { recursive: true });
     const now = Date.now() / 1000;
     const tool = toolName ?? finding.toolName ?? "";
+    // Local-only conversation snapshot rides in detail.context (redacted + bounded).
+    const detail: Record<string, unknown> = { tool_name: tool };
+    const ctx = boundedContext(context);
+    if (ctx) detail.context = ctx;
     const line = {
       ts: now,
       iso: isoNow(),
       event,
       framework: FRAMEWORK,
-      detail: { tool_name: tool },
+      detail,
       // Same nested shape Python writes so read_findings lifts these fields.
       finding: {
         identifier: finding.identifier,

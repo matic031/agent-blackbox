@@ -883,6 +883,32 @@
     font-size: 10px; text-transform: uppercase; letter-spacing: .07em; color: var(--info);
     margin: 18px 0 10px; padding-top: 14px; border-top: 1px solid var(--border);
   }
+  .m-sech .convo-note { margin-left: 8px; text-transform: none; letter-spacing: 0; font-size: 10px; color: var(--muted); }
+
+  /* Conversation transcript on a finding — the whole turn (prompt + response).
+     Roles are distinguished by a thin left rule + label colour (no dots/pills). */
+  .convo-wrap { display: flex; flex-direction: column; gap: 8px; }
+  .convo-turn, .convo-block {
+    background: var(--panel); border: 1px solid var(--border); border-left-width: 2px;
+    border-radius: 8px; padding: 9px 12px; min-width: 0;
+  }
+  .convo-role {
+    font-size: 10px; text-transform: uppercase; letter-spacing: .06em;
+    color: var(--info); margin-bottom: 5px;
+  }
+  .convo-text {
+    font-size: 12.5px; color: var(--text); line-height: 1.5;
+    white-space: pre-wrap; overflow-wrap: anywhere; max-height: 220px; overflow: auto;
+  }
+  .convo-turn.role-user { border-left-color: var(--teal); }
+  .convo-turn.role-user .convo-role { color: var(--teal); }
+  .convo-turn.role-assistant { border-left-color: var(--mint); }
+  .convo-turn.role-assistant .convo-role { color: var(--mint); }
+  .convo-turn.role-tool, .convo-block { border-left-color: var(--info); }
+  .convo-turn.role-system { border-left-color: var(--border); }
+  .convo-block .convo-text {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px;
+  }
 
   /* ---------- Settings panel (reuses .modal-overlay / .modal) ---------- */
   /* Wider than the threat modal — the policy form needs the room. */
@@ -1182,6 +1208,15 @@
     font-size: 11.5px; color: var(--text);
     max-height: 260px; overflow: auto; white-space: pre;
   }
+  /* Threats-tripped list inside the session / tool-call detail modal */
+  .ldx-list { display: flex; flex-direction: column; gap: 6px; }
+  .ldx-row {
+    display: flex; align-items: center; gap: 10px;
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 8px; padding: 7px 11px; font-size: 12.5px;
+  }
+  .ldx-row .ldx-title { color: var(--text); overflow-wrap: anywhere; flex: 1 1 auto; }
+  .ldx-row .ldx-time { color: var(--muted); font-size: 11.5px; font-variant-numeric: tabular-nums; flex: 0 0 auto; }
 
   /* finding rows open the detail modal */
   tbody tr.row-link { cursor: pointer; }
@@ -1489,8 +1524,7 @@
   }
 
   // ---------- Framework metadata (label · color · inline icon) ----------
-  // Each framework gets a distinct, recognizable mark. Self-contained SVG
-  // glyphs — no external images. currentColor inherits the avatar accent.
+  // Inline SVG glyphs, currentColor inherits the avatar accent.
   var FW_ICONS = {
     // Hermes — a stylized winged "H" mark (two posts + crossbar + wings).
     hermes:
@@ -1507,12 +1541,12 @@
         '<path d="M18 3c1.5 4 2 8 1.5 12.5"/>' +
         '<path d="M4.5 19c3 2.5 12 2.5 15 0" stroke-width="1.6" opacity="0.85"/>' +
       '</svg>',
-    // Generic agent (unknown framework) — a clean robot mark.
+    // Generic agent (unknown framework) — Lucide "bot".
     _default:
       '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
-        '<rect x="4" y="8" width="16" height="11" rx="3"/>' +
-        '<path d="M12 4v4M8 13h.01M16 13h.01"/>' +
-        '<path d="M9 17h6"/>' +
+        '<path d="M12 8V4H8"/>' +
+        '<rect x="4" y="8" width="16" height="12" rx="2"/>' +
+        '<path d="M2 14h2M20 14h2M15 13v2M9 13v2"/>' +
       '</svg>'
   };
   var FW_LOGO = {
@@ -1580,9 +1614,8 @@
         '</div>' +
       '</div>';
     }).join("");
-    // "+ Attach another" tile — persistent so operators can add agents even
-    // when others are already connected (auto-attach handles the common case,
-    // this is the manual escape hatch).
+    // "+ Attach another" tile — always present as the manual escape hatch, even
+    // when agents are already connected (auto-attach covers the common case).
     var addTile = '<button type="button" class="agent-add-tile" id="attach-open" title="Manage local agents">' +
       '<span class="agent-add-ico">' +
         '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>' +
@@ -1707,7 +1740,7 @@
   var TIER_EMPTY = {
     public: "No curated threats published yet.",
     community: "No community-reported threats yet.",
-    local: "No local threats yet."
+    local: "No agent activity on this machine yet."
   };
 
   // Truncate a long identifier to a short leaf label.
@@ -1729,52 +1762,251 @@
     }).sort().join("");
   }
 
-  // Build {nodes, links} for one tier from its threat list.
+  // Build {nodes, links} for one tier. Draws structure + magnitude, not one
+  // leaf per threat: log-scaled category hubs, per-ecosystem sub-hubs, and a
+  // severity-ranked leaf sample; each hub labelled with its real total.
+  var GRAPH_LEAF_CAP = 12;
+  var GRAPH_SEV_RANK = { critical: 0, high: 1, medium: 2, low: 3, info: 4 };
+  function graphHubVal(count) {
+    return 13 + Math.min(19, Math.log(count + 1) * 3.2);
+  }
+  function graphSampleLeaves(items) {
+    return items.slice().sort(function (a, b) {
+      var ra = GRAPH_SEV_RANK[sevClass(a.severity)]; if (ra == null) ra = 9;
+      var rb = GRAPH_SEV_RANK[sevClass(b.severity)]; if (rb == null) rb = 9;
+      return ra - rb;
+    }).slice(0, GRAPH_LEAF_CAP);
+  }
+
   function buildGraphData(tier, list) {
     var nodes = [];
     var links = [];
     var centerId = "__center__";
     nodes.push({
-      id: centerId,
-      kind: "center",
+      id: centerId, kind: "center",
       label: TIER_LABEL[tier] || "Threat graph",
-      color: MINT,
-      val: 26
+      color: MINT, val: 22, threatTotal: list.length
     });
 
-    var hubSeen = {};
+    function addLeaves(parentId, ck, items) {
+      graphSampleLeaves(items).forEach(function (t) {
+        var sev = sevClass(t.severity);
+        nodes.push({
+          id: "leaf:" + (t.identifier || (parentId + ":" + nodes.length)),
+          kind: "leaf", cat: ck, label: leafLabel(t),
+          color: CATS[ck].color, ring: SEV_COLOR[sev] || SEV_COLOR.info,
+          severity: sev, identifier: t.identifier || "", name: t.name || "", val: 5
+        });
+        links.push({ source: nodes[nodes.length - 1].id, target: parentId, kind: "leaf" });
+      });
+    }
+
+    // Bucket by category; biggest first so the force layout settles cleanly.
+    var byCat = {};
     list.forEach(function (t) {
       var ck = catKey(t.category);
+      if (!byCat[ck]) byCat[ck] = [];
+      byCat[ck].push(t);
+    });
+    Object.keys(byCat).sort(function (a, b) { return byCat[b].length - byCat[a].length; }).forEach(function (ck) {
+      var items = byCat[ck];
+      var meta = CATS[ck] || { name: ck, color: "#8891A0" };
       var hubId = "__cat__:" + ck;
-      if (!hubSeen[ck]) {
-        hubSeen[ck] = true;
-        var meta = CATS[ck];
-        nodes.push({
-          id: hubId,
-          kind: "hub",
-          cat: ck,
-          label: meta.name,
-          color: meta.color,
-          val: 18
+      nodes.push({ id: hubId, kind: "hub", cat: ck, label: meta.name, count: items.length, color: meta.color, val: graphHubVal(items.length) });
+      links.push({ source: hubId, target: centerId, kind: "hub" });
+
+      // Dependencies span ecosystems — split the big bucket into npm / pypi /
+      // cargo / … sub-hubs so thousands of deps read as structure, not a pile.
+      if (ck === "dependency" && items.length > GRAPH_LEAF_CAP) {
+        var byEco = {};
+        items.forEach(function (t) {
+          var eco = (String(t.identifier || "").split(":")[1] || "other").toLowerCase();
+          if (!byEco[eco]) byEco[eco] = [];
+          byEco[eco].push(t);
         });
-        links.push({ source: hubId, target: centerId, kind: "hub" });
+        Object.keys(byEco).sort(function (a, b) { return byEco[b].length - byEco[a].length; }).forEach(function (eco) {
+          var subId = hubId + ":" + eco;
+          nodes.push({ id: subId, kind: "hub", cat: ck, label: eco, count: byEco[eco].length, color: meta.color, val: graphHubVal(byEco[eco].length) });
+          links.push({ source: subId, target: hubId, kind: "hub" });
+          addLeaves(subId, ck, byEco[eco]);
+        });
+      } else {
+        addLeaves(hubId, ck, items);
       }
-      var sev = sevClass(t.severity);
-      nodes.push({
-        id: "leaf:" + (t.identifier || (hubId + ":" + nodes.length)),
-        kind: "leaf",
-        cat: ck,
-        label: leafLabel(t),
-        color: CATS[ck].color,
-        ring: SEV_COLOR[sev] || SEV_COLOR.info,
-        severity: sev,
-        identifier: t.identifier || "",
-        name: t.name || "",
-        val: 6
-      });
-      links.push({ source: nodes[nodes.length - 1].id, target: hubId, kind: "leaf" });
     });
     return { nodes: nodes, links: links };
+  }
+
+  // ---- Local tier: one connected activity graph -----------------------------
+  // Same force-graph as public/community, from /api/local-activity: machine root
+  // → session per agent → tool calls chained in run order → threats budding off
+  // the call that tripped them.
+  function clip(s, n) { s = String(s || ""); n = n || 22; return s.length > n ? s.slice(0, n - 1) + "…" : s; }
+
+  // Map a local action event → a threat category (drives node colour + glyph).
+  function localCallCat(ev) {
+    if (ev.type === "file") return "fileaccess";
+    if (ev.type === "dependency") return "dependency";
+    var t = String(ev.tool || "").toLowerCase();
+    if (/terminal|shell|bash|command|exec|run/.test(t)) return "escalation";
+    if (/skill|plugin|install/.test(t)) return "skill";
+    if (/read|open|cat|write|edit|patch|create|delete|file/.test(t)) return "fileaccess";
+    return "other";
+  }
+  // A short label for an action node.
+  function localCallLabel(ev) {
+    if (ev.type === "file") {
+      var p = String(ev.path || ""); var base = p.split("/").pop() || p;
+      return (ev.mode || "read") + (base ? " " + base : "");
+    }
+    if (ev.type === "dependency") return (ev.name || "dep") + (ev.version ? "@" + ev.version : "");
+    return ev.tool || "tool";
+  }
+  // Highest severity among a call's threats, as a sevClass string (or null).
+  function callMaxSev(threats) {
+    var best = null, bestRank = 0;
+    (threats || []).forEach(function (t) {
+      var sc = sevClass(t.severity), r = SEV_RANK[sc] || 0;
+      if (r > bestRank) { bestRank = r; best = sc; }
+    });
+    return best;
+  }
+
+  // A compact {title, severity, identifier, ts, tool} view of a threat, for
+  // listing inside the session/call detail modals.
+  function threatBrief(t) {
+    return {
+      title: t.title || t.identifier || "Threat", severity: sevClass(t.severity),
+      identifier: t.identifier || "", ts: t.ts || 0, tool: t.tool || ""
+    };
+  }
+  // The full package coordinate for a dependency-install event.
+  function depCoord(ev) {
+    return (ev.ecosystem ? ev.ecosystem + ":" : "") + (ev.name || "") + (ev.version ? "@" + ev.version : "");
+  }
+  // Shape a local threat into the finding object openFindingModal expects,
+  // carrying the session's agent + timestamp so the modal shows "Detected …".
+  function localFinding(t, s) {
+    return {
+      identifier: t.identifier || "", category: t.category || "other",
+      severity: t.severity || "info", title: t.title || t.identifier || "Threat",
+      source: t.source, confirmed: !!t.confirmed,
+      tool_name: t.tool || "", framework: (s && s.agent) || "hermes",
+      ts: t.ts || 0
+    };
+  }
+
+  // Build {nodes, links} for the local tier from its session activity.
+  function buildLocalGraphData(data) {
+    var nodes = [], links = [];
+    var sessions = (data && data.sessions) || [];
+    var centerId = "__local__";
+    // Machine root — carries run-wide totals + time span for its hover card.
+    var spanStart = null, spanEnd = null;
+    sessions.forEach(function (s) {
+      if (s.start && (spanStart === null || s.start < spanStart)) spanStart = s.start;
+      if (s.end && (spanEnd === null || s.end > spanEnd)) spanEnd = s.end;
+    });
+    nodes.push({
+      id: centerId, kind: "center", label: "Local", color: MINT, val: 26,
+      sessionCount: sessions.length, threatTotal: (data && data.threatCount) || 0,
+      start: spanStart, end: spanEnd
+    });
+
+    sessions.forEach(function (s, si) {
+      var sid = "ls:" + (s.id || si);
+      var maxSev = s.maxSeverity ? sevClass(s.maxSeverity) : null;
+      var sessThreats = [];
+      (s.events || []).forEach(function (e) { (e.threats || []).forEach(function (t) { sessThreats.push(threatBrief(t)); }); });
+      var sessionNode = {
+        id: sid, kind: "session",
+        label: fwLabel(s.agent) + " · " + (s.shortId || "local"),
+        color: fwColor(s.agent),
+        ring: maxSev ? (SEV_COLOR[maxSev] || null) : null,
+        agent: s.agent, sessionId: s.id || "", shortId: s.shortId || "local",
+        status: s.status, model: s.model,
+        start: s.start || null, end: s.end || null, durationMs: s.durationMs,
+        maxSeverity: s.maxSeverity || null,
+        threatCount: s.threatCount || 0, toolCount: s.toolCount || 0,
+        threats: sessThreats,
+        val: 11 + Math.min((s.threatCount || 0) * 0.8, 8)
+      };
+      nodes.push(sessionNode);
+      links.push({ source: sid, target: centerId, kind: "hub" });
+
+      // Chain the session's tool/file/dependency calls in run order (skip pure
+      // model turns — the description is "tool calls", not API round-trips).
+      var acts = (s.events || []).filter(function (e) {
+        return e.type === "tool" || e.type === "file" || e.type === "dependency";
+      });
+      var CAP = 12, prev = sid;
+      acts.slice(0, CAP).forEach(function (ev, ei) {
+        var ck = catKey(localCallCat(ev));
+        var cid = sid + ":c" + ei;
+        var thr = ev.threats || [];
+        var cSev = callMaxSev(thr);
+        var ring = cSev ? SEV_COLOR[cSev] : (ev.resultStatus === "blocked" ? SEV_COLOR.critical : null);
+        nodes.push({
+          id: cid, kind: "call", cat: ck,
+          label: clip(localCallLabel(ev), 20),
+          color: CATS[ck].color, ring: ring,
+          blocked: ev.resultStatus === "blocked",
+          evType: ev.type,
+          tool: ev.tool, action: ev.action, path: ev.path, mode: ev.mode,
+          pkg: ev.type === "dependency" ? depCoord(ev) : "",
+          resultStatus: ev.resultStatus || null, durationMs: ev.durationMs,
+          ts: ev.ts || 0, agent: s.agent,
+          threats: thr.map(threatBrief),
+          val: 5
+        });
+        links.push({ source: cid, target: prev, kind: "step" });
+        prev = cid;
+        thr.forEach(function (t, ti) {
+          var tck = catKey(t.category), tsev = sevClass(t.severity);
+          nodes.push({
+            id: cid + ":t" + ti, kind: "lthreat", cat: tck,
+            label: clip(t.title || t.identifier || "Threat", 22),
+            color: CATS[tck].color, ring: SEV_COLOR[tsev] || SEV_COLOR.info,
+            severity: tsev, identifier: t.identifier || "", name: t.title || "",
+            tool: t.tool || ev.tool || "", ts: t.ts || ev.ts || 0,
+            finding: localFinding(t, s), val: 5
+          });
+          links.push({ source: cid + ":t" + ti, target: cid, kind: "threat" });
+        });
+      });
+      if (acts.length > CAP) {
+        var moreId = sid + ":more";
+        // Clicking "+N more" opens the parent session's full detail.
+        nodes.push({ id: moreId, kind: "more", label: "+" + (acts.length - CAP) + " more", color: LABEL_MUTED, val: 4, session: sessionNode });
+        links.push({ source: moreId, target: prev, kind: "step" });
+      }
+
+      // Loose threats (not tied to a specific call) hang straight off the session.
+      (s.events || []).filter(function (e) { return e.type === "threat"; }).forEach(function (ev, ei) {
+        (ev.threats || []).forEach(function (t, ti) {
+          var tck = catKey(t.category), tsev = sevClass(t.severity);
+          nodes.push({
+            id: sid + ":lt" + ei + "_" + ti, kind: "lthreat", cat: tck,
+            label: clip(t.title || t.identifier || "Threat", 22),
+            color: CATS[tck].color, ring: SEV_COLOR[tsev] || SEV_COLOR.info,
+            severity: tsev, identifier: t.identifier || "", name: t.title || "",
+            tool: t.tool || "", ts: t.ts || 0,
+            finding: localFinding(t, s), val: 5
+          });
+          links.push({ source: sid + ":lt" + ei + "_" + ti, target: sid, kind: "threat" });
+        });
+      });
+    });
+
+    return { nodes: nodes, links: links };
+  }
+
+  // Stable signature of the local activity — skip rebuilds when nothing changed.
+  function localSig(data) {
+    var ss = (data && data.sessions) || [];
+    return ss.map(function (s) {
+      return (s.id || "") + ":" + (s.status || "") + ":" + ((s.events || []).length) + ":" + (s.threatCount || 0);
+    }).join("|");
   }
 
   // ---- one ForceGraph instance, re-fed on tab switch ----
@@ -1807,50 +2039,74 @@
     ctx.restore();
   }
 
+  // Agent/session glyph — Lucide "bot" (stroked, 24-box), drawn like drawCatIcon
+  // so a session node reads as "an agent ran here".
+  var BOT_PATHS = [
+    new Path2D("M12 8V4H8"),
+    new Path2D("M6 8h12a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2v-8a2 2 0 0 1 2-2z"),
+    new Path2D("M2 14h2"),
+    new Path2D("M20 14h2"),
+    new Path2D("M15 13v2"),
+    new Path2D("M9 13v2"),
+  ];
+  function drawBot(ctx, cx, cy, r, color) {
+    var box = r * 1.45, s = box / 24;
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.scale(s, s);
+    ctx.translate(-12, -12);
+    ctx.lineWidth = 1.9;
+    ctx.lineJoin = "round";
+    ctx.lineCap = "round";
+    ctx.strokeStyle = color || "#ffffff";
+    for (var i = 0; i < BOT_PATHS.length; i++) ctx.stroke(BOT_PATHS[i]);
+    ctx.restore();
+  }
+
   // ---- Per-category vector icons (canvas Path2D, 24×24 viewBox) ----
-  // Same self-contained technique as drawFlag: no external images. Each entry
-  // is a list of stroked sub-paths in a 0..24 coordinate box. Stroke-based
-  // line glyphs read cleanly against the category-color node fill.
+  // Lucide glyphs (lucide.dev, ISC) as path data only, so both the SVG modal
+  // (catIconSVG) and the canvas (drawCatIcon) render them. Keep every glyph
+  // path-only — no <circle>/<rect>.
   var CAT_ICONS = {
-    // dependency — a package / cube
+    // dependency — Lucide "package"
     dependency: [
-      "M12 2.5 21 7v10l-9 4.5L3 17V7l9-4.5Z",
-      "M3 7l9 4.5L21 7",
-      "M12 11.5V21.5"
+      "M11 21.73a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73z",
+      "M12 22V12",
+      "m3.3 7 7.703 4.734a2 2 0 0 0 1.994 0L20.7 7",
+      "m7.5 4.27 9 5.15"
     ],
-    // escalation — a terminal prompt ">_"
+    // escalation — Lucide "square-terminal"
     escalation: [
-      "M3 4.5h18v15H3z",
-      "M6.5 9.5l3 2.5-3 2.5",
-      "M12.5 15h5"
+      "m7 11 2-2-2-2",
+      "M11 13h4",
+      "M5 3h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"
     ],
-    // injection (prompt injection) — a chat / quote bubble
+    // injection (prompt injection) — Lucide "message-square"
     injection: [
-      "M4 5.5h16v10H10l-4 3.5v-3.5H4z",
-      "M8.5 10.5h0.01",
-      "M12 10.5h0.01",
-      "M15.5 10.5h0.01"
+      "M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"
     ],
-    // fileaccess (file access) — a document with folded corner
+    // fileaccess (file access) — Lucide "file-text"
     fileaccess: [
-      "M6 3h8l4 4v14H6z",
-      "M14 3v4h4",
-      "M9 12h6",
-      "M9 16h6"
+      "M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7z",
+      "M14 2v4a2 2 0 0 0 2 2h4",
+      "M10 9H8",
+      "M16 13H8",
+      "M16 17H8"
     ],
-    // skill (suspicious skill) — a puzzle piece
+    // skill (suspicious skill) — Lucide "puzzle"
     skill: [
-      "M9 4h2a1.6 1.6 0 0 1 3.2 0h2v3.5a1.6 1.6 0 0 0 0 3.2V15h-3.5a1.6 1.6 0 0 1-3.2 0H6v-3.5a1.6 1.6 0 0 0 0-3.2V4Z"
+      "M15.39 4.39a1 1 0 0 0 1.68-.474 2.5 2.5 0 1 1 3.014 3.015 1 1 0 0 0-.474 1.68l1.683 1.682a2.414 2.414 0 0 1 0 3.414L19.61 19.39a1 1 0 0 1-1.68-.474 2.5 2.5 0 1 0-3.014 3.015 1 1 0 0 1 .474 1.68l-1.683 1.682a2.414 2.414 0 0 1-3.414 0L8.61 19.61a1 1 0 0 0-1.68.474 2.5 2.5 0 1 1-3.014-3.015 1 1 0 0 0 .474-1.68l-1.683-1.682a2.414 2.414 0 0 1 0-3.414L4.39 8.61a1 1 0 0 1 1.68.474 2.5 2.5 0 1 0 3.014-3.015 1 1 0 0 1-.474-1.68l1.683-1.682a2.414 2.414 0 0 1 3.414 0z"
     ],
-    // secret (secret exposure) — a key
+    // secret (secret exposure) — Lucide "key-round"
     secret: [
-      "M15.5 8.5a4 4 0 1 0-4.2 4l-4.8 4.8v2.2h2.2l0.8-0.8v-1.6h1.6l0.8-0.8v-1.6l1.6-1.6a4 4 0 0 0 2-4.2Z",
+      "M2.586 17.414A2 2 0 0 0 2 18.828V21a1 1 0 0 0 1 1h3a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h1a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h.172a2 2 0 0 0 1.414-.586l.814-.814a6.5 6.5 0 1 0-4-4z",
       "M16.5 7.5h0.01"
     ],
-    // other — a generic dot cluster
+    // other — Lucide "shield-alert"
     other: [
-      "M12 4v0.01M12 20v0.01M4 12h0.01M20 12h0.01",
-      "M12 8.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7Z"
+      "M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z",
+      "M12 8v4",
+      "M12 16h.01"
     ]
   };
   var CAT_ICON_CACHE = {};
@@ -1890,54 +2146,73 @@
   }
 
   function nodeCanvas(node, ctx, scale) {
-    var isCenterNode = node.kind === "center";
+    var kind = node.kind;
+    var isCenter = kind === "center";
+    var isSession = kind === "session";
+    var isHub = kind === "hub";
+    var isCall = kind === "call";
+    var isMore = kind === "more";
+    var isThreat = kind === "leaf" || kind === "lthreat";
     var r = Math.sqrt(Math.max(node.val || 1, 1)) * 1.9;
-    // filled circle — the center node is pure black and carries the flag mark
+
+    // filled circle — center is pure black (flag), sessions a steel panel, calls
+    // a neutral dark dot, hubs + threat leaves their solid category color.
     ctx.beginPath();
     ctx.arc(node.x, node.y, r, 0, 2 * Math.PI, false);
-    ctx.fillStyle = isCenterNode ? "#000000" : node.color;
+    ctx.fillStyle = isCenter ? "#000000"
+      : isSession ? "#12161F"
+      : isCall ? "#1C1C1C"
+      : isMore ? "rgba(255,255,255,0.05)"
+      : node.color;
     ctx.fill();
-    if (isCenterNode) drawFlag(ctx, node.x, node.y, r);
 
-    // Category glyph — hubs always; leaves once zoomed in enough to read.
-    // White reads cleanly on the saturated hub fill; leaves use a dark shade
-    // of their own category color so the mark stays legible on the small dot.
-    if (node.kind === "hub") {
-      drawCatIcon(ctx, node.cat, node.x, node.y, r, "#0D0D0D", scale);
-    } else if (node.kind === "leaf" && scale >= 1.4) {
-      drawCatIcon(ctx, node.cat, node.x, node.y, r, darken(node.color, 0.42), scale);
-    }
+    // Glyphs — flag (center), bot (session), category mark (hub/call/threat).
+    if (isCenter) drawFlag(ctx, node.x, node.y, r);
+    else if (isSession) drawBot(ctx, node.x, node.y, r, node.color);
+    else if (isHub) drawCatIcon(ctx, node.cat, node.x, node.y, r, "#0D0D0D", scale);
+    else if (isCall && scale >= 1.1) drawCatIcon(ctx, node.cat, node.x, node.y, r, node.color, scale);
+    else if (kind === "lthreat" && scale >= 1.2) drawCatIcon(ctx, node.cat, node.x, node.y, r, darken(node.color, 0.42), scale);
+    else if (kind === "leaf" && scale >= 1.4) drawCatIcon(ctx, node.cat, node.x, node.y, r, darken(node.color, 0.42), scale);
 
-    if (node.kind === "leaf" && node.ring) {
-      // severity ring
-      ctx.lineWidth = 1.6 / scale;
+    // rings
+    if ((isThreat || isCall || isSession) && node.ring) {
+      // severity / status ring
+      ctx.lineWidth = (isSession ? 1.8 : 1.6) / scale;
       ctx.strokeStyle = node.ring;
       ctx.beginPath();
-      ctx.arc(node.x, node.y, r + 2.2 / scale, 0, 2 * Math.PI, false);
+      ctx.arc(node.x, node.y, r + (isSession ? 2.6 : 2.2) / scale, 0, 2 * Math.PI, false);
       ctx.stroke();
-    } else if (isCenterNode) {
+    } else if (isCenter) {
       // brand-mint ring around the black flag node
       ctx.lineWidth = 1.8 / scale;
       ctx.strokeStyle = MINT;
       ctx.beginPath();
       ctx.arc(node.x, node.y, r + 1.6 / scale, 0, 2 * Math.PI, false);
       ctx.stroke();
-    } else {
-      // soft outline for hub
+    } else if (isSession || isHub) {
+      // soft outline for the larger nodes
       ctx.lineWidth = 1.2 / scale;
       ctx.strokeStyle = "rgba(255,255,255,0.20)";
+      ctx.beginPath();
+      ctx.arc(node.x, node.y, r, 0, 2 * Math.PI, false);
+      ctx.stroke();
+    } else if (isCall || isMore) {
+      // faint outline so the dark dot reads against the dark field
+      ctx.lineWidth = 1.0 / scale;
+      ctx.strokeStyle = "rgba(255,255,255,0.16)";
       ctx.beginPath();
       ctx.arc(node.x, node.y, r, 0, 2 * Math.PI, false);
       ctx.stroke();
     }
 
     // label
-    var isCenter = node.kind === "center";
-    var isHub = node.kind === "hub";
-    var fontPx = (isCenter ? 6.5 : isHub ? 5.5 : 4.6);
-    // hide leaf labels when zoomed far out to avoid clutter
-    if (node.kind === "leaf" && scale < 0.9) return;
-    ctx.font = (isCenter || isHub ? "600 " : "500 ") + fontPx + "px -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
+    var big = isCenter || isSession || isHub;
+    var fontPx = (isCenter ? 6.5 : (isSession || isHub) ? 5.5 : 4.6);
+    // Declutter: tool-call / "+more" labels are secondary — show only when
+    // zoomed in. Threat leaves appear a touch earlier; sessions/hubs/center always.
+    if ((isCall || isMore) && scale < 1.35) return;
+    if (isThreat && scale < 0.9) return;
+    ctx.font = (big ? "600 " : "500 ") + fontPx + "px -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
     ctx.textAlign = "center";
     ctx.textBaseline = "top";
     var txt = node.label || "";
@@ -1945,8 +2220,20 @@
     // subtle shadow for legibility over the dark field
     ctx.fillStyle = "rgba(0,0,0,0.85)";
     ctx.fillText(txt, node.x + 0.4 / scale, ty + 0.4 / scale);
-    ctx.fillStyle = isCenter ? MINT : (isHub ? LABEL : LABEL_MUTED);
+    ctx.fillStyle = isCenter ? MINT : (big ? LABEL : LABEL_MUTED);
     ctx.fillText(txt, node.x, ty);
+
+    // Hub magnitude — the real total (leaves are only a sample), drawn bold in
+    // the category colour under the name so the count is legible without a hover.
+    if (isHub && node.count != null) {
+      var cy = ty + fontPx + 1.4;
+      ctx.font = "700 " + (fontPx + 0.6) + "px -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
+      var cstr = node.count.toLocaleString();
+      ctx.fillStyle = "rgba(0,0,0,0.85)";
+      ctx.fillText(cstr, node.x + 0.4 / scale, cy + 0.4 / scale);
+      ctx.fillStyle = node.color;
+      ctx.fillText(cstr, node.x, cy);
+    }
   }
 
   // enlarge the clickable/hover area to match the drawn node + label
@@ -1960,15 +2247,54 @@
 
   function nodeTooltip(node) {
     if (node.kind === "center") {
-      return '<div class="graph-tip"><div class="t-name">' + esc(node.label) + '</div></div>';
+      var span = (node.start ? lclock(node.start) : "") + (node.end && node.end !== node.start ? " – " + lclock(node.end) : "");
+      return '<div class="graph-tip"><div class="t-name">' + esc(node.label) + '</div>' +
+        '<div class="t-cat">' + (node.sessionCount || 0) + ' session' + (node.sessionCount === 1 ? '' : 's') +
+          ' · ' + (node.threatTotal || 0) + ' threat' + (node.threatTotal === 1 ? '' : 's') + '</div>' +
+        (span ? '<div class="t-id">' + esc(span) + '</div>' : '') + '</div>';
     }
     if (node.kind === "hub") {
+      var hc = node.count != null
+        ? (node.count.toLocaleString() + ' threat' + (node.count === 1 ? '' : 's') + ' · showing top ' + Math.min(GRAPH_LEAF_CAP, node.count) + ' by severity')
+        : 'category hub';
       return '<div class="graph-tip"><div class="t-name">' + esc(node.label) + '</div>' +
-        '<div class="t-cat">category hub</div></div>';
+        '<div class="t-cat">' + hc + '</div></div>';
+    }
+    if (node.kind === "session") {
+      var line = (node.status || "session") + (node.threatCount ? ' · ' + node.threatCount + ' threat' + (node.threatCount === 1 ? '' : 's') + (node.maxSeverity ? ' · ' + node.maxSeverity : '') : ' · clean');
+      var sub = [];
+      if (node.model) sub.push(node.model);
+      if (node.durationMs != null && node.status !== "active") sub.push(fmtDuration(node.durationMs));
+      if (node.start) sub.push("started " + lclock(node.start));
+      return '<div class="graph-tip"><div class="t-name">' + esc(node.label) + '</div>' +
+        '<div class="t-cat">' + esc(line) + '</div>' +
+        (sub.length ? '<div class="t-id">' + esc(sub.join(" · ")) + '</div>' : '') +
+        '<div class="t-cat">click for session detail</div></div>';
+    }
+    if (node.kind === "call") {
+      var meta2 = [];
+      if (node.resultStatus && !node.blocked) meta2.push(node.resultStatus);
+      if (node.durationMs != null) meta2.push(fmtDuration(node.durationMs));
+      if (node.ts) meta2.push(lclock(node.ts));
+      var nthr = (node.threats || []).length;
+      return '<div class="graph-tip"><div class="t-name">' + esc(node.tool || node.label || "action") + '</div>' +
+        (node.action || node.path || node.pkg ? '<div class="t-id">' + esc(node.action || node.path || node.pkg) + '</div>' : '') +
+        (meta2.length ? '<div class="t-cat">' + esc(meta2.join(" · ")) + '</div>' : '') +
+        ((node.blocked || nthr) ? '<div class="t-meta">' +
+          (node.blocked ? '<span class="pill critical">blocked</span>' : '') +
+          (nthr ? '<span class="t-cat">' + nthr + ' threat' + (nthr === 1 ? '' : 's') + ' tripped</span>' : '') + '</div>' : '') +
+        '</div>';
+    }
+    if (node.kind === "more") {
+      return '<div class="graph-tip"><div class="t-name">' + esc(node.label) + '</div>' +
+        '<div class="t-cat">click to see the whole session</div></div>';
     }
     var sev = node.severity || "info";
     var title = node.name || node.identifier || "threat";
     var meta = catMeta(node.cat);
+    var tmeta = [];
+    if (node.tool) tmeta.push(node.tool);
+    if (node.ts) tmeta.push(lclock(node.ts));
     return '<div class="graph-tip">' +
       '<div class="t-name">' + esc(title) + '</div>' +
       (node.identifier ? '<div class="t-id">' + esc(node.identifier) + '</div>' : '') +
@@ -1976,6 +2302,7 @@
         '<span class="pill ' + sev + '">' + esc(sev) + '</span>' +
         '<span class="t-cat">' + esc(meta.name) + '</span>' +
       '</div>' +
+      (tmeta.length ? '<div class="t-cat">' + esc(tmeta.join(" · ")) + '</div>' : '') +
     '</div>';
   }
 
@@ -2083,9 +2410,8 @@
     if (/^(MAL|OSV|PYSEC|GO|RUSTSEC)-/i.test(id)) return "https://osv.dev/vulnerability/" + id;
     return "";
   }
-  // Pull advisory ids out of whatever the finding recorded (evidence carries
-  // "pkg@ver (MAL-2023-1576)"), so we can link the report even when the live
-  // graph lookup is unavailable.
+  // Scrape advisory ids from whatever the finding recorded (evidence carries
+  // "pkg@ver (MAL-2023-1576)") so reports link even without a live graph lookup.
   function findingAdvisoryRefs(f) {
     var text = [f.evidence, f.matched, f.advisory_id, f.advisoryId, f.title, f.identifier]
       .filter(Boolean).join("  ");
@@ -2207,12 +2533,57 @@
     add("Agent", fwLabel(f.framework));
     add("Tool", f.tool_name || f.tool, true);
     add("Trigger", EVENT_LABEL[String(f.event || "")] || f.event);
-    add("Source", SRC_LONG[srcKey(f)]);
-    add("Evidence", f.evidence || f.matched, true);
     var base = gridHTML(rows);
     var advRefs = findingAdvisoryRefs(f);
     if (advRefs.length) base += refsHTML(advRefs);
+    base += findingExchangeHTML(f);
     return base;
+  }
+
+  // Prompt + model response for the finding. Prompt = scanned text (tool input,
+  // latest user turn, or evidence fallback); response = model reply when captured.
+  // Guardian is request-side, so the reply is often absent — omit it, don't fake
+  // it. Text is redacted + capped server-side.
+  function findingExchangeHTML(f) {
+    var c = (f && f.context) || {};
+    var turns = Array.isArray(c.turns) ? c.turns : [];
+    function lastRole(role) {
+      for (var i = turns.length - 1; i >= 0; i--) {
+        var t = turns[i];
+        if (t && String(t.role || "").toLowerCase() === role && t.text) return String(t.text);
+      }
+      return "";
+    }
+    // Non-injection findings (dependency / file access / skill / secret / …) —
+    // "prompt/response" doesn't apply; show the finding's evidence plainly.
+    if (catKey(f.category || f.type) !== "injection") {
+      var ev = String(f.evidence || f.matched || (c.input || ""));
+      if (!ev) return "";
+      return '<div class="m-sech">Evidence</div><div class="convo-wrap">' +
+        '<div class="convo-block"><div class="convo-text">' + esc(ev) + '</div></div></div>';
+    }
+    var user = lastRole("user"), asst = lastRole("assistant");
+    var input = c.input ? String(c.input) : "";
+    // With a captured turn: user turn is the prompt, assistant/tool action the
+    // response. Otherwise the flagged tool input / evidence is the prompt.
+    var prompt, response;
+    if (user) { prompt = user; response = asst || input || (c.result ? String(c.result) : ""); }
+    else { prompt = input || String(f.evidence || f.matched || ""); response = asst || (c.result ? String(c.result) : ""); }
+    if (!prompt && !response) return "";
+    // Label the section by what's actually present.
+    var label = (prompt && response) ? 'Prompt &amp; response' : (response ? 'Response' : 'Prompt');
+    var out = '<div class="m-sech">' + label +
+      (c.truncated ? '<span class="convo-note">truncated</span>' : '') + '</div><div class="convo-wrap">';
+    if (prompt) {
+      out += '<div class="convo-turn role-user"><div class="convo-role">Prompt</div>' +
+        '<div class="convo-text">' + esc(prompt) + '</div></div>';
+    }
+    if (response) {
+      out += '<div class="convo-turn role-assistant"><div class="convo-role">Model response</div>' +
+        '<div class="convo-text">' + esc(response) + '</div></div>';
+    }
+    out += '</div>';
+    return out;
   }
 
   // Extra intel from the threat graph, appended below the finding's own facts.
@@ -2245,10 +2616,8 @@
     overlay.classList.add("open");
     overlay.setAttribute("aria-hidden", "false");
 
-    // Graph-matched findings get enriched with the threat's full record.
-    // The finding's recorded source is a snapshot from detection time, so we
-    // look the threat up in that tier first but fall back to the other one —
-    // and only render intel for a tier that actually holds the threat now.
+    // Enrich graph-matched findings with the threat's full record. Recorded
+    // source is a detection-time snapshot, so try that tier first, then the other.
     var sk = srcKey(f);
     if (!id || sk === "heuristic") return;
     var tiers = sk === "public" ? ["public", "community"] : ["community", "public"];
@@ -2275,8 +2644,14 @@
 
   function onNodeClick(node) {
     if (!node) return;
+    // Every local node opens a real detail panel; catalog leaves use the threat
+    // modal; the machine root just reframes the whole graph.
+    if (node.kind === "lthreat") { if (node.finding) openFindingModal(node.finding); return; }
     if (node.kind === "leaf") { openThreatModal(node); return; }
-    if (fg && typeof node.x === "number") {          // hub/center: frame it
+    if (node.kind === "session") { openSessionModal(node); return; }
+    if (node.kind === "call") { openCallModal(node); return; }
+    if (node.kind === "more" && node.session) { openSessionModal(node.session); return; }
+    if (fg && typeof node.x === "number") {          // center/hub: frame it
       try { fg.centerAt(node.x, node.y, 500); fg.zoom(node.kind === "center" ? 1.4 : 2.4, 500); } catch (e) {}
     }
   }
@@ -2316,15 +2691,19 @@
       .nodeLabel(nodeTooltip)
       .nodeCanvasObject(nodeCanvas)
       .nodePointerAreaPaint(nodePointerArea)
-      .linkColor(function (l) { return l.kind === "hub" ? "rgba(128,202,156,0.35)" : "rgba(160,160,160,0.22)"; })
-      .linkWidth(function (l) { return l.kind === "hub" ? 1.4 : 0.8; })
+      .linkColor(function (l) {
+        if (l.kind === "hub") return "rgba(128,202,156,0.35)";
+        if (l.kind === "threat") return "rgba(239,68,68,0.30)";
+        return "rgba(160,160,160,0.22)";
+      })
+      .linkWidth(function (l) { return l.kind === "hub" ? 1.4 : (l.kind === "threat" ? 1.0 : 0.8); })
       .cooldownTicks(120)
       .d3VelocityDecay(0.3)
       .enableNodeDrag(true)
       .onNodeClick(onNodeClick)
       .onNodeHover(function (node) {
         var c = $("graph-canvas");
-        if (c) c.style.cursor = (node && node.kind === "leaf") ? "pointer" : "default";
+        if (c) c.style.cursor = (node && (node.kind === "leaf" || node.kind === "lthreat")) ? "pointer" : "default";
       })
       .onEngineStop(function () {
         // frame the whole network once it first settles
@@ -2333,9 +2712,19 @@
           try { fg.zoomToFit(400, 40); } catch (e) {}
         }
       });
-    // a touch more separation so leaves fan out from their hub
-    try { fg.d3Force("charge").strength(-140); } catch (e) {}
+    tuneForces(fg, false);
     return fg;
+  }
+
+  // Spread the layout by tier density: the ~100-node local graph needs stronger
+  // repulsion + longer links to read as an open web; small tiers stay tight.
+  function tuneForces(g, dense) {
+    try { g.d3Force("charge").strength(dense ? -240 : -140); } catch (e) {}
+    try {
+      var lf = g.d3Force("link");
+      if (lf) lf.distance(dense ? function (l) { return l.kind === "hub" ? 48 : 26; } : 30);
+    } catch (e) {}
+    try { if (typeof g.d3ReheatSimulation === "function") g.d3ReheatSimulation(); } catch (e) {}
   }
 
   function showGraphEmpty(msgHTML) {
@@ -2350,26 +2739,33 @@
     var empty = $("graph-empty"); if (empty) empty.style.display = "none";
   }
 
-  function renderGraphTab() {
-    var data = graphCache[activeTier];
+  // ===== Local tier data cache =========================================
+  // Latest /api/local-activity payload, so tab switches and the poll can
+  // re-feed the graph (rendered via buildLocalGraphData).
+  var localCache = null;
 
-    // update tab counts from cache (only when we have data)
+  function renderGraphTab() {
+    // Tab counts — local counts its own detected threats, not graph rows.
     TIERS.forEach(function (t) {
+      if (t === "local") { if (localCache) $("count-local").textContent = localCache.threatCount || 0; return; }
       if (graphCache[t]) $("count-" + t).textContent = asList(graphCache[t]).length;
     });
 
+    // Every tier — including local — renders through the one force-graph stage.
+    var isLocal = activeTier === "local";
+    var data = isLocal ? localCache : graphCache[activeTier];
+
     // still loading this tier
     if (data == null) {
-      showGraphEmpty("Loading threats…");
+      showGraphEmpty(isLocal ? "Loading activity…" : "Loading threats…");
       if (fg) fg.graphData({ nodes: [], links: [] });
       fgTierShown = null;
       return;
     }
 
-    var list = asList(data);
-
     // empty state — centered message, no canvas noise
-    if (!list.length) {
+    var hasContent = isLocal ? ((data.sessions || []).length > 0) : (asList(data).length > 0);
+    if (!hasContent) {
       var msg = TIER_EMPTY[activeTier] || "No threats yet.";
       showGraphEmpty("<strong>Nothing to show</strong>" + msg);
       if (fg) fg.graphData({ nodes: [], links: [] });
@@ -2388,15 +2784,15 @@
     hideGraphEmpty();
     $("graph-hint").style.display = "";
 
-    var sig = graphSig(list);
-    // Re-feed only when the data changed for this tier, OR when we're switching
-    // to a tier whose data isn't currently mounted — so the 4s poll doesn't
-    // reset the user's pan/zoom.
+    var sig = isLocal ? localSig(data) : graphSig(asList(data));
+    // Re-feed only on data change or a tier switch that isn't mounted yet, so
+    // the poll doesn't reset the user's pan/zoom.
     if (fgTierShown !== activeTier || fgSig[activeTier] !== sig) {
       fgSig[activeTier] = sig;
       fgTierShown = activeTier;
       didInitialZoom = false;
-      g.graphData(buildGraphData(activeTier, list));
+      g.graphData(isLocal ? buildLocalGraphData(data) : buildGraphData(activeTier, asList(data)));
+      tuneForces(g, isLocal);
     }
     // keep canvas sized to its container
     resizeGraph();
@@ -2755,6 +3151,70 @@
     if (!d || isNaN(d.getTime())) return iso || "";
     return d.toLocaleString();
   }
+  // Compact wall-clock (HH:MM:SS) for hover cards and inline threat lists.
+  function lclock(ts) {
+    if (!ts) return "";
+    try { return new Date(ts * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }); }
+    catch (e) { return ""; }
+  }
+
+  // ---- Local graph node detail (session / tool-call) --------------------------
+  // Reuses the #activity-modal shell so any local node opens a real detail panel,
+  // not just a reframe. Threat nodes still use the richer finding modal.
+  function openLocalDetail(title, sub, bodyHTML) {
+    var overlay = document.getElementById("activity-modal");
+    if (!overlay) return;
+    var t = document.getElementById("activity-title");
+    var s = document.getElementById("activity-sub");
+    var b = document.getElementById("activity-detail-body");
+    if (t) t.textContent = title;
+    if (s) s.textContent = sub || "";
+    if (b) b.innerHTML = bodyHTML;
+    overlay.setAttribute("aria-hidden", "false");
+    overlay.classList.add("open");
+  }
+  function localThreatListHTML(threats) {
+    if (!threats || !threats.length) return "";
+    var items = threats.map(function (t) {
+      return '<div class="ldx-row">' +
+        '<span class="pill ' + sevClass(t.severity) + '">' + esc(sevClass(t.severity)) + '</span>' +
+        '<span class="ldx-title">' + esc(t.title || t.identifier || "Threat") + '</span>' +
+        (t.ts ? '<span class="ldx-time">' + esc(lclock(t.ts)) + '</span>' : "") +
+        '</div>';
+    }).join("");
+    return '<div class="m-sech">Threats tripped</div><div class="ldx-list">' + items + '</div>';
+  }
+  function openSessionModal(node) {
+    var kv = '<dl class="ad-kv">' +
+      '<dt>Agent</dt><dd>' + fwIcon(node.agent) + ' ' + esc(fwLabel(node.agent)) + '</dd>' +
+      '<dt>Session</dt><dd><code>' + esc(node.sessionId || node.shortId || "") + '</code></dd>' +
+      '<dt>Status</dt><dd>' + esc(node.status || "active") + '</dd>' +
+      (node.model ? '<dt>Model</dt><dd>' + esc(node.model) + '</dd>' : "") +
+      (node.start ? '<dt>Started</dt><dd>' + esc(fmtTimePlain(node.start)) + '</dd>' : "") +
+      (node.end ? '<dt>Ended</dt><dd>' + esc(fmtTimePlain(node.end)) + '</dd>' : "") +
+      (node.durationMs != null ? '<dt>Duration</dt><dd>' + fmtDuration(node.durationMs) + '</dd>' : "") +
+      '<dt>Tool calls</dt><dd>' + (node.toolCount || 0) + '</dd>' +
+      '<dt>Threats</dt><dd>' + (node.threatCount || 0) + (node.maxSeverity ? ' &middot; ' + esc(node.maxSeverity) : "") + '</dd>' +
+      '</dl>';
+    openLocalDetail(fwLabel(node.agent) + " · " + (node.shortId || ""),
+      node.start ? fmtTimePlain(node.start) : "", kv + localThreatListHTML(node.threats));
+  }
+  function openCallModal(node) {
+    var res = node.resultStatus || (node.blocked ? "blocked" : "");
+    var kv = '<dl class="ad-kv">' +
+      (node.agent ? '<dt>Agent</dt><dd>' + fwIcon(node.agent) + ' ' + esc(fwLabel(node.agent)) + '</dd>' : "") +
+      '<dt>Tool</dt><dd>' + esc(node.tool || node.label || "tool") + '</dd>' +
+      (node.action ? '<dt>Command</dt><dd><code>' + esc(node.action) + '</code></dd>' : "") +
+      (node.path ? '<dt>Path</dt><dd><code>' + esc(node.path) + '</code></dd>' : "") +
+      (node.mode ? '<dt>Mode</dt><dd>' + esc(node.mode) + '</dd>' : "") +
+      (node.pkg ? '<dt>Package</dt><dd><code>' + esc(node.pkg) + '</code></dd>' : "") +
+      (res ? '<dt>Result</dt><dd>' + esc(res) + '</dd>' : "") +
+      (node.durationMs != null ? '<dt>Duration</dt><dd>' + fmtDuration(node.durationMs) + '</dd>' : "") +
+      (node.ts ? '<dt>Time</dt><dd>' + esc(fmtTimePlain(node.ts)) + '</dd>' : "") +
+      '</dl>';
+    var title = node.tool || (node.evType === "dependency" ? "Install" : node.evType === "file" ? "File access" : "Tool call");
+    openLocalDetail(title, node.ts ? fmtTimePlain(node.ts) : "", kv + localThreatListHTML(node.threats));
+  }
   function activityDetailBodyHTML(entry) {
     var fw = entry.framework || "hermes";
     var detail = entry.detail || {};
@@ -2861,7 +3321,7 @@
       getJSON("/api/agents"),
       getJSON("/api/graph?tier=public"),
       getJSON("/api/graph?tier=community"),
-      getJSON("/api/graph?tier=local")
+      getJSON("/api/local-activity")
     ]).then(function (res) {
       var anyOk = res.some(function (r) { return r.status === "fulfilled"; });
       var allFail = res.every(function (r) { return r.status === "rejected"; });
@@ -2871,9 +3331,9 @@
       if (res[2].status === "fulfilled") renderReports(res[2].value);
       if (res[3].status === "fulfilled") renderAgents(res[3].value);
       var anyGraph = false;
-      TIERS.forEach(function (t, i) {
-        if (res[4 + i].status === "fulfilled") { graphCache[t] = res[4 + i].value; anyGraph = true; }
-      });
+      if (res[4].status === "fulfilled") { graphCache.public = res[4].value; anyGraph = true; }
+      if (res[5].status === "fulfilled") { graphCache.community = res[5].value; anyGraph = true; }
+      if (res[6].status === "fulfilled") { localCache = res[6].value; anyGraph = true; }
       if (anyGraph) renderGraphTab();
 
       setBanner(allFail);
@@ -2974,9 +3434,8 @@
   });
 
   // ---------- Settings panel ----------
-  // The full ladder we accept from the server / render into selects. Any value
-  // the API hands back is whitelisted against this before it can build an
-  // <option>, so a malformed payload can never inject markup or bad values.
+  // Severity whitelist: every server value is checked against this before it
+  // can build an <option>, so a malformed payload can't inject markup.
   var SEV_ORDER = ["info", "low", "medium", "high", "critical"];
   // Category → accent color + built-in helper line (order matches the API).
   var SET_CATS = [
@@ -2993,9 +3452,8 @@
     skill: "Suspicious skills"
   };
 
-  // Live UI state, hydrated from GET /api/settings and mutated in place as the
-  // user edits. Serialized back out on Save. Kept separate from findingsCache
-  // etc. so nothing in the 4s poll loop ever touches it.
+  // Live UI state from GET /api/settings, mutated in place on edit, serialized
+  // on Save. Separate from the poll caches so the 4s loop never touches it.
   var setState = null;
   var setLoaded = false;
   var setSaving = false;
@@ -3288,9 +3746,8 @@
     var gear = $("settings-open");
     if (gear) gear.focus();
   }
-  // Close without applying: drop any unsaved in-memory edits by re-pulling the
-  // server's authoritative state, then hide. Used by Cancel, the X, Escape, and
-  // backdrop click so closing never silently keeps unsaved changes.
+  // Close discarding edits: re-pull the server state, then hide. Used by Cancel,
+  // X, Escape, and backdrop so closing never keeps unsaved changes.
   function cancelSettings() {
     if (setLoaded) loadSettings(true);
     closeSettings();
@@ -3541,8 +3998,15 @@
   // warm the settings once at startup so the first open is instant (best-effort)
   loadSettings(false);
 
-  poll();
-  setInterval(poll, POLL_MS);
+  // Poll only while visible: pause on hide, resume with an immediate refresh on
+  // show, so a backgrounded tab doesn't keep hitting the node.
+  var pollTimer = null;
+  function startPolling() { if (!pollTimer) { poll(); pollTimer = setInterval(poll, POLL_MS); } }
+  function stopPolling() { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } }
+  document.addEventListener("visibilitychange", function () {
+    if (document.hidden) stopPolling(); else startPolling();
+  });
+  if (!document.hidden) startPolling();
 })();
 </script>
 
