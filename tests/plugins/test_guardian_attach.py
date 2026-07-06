@@ -77,6 +77,19 @@ def test_discover_hermes_homes_finds_default_and_profile(fake_env):
     assert fake_env["profile"] in homes
 
 
+def test_discover_hermes_homes_skips_managed_guardian_chat_profile(fake_env):
+    guardian = fake_env["hermes_default"] / "profiles" / "guardian"
+    guardian.mkdir(parents=True)
+    (guardian / "SOUL.md").write_text(
+        "<!-- managed-by: hermes-guardian-chat -->\n# Umanitek Agent Guardian\n",
+        encoding="utf-8",
+    )
+
+    homes = attach.discover_hermes_homes()
+    assert fake_env["profile"] in homes
+    assert guardian not in homes
+
+
 def test_discover_hermes_homes_deduplicates(fake_env):
     homes = attach.discover_hermes_homes()
     assert len(homes) == len(set(homes))

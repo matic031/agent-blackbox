@@ -24,6 +24,8 @@ from typing import Any, Dict, List, Optional
 from . import constants
 
 logger = logging.getLogger(__name__)
+_GUARDIAN_CHAT_PROFILE = "guardian"
+_GUARDIAN_CHAT_SOUL_MARKER = "<!-- managed-by: hermes-guardian-chat -->"
 
 try:  # PyYAML ships with hermes; degrade gracefully if it is somehow absent.
     import yaml
@@ -92,7 +94,7 @@ def discover_hermes_homes() -> List[Path]:
     try:
         if profiles_dir.is_dir():
             for child in sorted(profiles_dir.iterdir()):
-                if child.is_dir():
+                if child.is_dir() and not is_managed_guardian_chat_profile(child):
                     _add(child)
     except Exception:
         pass
@@ -104,6 +106,23 @@ def discover_hermes_homes() -> List[Path]:
             _add(Path(local_appdata) / "hermes")
 
     return homes
+
+
+def is_managed_guardian_chat_profile(path: Path) -> bool:
+    """Return True for the internal Guardian control chat profile.
+
+    The dashboard's attach/connected-agent surfaces list protected workloads.
+    The managed ``guardian`` profile is the operator/control profile launched by
+    ``hermes guardian chat``; showing it as a defended agent is misleading.
+    """
+    try:
+        resolved = path.expanduser()
+        if resolved.name != _GUARDIAN_CHAT_PROFILE or resolved.parent.name != "profiles":
+            return False
+        soul = resolved / "SOUL.md"
+        return soul.exists() and _GUARDIAN_CHAT_SOUL_MARKER in soul.read_text(encoding="utf-8")
+    except Exception:
+        return False
 
 
 def discover_openclaw_workspaces() -> List[Path]:
