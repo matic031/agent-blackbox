@@ -244,7 +244,34 @@
     color: var(--text);
     background: rgba(255,255,255,0.035);
   }
-  .chat-msg.pending { color: var(--muted); font-style: italic; }
+  .chat-msg.pending {
+    color: transparent;
+    font-style: italic;
+    background:
+      linear-gradient(90deg, var(--muted) 0%, var(--text) 42%, var(--muted) 72%)
+        0 0 / 220% 100%;
+    -webkit-background-clip: text;
+    background-clip: text;
+    animation: chat-wait-wave 1.55s ease-in-out infinite;
+  }
+  @keyframes chat-wait-wave {
+    0% { background-position: 100% 0; opacity: .64; }
+    50% { opacity: 1; }
+    100% { background-position: -100% 0; opacity: .64; }
+  }
+  .chat-more {
+    align-self: center;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    background: rgba(255,255,255,0.04);
+    color: var(--muted);
+    font: inherit;
+    font-size: 12px;
+    font-weight: 650;
+    padding: 7px 12px;
+    cursor: pointer;
+  }
+  .chat-more:hover { color: var(--text); border-color: #333; background: rgba(255,255,255,0.08); }
   .chat-form {
     border-top: 1px solid var(--border);
     padding: 14px 16px 16px;
@@ -3337,7 +3364,63 @@
   });
 
   var chatBusy = false;
-  function chatAdd(role, text, extraClass) {
+  var CHAT_STORAGE_KEY = "guardian.dashboard.chat.v1";
+  var CHAT_PAGE_SIZE = 20;
+  var CHAT_WAIT_MESSAGES = [
+    "I’m checking the local Guardian state…",
+    "Looking through connected agents and recent findings…",
+    "Still working. Some checks can take a few seconds…",
+    "Almost there. I’m turning the raw state into a clear answer…"
+  ];
+  var chatVisibleCount = CHAT_PAGE_SIZE;
+  function chatHistory() {
+    try {
+      var items = JSON.parse(localStorage.getItem(CHAT_STORAGE_KEY) || "[]");
+      return Array.isArray(items) ? items : [];
+    } catch (_) {
+      return [];
+    }
+  }
+  function saveChatHistory(items) {
+    try { localStorage.setItem(CHAT_STORAGE_KEY, JSON.stringify(items)); } catch (_) {}
+  }
+  function rememberChat(role, text) {
+    if (role !== "user" && role !== "guardian") return;
+    var items = chatHistory();
+    items.push({ role: role, text: text });
+    saveChatHistory(items);
+  }
+  function renderChatHistory(keepPosition) {
+    var items = chatHistory();
+    if (!items.length) return;
+    var log = $("chat-log");
+    if (!log) return;
+    var prevHeight = log.scrollHeight;
+    var prevTop = log.scrollTop;
+    var start = Math.max(0, items.length - chatVisibleCount);
+    log.innerHTML = "";
+    if (start > 0) {
+      var more = document.createElement("button");
+      more.type = "button";
+      more.className = "chat-more";
+      more.textContent = "Load more";
+      more.addEventListener("click", function () {
+        chatVisibleCount += CHAT_PAGE_SIZE;
+        renderChatHistory(true);
+      });
+      log.appendChild(more);
+    }
+    items.slice(start).forEach(function (item) {
+      if (item && typeof item.text === "string") chatAdd(item.role || "guardian", item.text, "", false);
+    });
+    if (keepPosition) log.scrollTop = Math.max(0, log.scrollHeight - prevHeight + prevTop);
+    else log.scrollTop = log.scrollHeight;
+  }
+  function restoreChat() {
+    chatVisibleCount = CHAT_PAGE_SIZE;
+    renderChatHistory(false);
+  }
+  function chatAdd(role, text, extraClass, persist) {
     var log = $("chat-log");
     if (!log) return null;
     var msg = document.createElement("div");
@@ -3345,7 +3428,29 @@
     msg.textContent = text;
     log.appendChild(msg);
     log.scrollTop = log.scrollHeight;
+    if (persist !== false && extraClass !== "pending") rememberChat(role, text);
     return msg;
+  }
+  function chatType(role, text) {
+    var log = $("chat-log");
+    var msg = chatAdd(role, "", "typing", false);
+    if (!msg) return Promise.resolve();
+    var full = String(text || "");
+    var index = 0;
+    return new Promise(function (resolve) {
+      function step() {
+        index = Math.min(full.length, index + Math.max(2, Math.floor(full.length / 90)));
+        msg.textContent = full.slice(0, index);
+        if (log) log.scrollTop = log.scrollHeight;
+        if (index < full.length) window.setTimeout(step, 14);
+        else {
+          msg.classList.remove("typing");
+          rememberChat(role, full);
+          resolve();
+        }
+      }
+      step();
+    });
   }
   function openChat() {
     var panel = $("chat-panel");
@@ -3378,19 +3483,27 @@
     if (!text) return;
     input.value = "";
     chatAdd("user", text);
-    var pending = chatAdd("guardian", "Guardian is checking…", "pending");
+    var waitIndex = 0;
+    var pending = chatAdd("guardian", CHAT_WAIT_MESSAGES[waitIndex], "pending");
+    var waitTimer = setInterval(function () {
+      if (!pending || !pending.parentNode) return;
+      waitIndex = Math.min(waitIndex + 1, CHAT_WAIT_MESSAGES.length - 1);
+      pending.textContent = CHAT_WAIT_MESSAGES[waitIndex];
+    }, 2600);
     setChatBusy(true);
     postJSON("/api/guardian-chat", { message: text }).then(function (res) {
       var body = res.body || {};
+      clearInterval(waitTimer);
       if (pending && pending.parentNode) pending.parentNode.removeChild(pending);
       if (res.ok && body.ok) {
-        chatAdd("guardian", body.answer || "(no response)");
+        return chatType("guardian", body.answer || "(no response)");
       } else {
-        chatAdd("guardian", body.error || ("Guardian chat failed (HTTP " + res.status + ")."));
+        return chatType("guardian", body.error || ("Guardian chat failed (HTTP " + res.status + ")."));
       }
     }).catch(function () {
+      clearInterval(waitTimer);
       if (pending && pending.parentNode) pending.parentNode.removeChild(pending);
-      chatAdd("guardian", "Network error. Guardian could not answer.");
+      return chatType("guardian", "Network error. Guardian could not answer.");
     }).then(function () {
       setChatBusy(false);
       if (input) input.focus();
@@ -3401,6 +3514,7 @@
     var form = $("chat-form");
     if (!panel || !form || panel.__wired) return;
     panel.__wired = true;
+    restoreChat();
     $("chat-open").addEventListener("click", openChat);
     $("chat-close").addEventListener("click", closeChat);
     panel.addEventListener("click", function (e) { if (e.target === panel) closeChat(); });
@@ -3436,7 +3550,7 @@
       <button type="button" class="chat-close" id="chat-close" aria-label="Close Guardian chat">×</button>
     </div>
     <div class="chat-log" id="chat-log" aria-live="polite">
-      <div class="chat-msg guardian">I can inspect Guardian dashboard state, explain findings, and help with local setup.</div>
+      <div class="chat-msg guardian">I’m here to help you understand what Guardian sees, what needs attention, and what to do next.</div>
     </div>
     <form class="chat-form" id="chat-form">
       <textarea class="chat-input" id="chat-input" rows="2" maxlength="4000" placeholder="Ask Guardian about this dashboard…"></textarea>
