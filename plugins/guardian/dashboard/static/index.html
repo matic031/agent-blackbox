@@ -982,6 +982,16 @@
   .au-detail-primary { font-weight: 500; }
   .au-detail-meta { color: var(--muted); font-size: 11px; }
   .au-detail-meta code { color: var(--text); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; }
+  .au-tool-name { color: var(--muted); font-weight: 500; }
+  .au-tool-arg {
+    color: var(--text); font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 11.5px; background: rgba(255,255,255,0.05);
+    padding: 1px 6px; border-radius: 5px; border: 1px solid var(--border);
+    overflow-wrap: anywhere;
+  }
+  .au-res-ok { color: var(--mint); font-weight: 600; }
+  .au-res-error { color: #fca5a5; font-weight: 600; }
+  .au-res-blocked { color: #fcd34d; font-weight: 600; }
 
   @media (max-width: 720px) {
     .audit-table th:nth-child(2), .audit-table td:nth-child(2) { display: none; }
@@ -2293,6 +2303,7 @@
   var AUDIT_PAGE = 100, AUDIT_MAX = 500, auditLoaded = AUDIT_PAGE;
   var activityCache = null;
   var activityFilter = "all";  // "all" | "threats"
+  var toolCmdById = {};        // tool_call_id → command (pre→post cross-ref)
 
   // Shared empty-state row (colspan matches audit table width).
   function emptyRow(strong, msg) {
@@ -2339,6 +2350,55 @@
     return '<div class="au-time">' + esc(timeStr) + '</div><div class="au-time-date">' + esc(dateStr) + '</div>';
   }
 
+  // The meaningful action behind a tool call — the command, file, or URL —
+  // rather than the generic tool name.
+  function toolActionText(toolName, args) {
+    if (!args || typeof args !== "object") return "";
+    var t = String(toolName || "").toLowerCase();
+    if (args.command) return String(args.command);
+    if (args.cmd) return String(args.cmd);
+    if (args.script) return String(args.script);
+    if (args.path || args.file || args.filename) {
+      var p = String(args.path || args.file || args.filename);
+      if (args.content != null && /write|create|edit|append/.test(t)) return p;
+      return p;
+    }
+    if (args.url) return String(args.url);
+    if (args.query) return String(args.query);
+    for (var k in args) {
+      if (!Object.prototype.hasOwnProperty.call(args, k)) continue;
+      var v = args[k];
+      if (typeof v === "string" && v.trim()) return k + "=" + v;
+    }
+    return "";
+  }
+
+  function parseToolResult(result) {
+    if (result == null) return "";
+    var obj = result;
+    if (typeof result === "string") {
+      try { obj = JSON.parse(result); } catch (e) { return ""; }
+    }
+    if (!obj || typeof obj !== "object") return "";
+    if (typeof obj.error === "string" && obj.error) {
+      if (/^BLOCKED/i.test(obj.error)) return '<span class="au-res-blocked">blocked</span>';
+      return '<span class="au-res-error">error</span>';
+    }
+    if (obj.exit_code != null) {
+      var code = Number(obj.exit_code);
+      if (code === 0) return '<span class="au-res-ok">exit 0</span>';
+      return '<span class="au-res-error">exit ' + esc(String(obj.exit_code)) + '</span>';
+    }
+    return "";
+  }
+
+  function fmtDuration(ms) {
+    ms = Number(ms) || 0;
+    if (ms < 1000) return Math.round(ms) + " ms";
+    if (ms < 60000) return (ms / 1000).toFixed(1) + " s";
+    return (ms / 60000).toFixed(1) + " min";
+  }
+
   // Build the Details cell for one entry — primary line + optional meta line.
   function detailCellHTML(entry) {
     var ev = entry.event;
@@ -2353,11 +2413,24 @@
       if (f.tool_name || detail.tool_name) bits.push('via ' + esc(f.tool_name || detail.tool_name));
       meta = bits.join(" · ");
     } else if (ev === "pre_tool_call" || ev === "post_tool_call") {
-      primary = esc(detail.tool_name || "tool");
+      // post_tool_call carries no args; fall back to its paired pre_tool_call's
+      // command via tool_call_id.
+      var toolName = detail.tool_name || "tool";
+      var action = toolActionText(toolName, detail.args);
+      if (!action && detail.tool_call_id && toolCmdById[detail.tool_call_id]) {
+        action = toolCmdById[detail.tool_call_id];
+      }
+      primary = action
+        ? '<span class="au-tool-name">' + esc(toolName) + '</span> <code class="au-tool-arg">' + esc(action) + '</code>'
+        : esc(toolName);
       var bits2 = [];
-      if (detail.duration_ms != null) bits2.push(Math.round(detail.duration_ms) + " ms");
-      if (detail.session_id) bits2.push('session ' + esc(String(detail.session_id).slice(-6)));
+      if (ev === "post_tool_call") {
+        var res = parseToolResult(detail.result);
+        if (res) bits2.push(res);
+      }
+      if (detail.duration_ms != null) bits2.push(fmtDuration(detail.duration_ms));
       if (entry.findingCount) bits2.push(entry.findingCount + ' finding' + (entry.findingCount === 1 ? '' : 's'));
+      if (detail.session_id) bits2.push('session ' + esc(String(detail.session_id).slice(-6)));
       meta = bits2.join(" · ");
     } else if (ev === "pre_api_request") {
       primary = esc(detail.model || detail.provider || "API request");
@@ -2409,6 +2482,14 @@
     if (data !== undefined) activityCache = data;
     data = activityCache;
     var entries = (data && Array.isArray(data.entries)) ? data.entries : [];
+    toolCmdById = {};
+    entries.forEach(function (e) {
+      var det = e && e.detail;
+      if (e && e.event === "pre_tool_call" && det && det.tool_call_id) {
+        var cmd = toolActionText(det.tool_name, det.args);
+        if (cmd) toolCmdById[det.tool_call_id] = cmd;
+      }
+    });
     var filtered = (activityFilter === "threats")
       ? entries.filter(function (e) { return e.event === "flagged" || e.event === "blocked"; })
       : entries;
@@ -2480,9 +2561,14 @@
       '<dt>Time</dt><dd>' + esc(fmtTimePlain(entry.ts, entry.iso)) + '</dd>';
     if (detail.session_id) kv += '<dt>Session</dt><dd><code>' + esc(detail.session_id) + '</code></dd>';
     if (detail.tool_name) kv += '<dt>Tool</dt><dd>' + esc(detail.tool_name) + '</dd>';
+    var actionText = toolActionText(detail.tool_name, detail.args);
+    if (!actionText && detail.tool_call_id && toolCmdById[detail.tool_call_id]) actionText = toolCmdById[detail.tool_call_id];
+    if (actionText) kv += '<dt>Command</dt><dd><code>' + esc(actionText) + '</code></dd>';
+    var resStatus = parseToolResult(detail.result);
+    if (resStatus) kv += '<dt>Result</dt><dd>' + resStatus + '</dd>';
     if (detail.model) kv += '<dt>Model</dt><dd>' + esc(detail.model) + '</dd>';
     if (detail.provider) kv += '<dt>Provider</dt><dd>' + esc(detail.provider) + '</dd>';
-    if (detail.duration_ms != null) kv += '<dt>Duration</dt><dd>' + Math.round(detail.duration_ms) + ' ms</dd>';
+    if (detail.duration_ms != null) kv += '<dt>Duration</dt><dd>' + fmtDuration(detail.duration_ms) + '</dd>';
     if (entry.path) kv += '<dt>Path</dt><dd><code>' + esc(entry.path) + '</code></dd>';
     if (entry.mode) kv += '<dt>Mode</dt><dd>' + esc(entry.mode) + '</dd>';
     if (entry.ecosystem) kv += '<dt>Package</dt><dd><code>' + esc(entry.ecosystem + ':' + (entry.name || '') + '@' + (entry.version || '')) + '</code></dd>';
