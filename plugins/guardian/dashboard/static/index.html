@@ -296,6 +296,34 @@
   }
   .agent-card:hover { border-color: rgba(128,202,156,0.35); }
   .agent-card.local { border-color: rgba(128,202,156,0.45); background: linear-gradient(180deg, rgba(128,202,156,0.06), var(--elevated)); }
+  /* "+ Attach agent" tile — matches card metrics; dashed border marks it as an action, not a live agent. */
+  .agent-add-tile {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    background: transparent;
+    border: 1px dashed rgba(148,163,184,0.35);
+    border-radius: var(--radius);
+    padding: 14px 18px;
+    min-width: 240px;
+    flex: 0 1 auto;
+    color: var(--muted);
+    font: inherit; font-size: 13px; font-weight: 500;
+    cursor: pointer;
+    transition: border-color .18s ease, color .18s ease, background .18s ease;
+  }
+  .agent-add-tile:hover { border-color: rgba(128,202,156,0.55); color: var(--text); background: rgba(128,202,156,0.04); }
+  .agent-add-ico {
+    width: 40px; height: 40px;
+    border-radius: 11px;
+    display: flex; align-items: center; justify-content: center;
+    background: rgba(148,163,184,0.08);
+    border: 1px solid rgba(148,163,184,0.20);
+    flex-shrink: 0;
+  }
+  .agent-add-ico svg { width: 18px; height: 18px; }
+  .agent-add-tile:hover .agent-add-ico { background: rgba(128,202,156,0.10); border-color: rgba(128,202,156,0.35); color: var(--mint); }
+  .agent-add-label { line-height: 1.2; }
   .agent-avatar {
     width: 40px; height: 40px;
     border-radius: 11px;
@@ -590,7 +618,6 @@
     overflow-y: auto; overflow-x: hidden;
     background: linear-gradient(180deg, var(--elevated), var(--panel));
     border: 1px solid var(--border);
-    border-top: 3px solid var(--accent, var(--mint));
     border-radius: 16px;
     box-shadow: 0 24px 64px rgba(0,0,0,0.6);
     transform: translateY(12px) scale(.985); opacity: 0;
@@ -901,6 +928,83 @@
   .load-more:hover { background: rgba(255,255,255,0.08); border-color: #333; }
   .load-more[hidden] { display: none; }
 
+  /* --- Audit trail — unified activity feed --- */
+  .audit-filter { margin-left: auto; }
+
+  .audit-table tbody tr {
+    cursor: pointer;
+    transition: background .12s ease;
+  }
+  .audit-table tbody tr:hover { background: rgba(255,255,255,0.03); }
+
+  /* Threat rows: red-tinted background + left accent bar */
+  .audit-table tbody tr.threat-row td:first-child {
+    position: relative;
+    border-left: 2px solid #ef4444;
+  }
+  .audit-table tbody tr.threat-row { background: rgba(239,68,68,0.06); }
+  .audit-table tbody tr.threat-row:hover { background: rgba(239,68,68,0.10); }
+
+  /* Time cell */
+  .au-time { color: var(--muted); font-variant-numeric: tabular-nums; font-size: 12px; white-space: nowrap; }
+  .au-time-date { color: var(--muted); font-size: 10.5px; margin-top: 2px; opacity: .75; }
+
+  /* Agent chip — compact avatar + label */
+  .au-agent {
+    display: inline-flex; align-items: center; gap: 8px;
+    font-size: 12px; font-weight: 500; color: var(--text);
+  }
+  .au-agent .fw-logo, .au-agent svg { width: 18px; height: 18px; border-radius: 4px; flex-shrink: 0; }
+
+  /* Event pill */
+  .au-event {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 3px 9px; border-radius: 6px;
+    font-size: 11px; font-weight: 600; letter-spacing: .01em;
+    background: rgba(148,163,184,0.10); color: var(--muted);
+    border: 1px solid rgba(148,163,184,0.22);
+    white-space: nowrap;
+  }
+  .au-event.ev-tool     { background: rgba(128,202,156,0.10); color: var(--mint); border-color: rgba(128,202,156,0.28); }
+  .au-event.ev-api      { background: rgba(96,165,250,0.10);  color: #93c5fd;      border-color: rgba(96,165,250,0.28); }
+  .au-event.ev-session  { background: rgba(148,163,184,0.08); color: var(--muted); border-color: rgba(148,163,184,0.22); }
+  .au-event.ev-file     { background: rgba(251,191,36,0.10);  color: #fcd34d;      border-color: rgba(251,191,36,0.28); }
+  .au-event.ev-install  { background: rgba(167,139,250,0.10); color: #c4b5fd;      border-color: rgba(167,139,250,0.28); }
+  .au-event.ev-threat   { background: rgba(239,68,68,0.12);   color: #fca5a5;      border-color: rgba(239,68,68,0.35); }
+  .au-event .dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; opacity: .9; }
+
+  /* Details cell */
+  .au-detail {
+    color: var(--text); font-size: 12.5px;
+    display: flex; flex-direction: column; gap: 3px;
+    overflow-wrap: anywhere;
+  }
+  .au-detail-primary { font-weight: 500; }
+  .au-detail-meta { color: var(--muted); font-size: 11px; }
+  .au-detail-meta code { color: var(--text); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; }
+
+  @media (max-width: 720px) {
+    .audit-table th:nth-child(2), .audit-table td:nth-child(2) { display: none; }
+    .audit-filter { width: 100%; margin-left: 0; }
+  }
+
+  /* --- Event-detail modal (reused for row clicks on non-finding rows) --- */
+  .modal.activity-modal { max-width: 620px; }
+  .activity-modal .modal-body-detail {
+    padding: 4px 22px 22px 22px;
+    display: flex; flex-direction: column; gap: 14px;
+  }
+  .ad-kv { display: grid; grid-template-columns: 96px 1fr; gap: 10px; align-items: baseline; font-size: 12.5px; }
+  .ad-kv dt { color: var(--muted); font-weight: 500; font-size: 12px; }
+  .ad-kv dd { color: var(--text); margin: 0; overflow-wrap: anywhere; }
+  .ad-json {
+    background: rgba(0,0,0,0.28); border: 1px solid var(--border);
+    border-radius: 8px; padding: 10px 12px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 11.5px; color: var(--text);
+    max-height: 260px; overflow: auto; white-space: pre;
+  }
+
   /* finding rows open the detail modal */
   tbody tr.row-link { cursor: pointer; }
   tbody tr.row-link:focus-visible { outline: 2px solid var(--mint); outline-offset: -2px; }
@@ -1024,10 +1128,10 @@
       </div>
     </section>
 
-    <!-- Live findings -->
-    <section class="section" aria-label="Live findings">
+    <!-- Threats detected -->
+    <section class="section" aria-label="Threats detected">
       <div class="section-head">
-        <h2>Live findings</h2>
+        <h2>Threats detected</h2>
         <div class="sort-control">
           <span>Sort</span>
           <div class="sort-seg" role="group" aria-label="Sort findings">
@@ -1061,28 +1165,33 @@
       </div>
     </section>
 
-    <!-- Audit trail — the full local history (Live findings shows only the latest) -->
+    <!-- Audit trail — every agent action, timestamped -->
     <section class="section" aria-label="Audit trail">
       <div class="section-head">
-        <h2>Audit trail</h2>
-        <span class="audit-count" id="audit-total"></span>
+        <div class="section-htext">
+          <h2>Agents activity</h2>
+          <span class="section-note">Every session, API call, tool call and install.</span>
+        </div>
+        <div class="sort-seg audit-filter" role="group" aria-label="Filter audit trail">
+          <button type="button" id="filter-all" class="active" aria-pressed="true">All activity</button>
+          <button type="button" id="filter-threats" aria-pressed="false">Threats only</button>
+        </div>
       </div>
       <div class="panel">
         <div class="table-scroll audit-scroll">
-          <table aria-label="Audit trail">
+          <table aria-label="Audit trail" class="audit-table">
             <thead>
               <tr>
-                <th>Time</th>
-                <th>Agent</th>
-                <th>Severity</th>
-                <th>Type</th>
-                <th>Reasoning</th>
+                <th style="width:150px;">Time</th>
+                <th style="width:150px;">Agent</th>
+                <th style="width:170px;">Event</th>
+                <th>Details</th>
               </tr>
             </thead>
             <tbody id="audit-body">
-              <tr><td colspan="5">
+              <tr><td colspan="4">
                 <div class="empty">
-                  <svg class="e-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+                  <svg class="e-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
                   Loading audit trail&hellip;
                 </div>
               </td></tr>
@@ -1273,21 +1382,33 @@
       return;
     }
 
-    strip.innerHTML = list.map(function (a) {
+    var cards = list.map(function (a) {
       var isLocal = !!a.is_local;
       var reports = Number(a.reports) || 0;
       var reportsHtml = SHOW_AGENT_REPORTS
         ? '<div class="agent-reports"><strong>' + num(reports) + '</strong> report' + (reports === 1 ? '' : 's') + '</div>'
         : '';
+      var wsLabel = a.workspace_label ? '<div class="agent-addr" title="' + esc(a.workspace || '') + '">' + esc(a.workspace_label) + '</div>' : '';
       return '<div class="agent-card' + (isLocal ? ' local' : '') + '">' +
         '<span class="agent-avatar" style="--fw:' + fwColor(a.framework) + '">' + fwIcon(a.framework) + '</span>' +
         '<div class="agent-info">' +
           '<div class="agent-fw">' + esc(fwLabel(a.framework)) + '</div>' +
           '<div class="agent-addr" title="' + esc(a.address) + '">' + esc(shortAddr(a.address)) + '</div>' +
+          wsLabel +
           reportsHtml +
         '</div>' +
       '</div>';
     }).join("");
+    // "+ Attach another" tile — persistent so operators can add agents even
+    // when others are already connected (auto-attach handles the common case,
+    // this is the manual escape hatch).
+    var addTile = '<button type="button" class="agent-add-tile" id="attach-open" title="Manage local agents">' +
+      '<span class="agent-add-ico">' +
+        '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>' +
+      '</span>' +
+      '<span class="agent-add-label">Attach agent</span>' +
+    '</button>';
+    strip.innerHTML = cards + addTile;
   }
 
   function renderAttachTargets(targets, note) {
@@ -2168,36 +2289,207 @@
     '</tr>';
   }
 
-  // ---------- Audit trail (the full local history) ----------
+  // ---------- Audit trail — unified activity feed ----------
   var AUDIT_PAGE = 100, AUDIT_MAX = 500, auditLoaded = AUDIT_PAGE;
-  // Shared empty-state row for both findings tables (same shield-check icon).
+  var activityCache = null;
+  var activityFilter = "all";  // "all" | "threats"
+
+  // Shared empty-state row (colspan matches audit table width).
   function emptyRow(strong, msg) {
-    return '<tr><td colspan="5"><div class="empty">' +
-      '<svg class="e-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/></svg>' +
+    return '<tr><td colspan="4"><div class="empty">' +
+      '<svg class="e-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>' +
       '<strong>' + strong + '</strong>' + msg + '</div></td></tr>';
   }
+
+  // Group event names into a UI category (drives pill color + label class).
+  function evtGroup(ev) {
+    if (ev === "flagged" || ev === "blocked") return "threat";
+    if (ev === "pre_tool_call" || ev === "post_tool_call") return "tool";
+    if (ev === "pre_api_request") return "api";
+    if (ev === "session_start" || ev === "session_end") return "session";
+    if (ev === "file_access") return "file";
+    if (ev === "dependency_install") return "install";
+    return "other";
+  }
+  // Human-readable event names.
+  var EVT_LABEL = {
+    session_start: "Session started",
+    session_end: "Session ended",
+    pre_api_request: "API request",
+    pre_tool_call: "Tool call",
+    post_tool_call: "Tool result",
+    file_access: "File access",
+    dependency_install: "Package install",
+    flagged: "Threat flagged",
+    blocked: "Threat blocked",
+  };
+  function evtLabel(ev) { return EVT_LABEL[ev] || (ev || "event").replace(/_/g, " "); }
+
+  // Format timestamps: "3:46:07 PM" for today, "Jul 5, 3:46 PM" otherwise.
+  function fmtTime(ts, iso) {
+    var d = ts ? new Date(ts * 1000) : (iso ? new Date(iso) : null);
+    if (!d || isNaN(d.getTime())) return esc(iso || "");
+    var now = new Date();
+    var timeStr = d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit", second: "2-digit" });
+    var sameDay = d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth() && d.getDate() === now.getDate();
+    if (sameDay) {
+      return '<div class="au-time">' + esc(timeStr) + '</div><div class="au-time-date">Today</div>';
+    }
+    var dateStr = d.toLocaleDateString(undefined, { month: "short", day: "numeric", year: (d.getFullYear() === now.getFullYear() ? undefined : "numeric") });
+    return '<div class="au-time">' + esc(timeStr) + '</div><div class="au-time-date">' + esc(dateStr) + '</div>';
+  }
+
+  // Build the Details cell for one entry — primary line + optional meta line.
+  function detailCellHTML(entry) {
+    var ev = entry.event;
+    var detail = entry.detail || {};
+    var primary = "", meta = "";
+    if (ev === "flagged" || ev === "blocked") {
+      var f = entry.finding || {};
+      primary = esc(f.title || f.identifier || "Threat");
+      var bits = [];
+      if (f.identifier) bits.push('<code>' + esc(f.identifier) + '</code>');
+      if (f.severity) bits.push(esc(f.severity));
+      if (f.tool_name || detail.tool_name) bits.push('via ' + esc(f.tool_name || detail.tool_name));
+      meta = bits.join(" · ");
+    } else if (ev === "pre_tool_call" || ev === "post_tool_call") {
+      primary = esc(detail.tool_name || "tool");
+      var bits2 = [];
+      if (detail.duration_ms != null) bits2.push(Math.round(detail.duration_ms) + " ms");
+      if (detail.session_id) bits2.push('session ' + esc(String(detail.session_id).slice(-6)));
+      if (entry.findingCount) bits2.push(entry.findingCount + ' finding' + (entry.findingCount === 1 ? '' : 's'));
+      meta = bits2.join(" · ");
+    } else if (ev === "pre_api_request") {
+      primary = esc(detail.model || detail.provider || "API request");
+      var bits3 = [];
+      if (detail.provider && detail.model) bits3.push(esc(detail.provider));
+      if (detail.session_id) bits3.push('session ' + esc(String(detail.session_id).slice(-6)));
+      meta = bits3.join(" · ");
+    } else if (ev === "session_start") {
+      primary = "session " + esc(String(detail.session_id || "").slice(-6) || "started");
+      meta = detail.session_id ? '<code>' + esc(detail.session_id) + '</code>' : "";
+    } else if (ev === "session_end") {
+      primary = "session " + esc(String(detail.session_id || "").slice(-6) || "ended");
+      var bits4 = [];
+      if (detail.interrupted) bits4.push("interrupted");
+      else if (detail.completed) bits4.push("completed");
+      meta = bits4.join(" · ");
+    } else if (ev === "file_access") {
+      primary = (entry.mode ? esc(entry.mode) + " " : "") + esc(entry.path || "");
+      meta = entry.tool ? ("via " + esc(entry.tool)) : "";
+    } else if (ev === "dependency_install") {
+      primary = esc((entry.ecosystem || "") + ":" + (entry.name || "") + "@" + (entry.version || ""));
+      meta = entry.tool ? ("via " + esc(entry.tool)) : "";
+    } else {
+      primary = esc(detail.identifier || detail.name || detail.path || "event");
+    }
+    var out = '<div class="au-detail-primary">' + primary + '</div>';
+    if (meta) out += '<div class="au-detail-meta">' + meta + '</div>';
+    return out;
+  }
+
+  function auditRowHTML(entry, idx) {
+    var isThreat = entry.event === "flagged" || entry.event === "blocked";
+    var grp = evtGroup(entry.event);
+    var fw = entry.framework || (entry.finding && entry.finding.framework) || "hermes";
+    var agentCell = '<span class="au-agent">' +
+      fwIcon(fw) +
+      '<span>' + esc(fwLabel(fw)) + '</span>' +
+      '</span>';
+    var eventCell = '<span class="au-event ev-' + grp + '"><span class="dot"></span>' + esc(evtLabel(entry.event)) + '</span>';
+    return '<tr class="' + (isThreat ? "threat-row" : "") + '" data-idx="' + idx + '">' +
+      '<td>' + fmtTime(entry.ts, entry.iso) + '</td>' +
+      '<td>' + agentCell + '</td>' +
+      '<td>' + eventCell + '</td>' +
+      '<td><div class="au-detail">' + detailCellHTML(entry) + '</div></td>' +
+    '</tr>';
+  }
+
   function renderAuditTrail(data) {
-    var list = asList(data);
-    var total = (data && data.total != null) ? data.total : list.length;
+    if (data !== undefined) activityCache = data;
+    data = activityCache;
+    var entries = (data && Array.isArray(data.entries)) ? data.entries : [];
+    var filtered = (activityFilter === "threats")
+      ? entries.filter(function (e) { return e.event === "flagged" || e.event === "blocked"; })
+      : entries;
+    var total = (data && data.total != null) ? data.total : entries.length;
     var body = $("audit-body");
     if (!body) return;
-    if (!list.length) {
-      auditRendered = [];
-      body.innerHTML = emptyRow("No threats detected yet", "Everything Guardian flags will be logged here.");
+
+    auditRendered = filtered; // for row-click lookup
+    if (!filtered.length) {
+      body.innerHTML = emptyRow(
+        activityFilter === "threats" ? "No threats yet" : "No activity yet",
+        activityFilter === "threats"
+          ? "Everything Guardian flags will appear here."
+          : "Once agents send messages, their actions show here."
+      );
     } else {
-      auditRendered = list;
-      body.innerHTML = list.map(findingRowHTML).join("");
+      body.innerHTML = filtered.map(auditRowHTML).join("");
     }
-    var shown = Math.min(list.length, total);
+
+    var threatCount = entries.filter(function (e) { return e.event === "flagged" || e.event === "blocked"; }).length;
     var totalEl = $("audit-total");
-    if (totalEl) totalEl.textContent = total + (total === 1 ? " threat detected" : " threats detected");
+    if (totalEl) totalEl.textContent = threatCount + (threatCount === 1 ? " threat · " : " threats · ") + total + " total";
     var shownEl = $("audit-shown");
-    if (shownEl) shownEl.textContent = total ? ("Showing " + shown + " of " + total) : "";
+    if (shownEl) shownEl.textContent = filtered.length ? ("Showing " + filtered.length + " of " + (activityFilter === "threats" ? threatCount : total)) : "";
     var more = $("audit-more");
-    if (more) more.hidden = !(shown < total && auditLoaded < AUDIT_MAX);
+    if (more) more.hidden = !(entries.length < total && auditLoaded < AUDIT_MAX);
   }
   function loadAudit() {
-    return getJSON("/api/findings?limit=" + auditLoaded + "&offset=0").then(renderAuditTrail).catch(function () {});
+    return getJSON("/api/audit?limit=" + auditLoaded + "&offset=0").then(renderAuditTrail).catch(function () {});
+  }
+  function setActivityFilter(v) {
+    activityFilter = v;
+    var all = $("filter-all"), threats = $("filter-threats");
+    if (all) { all.classList.toggle("active", v === "all"); all.setAttribute("aria-pressed", v === "all"); }
+    if (threats) { threats.classList.toggle("active", v === "threats"); threats.setAttribute("aria-pressed", v === "threats"); }
+    renderAuditTrail();
+  }
+
+  // Event-detail modal — opened when a non-threat row is clicked.
+  function openActivityModal(entry) {
+    var overlay = document.getElementById("activity-modal");
+    if (!overlay) return;
+    var title = document.getElementById("activity-title");
+    var sub = document.getElementById("activity-sub");
+    var body = document.getElementById("activity-detail-body");
+    if (title) title.textContent = evtLabel(entry.event);
+    if (sub) sub.textContent = fmtTimePlain(entry.ts, entry.iso);
+    if (body) body.innerHTML = activityDetailBodyHTML(entry);
+    overlay.setAttribute("aria-hidden", "false");
+    overlay.classList.add("open");
+  }
+  function closeActivityModal() {
+    var overlay = document.getElementById("activity-modal");
+    if (!overlay) return;
+    overlay.classList.remove("open");
+    overlay.setAttribute("aria-hidden", "true");
+  }
+  function fmtTimePlain(ts, iso) {
+    var d = ts ? new Date(ts * 1000) : (iso ? new Date(iso) : null);
+    if (!d || isNaN(d.getTime())) return iso || "";
+    return d.toLocaleString();
+  }
+  function activityDetailBodyHTML(entry) {
+    var fw = entry.framework || "hermes";
+    var detail = entry.detail || {};
+    var kv = '<dl class="ad-kv">' +
+      '<dt>Agent</dt><dd>' + fwIcon(fw) + ' ' + esc(fwLabel(fw)) + '</dd>' +
+      '<dt>Event</dt><dd>' + esc(evtLabel(entry.event)) + '</dd>' +
+      '<dt>Time</dt><dd>' + esc(fmtTimePlain(entry.ts, entry.iso)) + '</dd>';
+    if (detail.session_id) kv += '<dt>Session</dt><dd><code>' + esc(detail.session_id) + '</code></dd>';
+    if (detail.tool_name) kv += '<dt>Tool</dt><dd>' + esc(detail.tool_name) + '</dd>';
+    if (detail.model) kv += '<dt>Model</dt><dd>' + esc(detail.model) + '</dd>';
+    if (detail.provider) kv += '<dt>Provider</dt><dd>' + esc(detail.provider) + '</dd>';
+    if (detail.duration_ms != null) kv += '<dt>Duration</dt><dd>' + Math.round(detail.duration_ms) + ' ms</dd>';
+    if (entry.path) kv += '<dt>Path</dt><dd><code>' + esc(entry.path) + '</code></dd>';
+    if (entry.mode) kv += '<dt>Mode</dt><dd>' + esc(entry.mode) + '</dd>';
+    if (entry.ecosystem) kv += '<dt>Package</dt><dd><code>' + esc(entry.ecosystem + ':' + (entry.name || '') + '@' + (entry.version || '')) + '</code></dd>';
+    if (entry.tool) kv += '<dt>Via</dt><dd>' + esc(entry.tool) + '</dd>';
+    kv += '</dl>';
+    var raw = JSON.stringify(entry, null, 2);
+    return kv + '<div class="ad-json">' + esc(raw) + '</div>';
   }
 
   function renderFindings(data) {
@@ -2339,7 +2631,44 @@
     });
   }
   wireFindingRows("findings-body", function () { return findingsRendered; });
-  wireFindingRows("audit-body", function () { return auditRendered; });
+
+  // Audit rows: route threats → threat modal, everything else → activity modal.
+  (function wireAuditRows() {
+    var body = $("audit-body");
+    if (!body) return;
+    function openFrom(el) {
+      var tr = el && el.closest ? el.closest("tr[data-idx]") : null;
+      if (!tr) return;
+      var entry = (auditRendered || [])[Number(tr.getAttribute("data-idx"))];
+      if (!entry) return;
+      if (entry.event === "flagged" || entry.event === "blocked") {
+        var f = entry.finding || {};
+        // Flatten finding for openFindingModal, matching its expected shape.
+        openFindingModal({
+          identifier: f.identifier, severity: f.severity, category: f.category,
+          title: f.title, framework: f.framework || entry.framework,
+          tool_name: f.tool_name || (entry.detail && entry.detail.tool_name),
+          evidence: f.evidence || f.title, source: f.source || "public",
+          confirmed: f.confirmed !== false, time: entry.iso, ts: entry.ts,
+        });
+      } else {
+        openActivityModal(entry);
+      }
+    }
+    body.addEventListener("click", function (e) { openFrom(e.target); });
+    body.addEventListener("keydown", function (e) {
+      if ((e.key === "Enter" || e.key === " ") && e.target.matches && e.target.matches("tr[data-idx]")) {
+        e.preventDefault();
+        openFrom(e.target);
+      }
+    });
+  })();
+
+  // Wire the "All activity / Threats only" filter chips.
+  var filterAllBtn = $("filter-all");
+  var filterThreatsBtn = $("filter-threats");
+  if (filterAllBtn) filterAllBtn.addEventListener("click", function () { setActivityFilter("all"); });
+  if (filterThreatsBtn) filterThreatsBtn.addEventListener("click", function () { setActivityFilter("threats"); });
 
   // wire audit-trail "load more"
   var auditMoreBtn = $("audit-more");
@@ -2736,6 +3065,14 @@
     if (e.target && e.target.id === "attach-scan") scanAttachTargets();
     if (e.target && e.target.id === "attach-apply") attachSelected();
     if (e.target && e.target.id === "attach-modal") closeAttachModal();
+    if (e.target && e.target.id === "activity-close") closeActivityModal();
+    if (e.target && e.target.id === "activity-modal") closeActivityModal();
+  });
+  document.addEventListener("keydown", function (e) {
+    if (e.key === "Escape") {
+      var overlay = document.getElementById("activity-modal");
+      if (overlay && overlay.classList.contains("open")) closeActivityModal();
+    }
   });
   // warm the settings once at startup so the first open is instant (best-effort)
   loadSettings(false);
@@ -2761,6 +3098,23 @@
       <button class="modal-copy" id="tm-copy">Copy</button>
     </div>
     <div class="modal-body" id="tm-body"></div>
+  </div>
+</div>
+
+<!-- Event detail — opened when a non-threat audit row is clicked -->
+<div class="modal-overlay" id="activity-modal" aria-hidden="true">
+  <div class="modal activity-modal" role="dialog" aria-modal="true" aria-labelledby="activity-title">
+    <button class="modal-close" id="activity-close" aria-label="Close">&#10005;</button>
+    <div class="modal-head">
+      <div class="modal-ico" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
+      </div>
+      <div class="modal-htext">
+        <div class="modal-title" id="activity-title">Event</div>
+        <div class="modal-tags"><span class="section-note" id="activity-sub"></span></div>
+      </div>
+    </div>
+    <div class="modal-body-detail" id="activity-detail-body"></div>
   </div>
 </div>
 

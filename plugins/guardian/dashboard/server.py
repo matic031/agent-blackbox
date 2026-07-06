@@ -18,10 +18,14 @@ rest of the plugin has no web dependency. Served on ``127.0.0.1`` only.
 from __future__ import annotations
 
 import logging
+import threading
+import time
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Set, Tuple
 
 logger = logging.getLogger(__name__)
+
+_RESCAN_INTERVAL_SEC = 5.0
 
 _STATIC_DIR = Path(__file__).resolve().parent / "static"
 _ASSETS_DIR = Path(__file__).resolve().parent / "assets"
@@ -37,6 +41,58 @@ def create_app():
     from ..dkg_client import DkgClient, extract_binding
 
     app = FastAPI(title="Umanitek Agent Guardian", docs_url=None, redoc_url=None)
+
+    _rescan_state: Dict[str, Any] = {"stop": False, "known": set()}
+
+    def _rescan_loop() -> None:
+        """Every ``_RESCAN_INTERVAL_SEC`` seconds: attach any new Hermes/OpenClaw
+        workspaces on this machine, and log workspaces that disappeared."""
+        while not _rescan_state["stop"]:
+            try:
+                current: Set[Tuple[str, str]] = set()
+                for h in attach.discover_hermes_homes():
+                    current.add(("hermes", str(h)))
+                for w in attach.discover_openclaw_workspaces():
+                    current.add(("openclaw", str(w)))
+                known: Set[Tuple[str, str]] = _rescan_state["known"]
+                added = current - known
+                removed = known - current
+                for kind, target in added:
+                    try:
+                        if kind == "hermes":
+                            row = attach.attach_hermes(Path(target))
+                        else:
+                            row = attach.attach_openclaw(Path(target))
+                        if row.get("error"):
+                            logger.warning("guardian rescan: attach %s %s failed: %s", kind, target, row["error"])
+                        elif not row.get("already"):
+                            logger.info("guardian rescan: auto-attached %s at %s", kind, target)
+                    except Exception as exc:  # pragma: no cover - fail open
+                        logger.debug("guardian rescan: attach %s %s raised: %s", kind, target, exc)
+                for kind, target in removed:
+                    logger.info("guardian rescan: %s workspace vanished at %s", kind, target)
+                _rescan_state["known"] = current
+            except Exception as exc:  # pragma: no cover - fail open
+                logger.debug("guardian rescan: iteration failed: %s", exc)
+            for _ in range(int(_RESCAN_INTERVAL_SEC * 10)):
+                if _rescan_state["stop"]:
+                    return
+                time.sleep(0.1)
+
+    @app.on_event("startup")
+    def _start_rescanner() -> None:
+        # NB: intentionally do NOT pre-seed ``known`` — attach is idempotent
+        # (already-attached workspaces return ``{already: True}``), so letting
+        # the first iteration walk every workspace is the safer default. If the
+        # CLI-level attach missed anything (e.g. server started via a different
+        # entry point), we still self-heal on the first tick.
+        t = threading.Thread(target=_rescan_loop, name="guardian-rescan", daemon=True)
+        t.start()
+        logger.info("guardian rescan: background thread started (interval %.1fs)", _RESCAN_INTERVAL_SEC)
+
+    @app.on_event("shutdown")
+    def _stop_rescanner() -> None:
+        _rescan_state["stop"] = True
 
     _PREFIX = "PREFIX g: <http://umanitek.ai/ontology/guardian/> "
 
@@ -115,6 +171,16 @@ def create_app():
             "mode": load_guardian_config().mode,
             "findings": items,
             "total": audit.count_findings(),
+        }
+
+    @app.get("/api/audit")
+    def audit_events(limit: int = Query(100, ge=1, le=1000), offset: int = Query(0, ge=0)) -> Any:
+        """Full agent-activity trail: session lifecycle + API + tool-call events."""
+        items = audit.read_audit(limit=limit, offset=offset)
+        return {
+            "mode": load_guardian_config().mode,
+            "entries": items,
+            "total": audit.count_audit(),
         }
 
     @app.get("/api/graph-status")
@@ -244,6 +310,41 @@ def create_app():
                     found[key] = {"framework": fw, "address": str(addr), "reports": n}
         except Exception as exc:  # pragma: no cover - fail open
             logger.debug("guardian dashboard: agents query failed: %s", exc)
+
+        # Attached local workspaces — one card per protected workspace, so two
+        # OpenClaw profiles on the same node wallet render as two agents. Any
+        # entry for the local wallet (from active-frameworks or reporter query)
+        # gets absorbed here so the same framework doesn't render twice.
+        try:
+            attached: List[Tuple[str, str]] = []
+            for h in attach.discover_hermes_homes():
+                attached.append(("hermes", str(h)))
+            for w in attach.discover_openclaw_workspaces():
+                attached.append(("openclaw", str(w)))
+            fw_with_ws = {fw for fw, _ in attached}
+            local_addr_lc = local_addr.lower()
+            for k in list(found.keys()):
+                fw_k, addr_k = k
+                if fw_k in fw_with_ws and addr_k == local_addr_lc:
+                    found.pop(k, None)
+            for fw, ws in attached:
+                ws_name = Path(ws).name or ws
+                key = (fw, ws.lower())
+                if key in found:
+                    found[key]["workspace"] = ws
+                    found[key]["workspace_label"] = ws_name
+                    continue
+                found[key] = {
+                    "framework": fw,
+                    "address": local_addr or fw,
+                    "reports": 0,
+                    "findings": counts_by_fw.get(fw, 0),
+                    "is_local": True,
+                    "workspace": ws,
+                    "workspace_label": ws_name,
+                }
+        except Exception as exc:  # pragma: no cover - fail open
+            logger.debug("guardian dashboard: attached-workspace enumeration failed: %s", exc)
 
         return {"agents": list(found.values())}
 

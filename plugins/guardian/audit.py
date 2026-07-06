@@ -374,6 +374,135 @@ def read_file_access(limit: int = 100, offset: int = 0) -> List[Dict[str, Any]]:
     return out[offset : offset + limit]
 
 
+def _load_jsonl(path: Path, default_event: str) -> List[Dict[str, Any]]:
+    """Load a jsonl file, tagging each row with ``event=default_event`` when
+    the line has no explicit event (e.g. file_access.jsonl, dependencies.jsonl)."""
+    if not path.exists():
+        return []
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except Exception:
+        return []
+    out: List[Dict[str, Any]] = []
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except Exception:
+            continue
+        if "event" not in row:
+            row["event"] = default_event
+        out.append(row)
+    return out
+
+
+#: Default severity per non-finding event type. Everything defaults to ``info``
+#: so the dashboard's "Threats only" filter cleanly hides routine activity.
+_EVENT_SEVERITY = {
+    "session_start": "info",
+    "session_end": "info",
+    "pre_api_request": "info",
+    "pre_tool_call": "info",
+    "post_tool_call": "info",
+    "file_access": "info",
+    "dependency_install": "info",
+}
+
+
+def _finding_event_rows() -> List[Dict[str, Any]]:
+    """Findings from every framework, shaped for the merged activity feed.
+
+    Each row carries an explicit ``framework`` (hermes / openclaw / …) so the
+    dashboard can render an agent icon per row, and lifts finding severity to
+    the top level so the severity filter works uniformly across event types.
+    """
+    out: List[Dict[str, Any]] = []
+    for path, default_fw in _findings_files():
+        if not path.exists():
+            continue
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except Exception:
+            continue
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except Exception:
+                continue
+            finding = rec.get("finding") or (rec.get("findings") or [{}])[0] or {}
+            out.append({
+                "ts": rec.get("ts") or 0,
+                "iso": rec.get("iso") or "",
+                "event": "flagged",
+                "framework": finding.get("framework") or rec.get("framework") or default_fw,
+                "severity": finding.get("severity") or "warning",
+                "finding": finding,
+                "detail": rec.get("detail") or {},
+            })
+    return out
+
+
+def _tag_events(rows: List[Dict[str, Any]], default_event: str, framework: str = "hermes") -> List[Dict[str, Any]]:
+    """Stamp every row with a ``framework`` + default ``event``/``severity`` so
+    later merging can treat every source the same."""
+    out: List[Dict[str, Any]] = []
+    for r in rows:
+        r.setdefault("event", default_event)
+        r.setdefault("framework", framework)
+        r.setdefault("severity", _EVENT_SEVERITY.get(r["event"], "info"))
+        out.append(r)
+    return out
+
+
+def read_audit(limit: int = 100, offset: int = 0) -> List[Dict[str, Any]]:
+    """Return the unified agent-activity feed, newest first, paged.
+
+    Merges five local sources into one timestamped, severity-tagged, framework-
+    aware view for the dashboard's Audit trail:
+      * ``audit.jsonl``            — session lifecycle + tool/API events (hermes)
+      * ``file_access.jsonl``      — sensitive-path reads (hermes, info)
+      * ``dependencies.jsonl``     — install visibility (hermes, info)
+      * ``findings.jsonl``         — threats detected by hermes (severity from finding)
+      * ``findings.<fw>.jsonl``    — threats detected by other agents (openclaw, …)
+
+    Sorted by ``ts`` descending. Fail-open per source.
+    """
+    home = _home()
+    merged: List[Dict[str, Any]] = []
+    merged.extend(_tag_events(_load_jsonl(home / "audit.jsonl", "event"), "event"))
+    merged.extend(_tag_events(_load_jsonl(home / "file_access.jsonl", "file_access"), "file_access"))
+    merged.extend(_tag_events(_load_jsonl(home / "dependencies.jsonl", "dependency_install"), "dependency_install"))
+    merged.extend(_finding_event_rows())
+    merged.sort(key=lambda r: r.get("ts") or 0, reverse=True)
+    return merged[offset : offset + limit]
+
+
+def count_audit() -> int:
+    """Total merged activity rows on disk (fail-open: returns 0 on any error)."""
+    total = 0
+    for name in ("audit.jsonl", "file_access.jsonl", "dependencies.jsonl"):
+        path = _home() / name
+        if not path.exists():
+            continue
+        try:
+            total += sum(1 for ln in path.read_text(encoding="utf-8").splitlines() if ln.strip())
+        except Exception:
+            continue
+    for path, _ in _findings_files():
+        if not path.exists():
+            continue
+        try:
+            total += sum(1 for ln in path.read_text(encoding="utf-8").splitlines() if ln.strip())
+        except Exception:
+            continue
+    return total
+
+
 def write_private_audit_ka(client: Any, cg_id: str, event: str, finding: Dict[str, Any]) -> None:
     """Write a private WM audit KA carrying the observed command/prompt.
 

@@ -110,9 +110,10 @@ def discover_openclaw_workspaces() -> List[Path]:
     """Return existing local OpenClaw workspaces (those with an ``openclaw.json``).
 
     Candidate roots come from ``$OPENCLAW_STATE_DIR``, ``$OPENCLAW_HOME/.openclaw``,
-    ``~/.openclaw``, ``~/.openclaw-dev`` and the legacy ``~/.clawdbot``. Only
-    directories that actually contain an ``openclaw.json`` are returned (an
-    existing install), de-duplicated preserving order.
+    the legacy ``~/.clawdbot``, **and any ``~/.openclaw*`` profile directory**
+    (so ``openclaw --profile prod`` writing to ``~/.openclaw-prod`` is picked up
+    live without any config change on our side). Only directories that actually
+    contain an ``openclaw.json`` are returned, de-duplicated preserving order.
     """
     candidates: List[Path] = []
 
@@ -132,8 +133,17 @@ def discover_openclaw_workspaces() -> List[Path]:
     openclaw_home = os.environ.get("OPENCLAW_HOME")
     if openclaw_home and openclaw_home.strip():
         _add(Path(openclaw_home.strip()) / ".openclaw")
-    _add(Path.home() / ".openclaw")
-    _add(Path.home() / ".openclaw-dev")
+
+    # Glob every ``~/.openclaw*`` profile so any --profile/--dev workspace
+    # created after the dashboard started still gets auto-attached.
+    try:
+        home = Path.home()
+        for candidate in sorted(home.glob(".openclaw*")):
+            if candidate.is_dir():
+                _add(candidate)
+    except Exception:  # pragma: no cover - defensive
+        pass
+
     _add(Path.home() / ".clawdbot")  # legacy name
 
     return [c for c in candidates if (c / "openclaw.json").is_file()]
