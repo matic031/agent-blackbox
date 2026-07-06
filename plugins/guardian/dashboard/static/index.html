@@ -3365,6 +3365,7 @@
 
   var chatBusy = false;
   var CHAT_STORAGE_KEY = "guardian.dashboard.chat.v1";
+  var CHAT_SESSION_KEY = "guardian.dashboard.session.v1";
   var CHAT_PAGE_SIZE = 20;
   var CHAT_WAIT_MESSAGES = [
     "I’m checking the local Guardian state…",
@@ -3383,6 +3384,13 @@
   }
   function saveChatHistory(items) {
     try { localStorage.setItem(CHAT_STORAGE_KEY, JSON.stringify(items)); } catch (_) {}
+  }
+  function chatSessionId() {
+    try { return localStorage.getItem(CHAT_SESSION_KEY) || ""; } catch (_) { return ""; }
+  }
+  function saveChatSessionId(sessionId) {
+    if (!sessionId) return;
+    try { localStorage.setItem(CHAT_SESSION_KEY, sessionId); } catch (_) {}
   }
   function rememberChat(role, text) {
     if (role !== "user" && role !== "guardian") return;
@@ -3481,7 +3489,6 @@
     if (!input) return;
     var text = input.value.trim();
     if (!text) return;
-    var history = chatHistory();
     input.value = "";
     chatAdd("user", text);
     var waitIndex = 0;
@@ -3492,9 +3499,10 @@
       pending.textContent = CHAT_WAIT_MESSAGES[waitIndex];
     }, 2600);
     setChatBusy(true);
-    postJSON("/api/guardian-chat", { message: text, history: history }).then(function (res) {
+    postJSON("/api/guardian-chat", { message: text, session_id: chatSessionId() }).then(function (res) {
       var body = res.body || {};
       clearInterval(waitTimer);
+      if (body.session_id) saveChatSessionId(body.session_id);
       if (pending && pending.parentNode) pending.parentNode.removeChild(pending);
       if (res.ok && body.ok) {
         return chatType("guardian", body.answer || "(no response)");

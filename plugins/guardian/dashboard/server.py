@@ -180,28 +180,12 @@ def create_app():
             lines.append(line.rstrip())
         return "\n".join(lines).strip()
 
-    def _chat_prompt(message: str, history: Any) -> str:
-        turns: List[str] = []
-        if isinstance(history, list):
-            for item in history[-16:]:
-                if not isinstance(item, dict):
-                    continue
-                role = str(item.get("role") or "").strip().lower()
-                text = str(item.get("text") or "").strip()
-                if role not in {"user", "guardian"} or not text:
-                    continue
-                label = "User" if role == "user" else "Guardian"
-                turns.append(f"{label}: {text[:2500]}")
-        if not turns:
-            return message
-        context = "\n\n".join(turns)
-        return (
-            "Use the recent Guardian dashboard chat context below to answer the user's latest message. "
-            "Resolve references like 'these', 'it', and 'that' from the context when possible. "
-            "Do not repeat the whole context unless needed.\n\n"
-            f"Recent chat context:\n{context}\n\n"
-            f"Latest user message:\n{message}"
-        )
+    def _parse_chat_session_id(text: str) -> Optional[str]:
+        for line in (text or "").splitlines():
+            stripped = line.strip()
+            if stripped.startswith("session_id:"):
+                return stripped.split(":", 1)[1].strip() or None
+        return None
 
     @app.post("/api/guardian-chat")
     def guardian_chat(payload: Dict[str, Any] = Body(...)) -> Any:
@@ -211,11 +195,14 @@ def create_app():
             return JSONResponse({"ok": False, "error": "Message is required."}, status_code=400)
         if len(message) > 4000:
             return JSONResponse({"ok": False, "error": "Message is too long."}, status_code=400)
-        query = _chat_prompt(message, (payload or {}).get("history"))
+        session_id = str((payload or {}).get("session_id") or "").strip()
         hermes = shutil.which("hermes") or os.environ.get("HERMES_BIN") or "hermes"
+        argv = [hermes, "guardian", "chat", "--query", message, "--quiet", "--pass-session-id"]
+        if session_id:
+            argv.extend(["--resume", session_id])
         try:
             proc = subprocess.run(
-                [hermes, "guardian", "chat", "--query", query, "--quiet"],
+                argv,
                 cwd=str(attach._repo_root()),
                 text=True,
                 capture_output=True,
@@ -226,11 +213,15 @@ def create_app():
         except Exception as exc:
             logger.debug("guardian dashboard: chat failed: %s", exc)
             return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
+        next_session_id = _parse_chat_session_id(proc.stderr) or _parse_chat_session_id(proc.stdout) or session_id
         answer = _clean_chat_output(proc.stdout)
         err = _clean_chat_output(proc.stderr)
         if proc.returncode != 0:
-            return JSONResponse({"ok": False, "error": err or answer or "Guardian chat failed."}, status_code=500)
-        return {"ok": True, "answer": answer or "(no response)"}
+            return JSONResponse(
+                {"ok": False, "error": err or answer or "Guardian chat failed.", "session_id": next_session_id},
+                status_code=500,
+            )
+        return {"ok": True, "answer": answer or "(no response)", "session_id": next_session_id}
 
     @app.get("/api/findings")
     def findings(limit: int = Query(50, ge=1, le=500), offset: int = Query(0, ge=0)) -> Any:
