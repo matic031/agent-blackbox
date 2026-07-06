@@ -27,6 +27,7 @@ _OSV_BATCH_URL = "https://api.osv.dev/v1/querybatch"
 _GUARDIAN_CHAT_PROFILE = "guardian"
 _GUARDIAN_SOUL_MARKER = "<!-- managed-by: hermes-guardian-chat -->"
 _GUARDIAN_SOURCE_ROOT_MARKER = ".guardian-source-root"
+_GUARDIAN_CONTEXT_FILE_MAX_CHARS = 100_000
 _GUARDIAN_SOUL = f"""{_GUARDIAN_SOUL_MARKER}
 # Umanitek Agent Guardian
 
@@ -247,6 +248,7 @@ def _ensure_guardian_chat_profile(profile: str = _GUARDIAN_CHAT_PROFILE) -> str:
         )
     profile_dir = get_profile_dir(profile)
     _write_guardian_soul(profile_dir)
+    _ensure_guardian_context_cap(profile_dir)
     attach.attach_hermes(profile_dir)
     return profile
 
@@ -336,6 +338,24 @@ def _write_guardian_soul(profile_dir: Path) -> None:
             except OSError:
                 pass
     soul_path.write_text(_GUARDIAN_SOUL, encoding="utf-8")
+
+
+def _ensure_guardian_context_cap(profile_dir: Path) -> None:
+    config_path = profile_dir / "config.yaml"
+    if attach.yaml is None:
+        if not config_path.exists():
+            config_path.parent.mkdir(parents=True, exist_ok=True)
+            config_path.write_text(
+                f"context_file_max_chars: {_GUARDIAN_CONTEXT_FILE_MAX_CHARS}\n",
+                encoding="utf-8",
+            )
+        return
+    data = attach._load_yaml(config_path)
+    current = data.get("context_file_max_chars")
+    if isinstance(current, int) and current >= _GUARDIAN_CONTEXT_FILE_MAX_CHARS:
+        return
+    data["context_file_max_chars"] = _GUARDIAN_CONTEXT_FILE_MAX_CHARS
+    attach._dump_yaml(config_path, data)
 
 
 def _guardian_chat_argv(chat_args: Optional[List[str]], profile: str = _GUARDIAN_CHAT_PROFILE) -> List[str]:

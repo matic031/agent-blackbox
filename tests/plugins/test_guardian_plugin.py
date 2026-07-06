@@ -99,6 +99,7 @@ def test_guardian_chat_profile_writes_identity_and_attaches(tmp_path, monkeypatc
     assert "Hermes default identity" in (profile_dir / "SOUL.md.before-guardian-chat").read_text(
         encoding="utf-8"
     )
+    assert cli_mod.attach._load_yaml(profile_dir / "config.yaml")["context_file_max_chars"] == 100_000
     assert calls == [profile_dir]
 
 
