@@ -94,10 +94,26 @@ def test_guardian_chat_profile_writes_identity_and_attaches(tmp_path, monkeypatc
     assert cli_mod._ensure_guardian_chat_profile() == "guardian"
     soul = (profile_dir / "SOUL.md").read_text(encoding="utf-8")
     assert "You are Guardian" in soul
+    assert "connected agents" in soul
+    assert "http://127.0.0.1:9700/api/agents" in soul
     assert "Hermes default identity" in (profile_dir / "SOUL.md.before-guardian-chat").read_text(
         encoding="utf-8"
     )
     assert calls == [profile_dir]
+
+
+def test_guardian_chat_cwd_prefers_recorded_source_root(tmp_path, monkeypatch):
+    installed = tmp_path / "installed" / "guardian"
+    installed.mkdir(parents=True)
+    repo = tmp_path / "repo"
+    (repo / "plugins" / "guardian").mkdir(parents=True)
+    (repo / "plugins" / "guardian" / "cli.py").write_text("", encoding="utf-8")
+    (installed / ".guardian-source-root").write_text(str(repo), encoding="utf-8")
+
+    monkeypatch.setattr(cli_mod, "__file__", str(installed / "cli.py"))
+    monkeypatch.setattr(cli_mod.attach, "_repo_root", lambda: tmp_path / "wrong")
+
+    assert cli_mod._guardian_chat_cwd() == repo.resolve()
 
 
 def _escalation_ruleset():

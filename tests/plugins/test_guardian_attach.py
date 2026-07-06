@@ -123,6 +123,21 @@ def test_attach_hermes_copies_plugin_and_enables(fake_env):
     assert "providers" in data
 
 
+def test_copy_plugin_tree_records_source_checkout(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    src = repo / "plugins" / "guardian"
+    src.mkdir(parents=True)
+    (repo / ".git").mkdir()
+    (src / "__init__.py").write_text("", encoding="utf-8")
+    (src / "cli.py").write_text("", encoding="utf-8")
+    dest = tmp_path / "dest"
+
+    monkeypatch.setattr(attach, "_bundle_openclaw_plugin", lambda _src, _dest: None)
+    attach._copy_plugin_tree(src, dest)
+
+    assert (dest / ".guardian-source-root").read_text(encoding="utf-8") == str(repo)
+
+
 def test_attach_hermes_is_idempotent(fake_env):
     home = fake_env["hermes_default"]
     attach.attach_hermes(home)

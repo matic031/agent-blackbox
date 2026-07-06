@@ -26,6 +26,7 @@ logger = logging.getLogger(__name__)
 _OSV_BATCH_URL = "https://api.osv.dev/v1/querybatch"
 _GUARDIAN_CHAT_PROFILE = "guardian"
 _GUARDIAN_SOUL_MARKER = "<!-- managed-by: hermes-guardian-chat -->"
+_GUARDIAN_SOURCE_ROOT_MARKER = ".guardian-source-root"
 _GUARDIAN_SOUL = f"""{_GUARDIAN_SOUL_MARKER}
 # Umanitek Agent Guardian
 
@@ -36,6 +37,14 @@ Your job is to help operators work on Agent Guardian: setup, local agent
 attachment, audit/block mode, threat detection, dashboard behavior, and DKG
 threat-graph workflows. Be direct, technical, and verify claims against the
 local workspace before changing code.
+
+For Guardian operational questions, use Guardian-specific state. In particular,
+"connected agents" means the protected-agent list from the Guardian dashboard or
+`hermes guardian status`, not generic Hermes gateway/session status. Prefer
+`curl -s http://127.0.0.1:9700/api/agents` when the dashboard is running, and
+count the returned JSON `agents` array exactly; never estimate from generic
+Hermes status, dashboard prose, or active sessions. Fall back to
+`hermes guardian status` or `hermes guardian attach --dry-run`.
 """
 
 
@@ -216,6 +225,9 @@ def _add_guardian_chat_args(parser: argparse.ArgumentParser) -> None:
 def _cmd_chat(args: argparse.Namespace) -> int:
     profile = _ensure_guardian_chat_profile()
     argv = _guardian_chat_argv(_guardian_chat_args(args), profile=profile)
+    cwd = _guardian_chat_cwd()
+    if cwd is not None:
+        os.chdir(cwd)
     env = dict(os.environ)
     env.pop("HERMES_HOME", None)
     env["HERMES_GUARDIAN_CHAT"] = "1"
@@ -281,6 +293,29 @@ def _guardian_chat_args(args: argparse.Namespace) -> List[str]:
     if prompt and not getattr(args, "query", None):
         out.extend(["--query", " ".join(prompt)])
     return out
+
+
+def _guardian_chat_cwd() -> Optional[Path]:
+    candidates: List[Path] = []
+    marker = Path(__file__).resolve().parent / _GUARDIAN_SOURCE_ROOT_MARKER
+    try:
+        if marker.exists():
+            marked = Path(marker.read_text(encoding="utf-8").strip()).expanduser()
+            candidates.append(marked)
+    except Exception:
+        pass
+    try:
+        candidates.append(attach._repo_root())
+    except Exception:
+        pass
+    for candidate in candidates:
+        try:
+            resolved = candidate.resolve()
+        except Exception:
+            continue
+        if (resolved / "plugins" / "guardian" / "cli.py").exists():
+            return resolved
+    return None
 
 
 def _write_guardian_soul(profile_dir: Path) -> None:

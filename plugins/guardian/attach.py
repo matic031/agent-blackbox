@@ -26,6 +26,7 @@ from . import constants
 logger = logging.getLogger(__name__)
 _GUARDIAN_CHAT_PROFILE = "guardian"
 _GUARDIAN_CHAT_SOUL_MARKER = "<!-- managed-by: hermes-guardian-chat -->"
+_SOURCE_ROOT_MARKER = ".guardian-source-root"
 
 try:  # PyYAML ships with hermes; degrade gracefully if it is somehow absent.
     import yaml
@@ -265,6 +266,23 @@ def _copy_plugin_tree(src: Path, dest: Path) -> None:
         shutil.rmtree(dest)
     shutil.copytree(src, dest, ignore=_copy_ignore)
     _bundle_openclaw_plugin(src, dest)
+    source_root = _source_checkout_root(src)
+    if source_root is not None:
+        try:
+            (dest / _SOURCE_ROOT_MARKER).write_text(str(source_root), encoding="utf-8")
+        except OSError:
+            pass
+
+
+def _source_checkout_root(src: Path) -> Optional[Path]:
+    try:
+        resolved = src.resolve()
+        root = resolved.parents[1]
+        if (root / ".git").exists() and (root / "plugins" / "guardian").resolve() == resolved:
+            return root
+    except Exception:
+        return None
+    return None
 
 
 def _bundle_openclaw_plugin(src: Path, dest: Path) -> None:
