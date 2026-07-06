@@ -207,6 +207,7 @@ the rest of the dashboard):
 ```
 hermes guardian status                 # config, node reachability, ruleset + findings counts
 hermes guardian sync                   # force a ruleset refresh
+hermes guardian chat                   # dedicated Guardian operator chat
 hermes guardian report --type ...      # submit a NEW candidate threat to SWM
                                        #   (injection|escalation|dependency|fileaccess|skill)
 hermes guardian setup-graph            # curator: create + register the public CG (accessPolicy 0, publishPolicy 0)
@@ -220,6 +221,13 @@ hermes guardian dashboard [--port]     # start the loopback dashboard
 hermes guardian setup-llm              # configure the optional LLM injection reviewer
 hermes guardian setup-llm --disable    # turn the LLM reviewer off
 ```
+
+`hermes guardian chat` bootstraps a managed `guardian` profile, writes a
+Guardian-specific `SOUL.md`, pins `context_file_max_chars` high enough for this
+repo's `AGENTS.md`, and launches from the source checkout recorded when the
+plugin was copied into `~/.hermes/plugins/guardian`. The managed profile is a
+control surface, not a protected workload, so attach/dashboard discovery filters
+it out via the managed SOUL marker.
 
 ## Dependencies
 

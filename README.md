@@ -64,6 +64,7 @@ bash guardian-install.sh
 
 ```bash
 hermes                     # start your agent - Umanitek Agent Guardian is already watching
+hermes guardian chat       # start a Guardian-focused operator chat
 hermes guardian dashboard  # open the live threat dashboard
 hermes guardian attach     # protect every local agent
 ```
@@ -78,7 +79,14 @@ Everyday commands:
 hermes guardian status      # config, node health, ruleset + findings counts
 hermes guardian sync        # pull the latest threat graphs right now
 hermes guardian dashboard   # live dashboard at http://127.0.0.1:9700
+hermes guardian chat        # chat with Guardian from this repo's workspace
 ```
+
+`hermes guardian chat` creates and uses a dedicated `guardian` Hermes profile.
+That profile is the control/operator chat for Guardian: it starts from the
+Agent Guardian checkout, answers Guardian-specific questions using the dashboard
+and Guardian CLI state, and is hidden from the dashboard's connected-agent list
+so it is not mistaken for an agent being protected.
 
 Found a threat yourself? Report it to the community graph so every agent sees it:
 
