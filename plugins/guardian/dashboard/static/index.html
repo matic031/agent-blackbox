@@ -975,7 +975,6 @@
   .au-event.ev-file     { background: rgba(251,191,36,0.10);  color: #fcd34d;      border-color: rgba(251,191,36,0.28); }
   .au-event.ev-install  { background: rgba(167,139,250,0.10); color: #c4b5fd;      border-color: rgba(167,139,250,0.28); }
   .au-event.ev-threat   { background: rgba(239,68,68,0.12);   color: #fca5a5;      border-color: rgba(239,68,68,0.35); }
-  .au-event .dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; opacity: .9; }
 
   /* Details cell */
   .au-detail {
@@ -1908,6 +1907,33 @@
         return '<a href="' + esc(u) + '" target="_blank" rel="noopener noreferrer">' + linkIconSVG() + '<span>' + esc(u) + '</span></a>';
       }).join("") + '</div>';
   }
+  // Map an advisory id to its canonical report page.
+  function advisoryUrl(id) {
+    id = String(id).trim();
+    if (/^GHSA-/i.test(id)) return "https://github.com/advisories/" + id;
+    if (/^CVE-/i.test(id)) return "https://nvd.nist.gov/vuln/detail/" + id.toUpperCase();
+    if (/^(MAL|OSV|PYSEC|GO|RUSTSEC)-/i.test(id)) return "https://osv.dev/vulnerability/" + id;
+    return "";
+  }
+  // Pull advisory ids out of whatever the finding recorded (evidence carries
+  // "pkg@ver (MAL-2023-1576)"), so we can link the report even when the live
+  // graph lookup is unavailable.
+  function findingAdvisoryRefs(f) {
+    var text = [f.evidence, f.matched, f.advisory_id, f.advisoryId, f.title, f.identifier]
+      .filter(Boolean).join("  ");
+    var re = /\b(MAL-\d{4}-\d+|GHSA-[a-z0-9]{4}-[a-z0-9]{4}-[a-z0-9]{4}|CVE-\d{4}-\d+|PYSEC-\d{4}-\d+|GO-\d{4}-\d+|RUSTSEC-\d{4}-\d+|OSV-\d{4}-\d+)\b/gi;
+    var out = [], seen = {}, m;
+    while ((m = re.exec(text))) {
+      var key = m[1].toUpperCase();
+      if (seen[key]) continue;
+      seen[key] = 1;
+      var url = advisoryUrl(m[1]);
+      if (url) out.push(url);
+    }
+    // Also honour any explicit reference URLs already on the finding.
+    if (Array.isArray(f.references)) f.references.forEach(function (u) { if (u && out.indexOf(u) < 0) out.push(u); });
+    return out;
+  }
   function reportersHTML(d) {
     if (typeof d.reporters !== "number" || d.reporters <= 0) return "";
     return '<div class="modal-reporters"><div class="big">' + d.reporters + '</div>' +
@@ -2015,7 +2041,10 @@
     add("Trigger", EVENT_LABEL[String(f.event || "")] || f.event);
     add("Source", SRC_LONG[srcKey(f)]);
     add("Evidence", f.evidence || f.matched, true);
-    return gridHTML(rows);
+    var base = gridHTML(rows);
+    var advRefs = findingAdvisoryRefs(f);
+    if (advRefs.length) base += refsHTML(advRefs);
+    return base;
   }
 
   // Extra intel from the threat graph, appended below the finding's own facts.
@@ -2475,7 +2504,7 @@
       fwIcon(fw) +
       '<span>' + esc(fwLabel(fw)) + '</span>' +
       '</span>';
-    var eventCell = '<span class="au-event ev-' + grp + '"><span class="dot"></span>' + esc(evtLabel(entry.event)) + '</span>';
+    var eventCell = '<span class="au-event ev-' + grp + '">' + esc(evtLabel(entry.event)) + '</span>';
     return '<tr class="' + (isThreat ? "threat-row" : "") + '" data-idx="' + idx + '">' +
       '<td>' + fmtTime(entry.ts, entry.iso) + '</td>' +
       '<td>' + agentCell + '</td>' +
