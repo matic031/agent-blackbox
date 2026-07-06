@@ -146,6 +146,141 @@
   .gear-btn:hover { color: var(--mint); border-color: rgba(128,202,156,0.40); background: rgba(128,202,156,0.08); }
   .gear-btn:hover svg { transform: rotate(35deg); transition: transform .3s ease; }
   .gear-btn:focus-visible { outline: 2px solid var(--mint); outline-offset: 2px; color: var(--text); }
+  .chat-btn:hover svg { transform: none; }
+
+  /* ---------- Guardian chat side sheet ---------- */
+  .chat-scrim {
+    position: fixed;
+    inset: 0;
+    z-index: 1100;
+    background: rgba(5,5,5,0.45);
+    backdrop-filter: blur(4px);
+    -webkit-backdrop-filter: blur(4px);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity .18s ease;
+  }
+  .chat-scrim.open { opacity: 1; pointer-events: auto; }
+  .chat-sheet {
+    position: fixed;
+    top: 0;
+    right: 0;
+    z-index: 1101;
+    width: min(460px, 100vw);
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    background: linear-gradient(180deg, var(--elevated), var(--panel));
+    border-left: 1px solid var(--border);
+    box-shadow: -28px 0 70px rgba(0,0,0,0.55);
+    transform: translateX(100%);
+    transition: transform .22s cubic-bezier(.2,.7,.3,1);
+  }
+  .chat-scrim.open .chat-sheet { transform: translateX(0); }
+  .chat-head {
+    display: flex;
+    align-items: center;
+    gap: 13px;
+    padding: 22px 58px 18px 22px;
+    border-bottom: 1px solid var(--border);
+    position: relative;
+  }
+  .chat-ico {
+    width: 42px;
+    height: 42px;
+    border-radius: 12px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: color-mix(in srgb, var(--mint) 13%, transparent);
+    border: 1px solid color-mix(in srgb, var(--mint) 34%, transparent);
+    color: var(--mint);
+    flex: 0 0 auto;
+  }
+  .chat-ico svg { width: 22px; height: 22px; display: block; }
+  .chat-title { font-size: 16px; font-weight: 650; color: var(--text); line-height: 1.3; }
+  .chat-sub { font-size: 12px; color: var(--muted); margin-top: 2px; }
+  .chat-close {
+    position: absolute;
+    top: 18px;
+    right: 18px;
+    width: 30px;
+    height: 30px;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: rgba(255,255,255,0.04);
+    color: var(--muted);
+    cursor: pointer;
+    font-size: 18px;
+    line-height: 1;
+  }
+  .chat-close:hover { color: var(--text); background: rgba(255,255,255,0.09); border-color: #333; }
+  .chat-log {
+    flex: 1 1 auto;
+    overflow-y: auto;
+    padding: 20px 22px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+  .chat-msg {
+    max-width: 88%;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 10px 12px;
+    font-size: 13px;
+    line-height: 1.55;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+  .chat-msg.user {
+    align-self: flex-end;
+    color: #0D0D0D;
+    background: var(--mint);
+    border-color: var(--mint);
+  }
+  .chat-msg.guardian {
+    align-self: flex-start;
+    color: var(--text);
+    background: rgba(255,255,255,0.035);
+  }
+  .chat-msg.pending { color: var(--muted); font-style: italic; }
+  .chat-form {
+    border-top: 1px solid var(--border);
+    padding: 14px 16px 16px;
+    display: flex;
+    gap: 10px;
+    align-items: flex-end;
+  }
+  .chat-input {
+    flex: 1 1 auto;
+    min-height: 42px;
+    max-height: 130px;
+    resize: vertical;
+    border-radius: 10px;
+    border: 1px solid var(--border);
+    background: var(--bg);
+    color: var(--text);
+    font: inherit;
+    font-size: 13px;
+    line-height: 1.45;
+    padding: 10px 12px;
+  }
+  .chat-input:focus-visible { outline: 2px solid var(--mint); outline-offset: 1px; border-color: var(--mint); }
+  .chat-send {
+    flex: 0 0 auto;
+    height: 42px;
+    border: 1px solid var(--mint);
+    border-radius: 10px;
+    background: var(--mint);
+    color: #0D0D0D;
+    font: inherit;
+    font-size: 13px;
+    font-weight: 650;
+    padding: 0 16px;
+    cursor: pointer;
+  }
+  .chat-send:disabled { opacity: 0.55; cursor: default; }
 
   /* ---------- Connection banner ---------- */
   .banner {
@@ -602,6 +737,9 @@
     .stats { grid-template-columns: 1fr; }
     .brand-sub { display: none; }
     .brand-logo { height: 46px; }
+    .chat-sheet { width: 100vw; }
+    .chat-msg { max-width: 94%; }
+    .chat-form { padding: 12px; }
   }
 
   /* ---------- Threat detail modal ---------- */
@@ -1033,6 +1171,9 @@
       <div class="status-pills" aria-live="polite">
         <span class="status-pill offline" id="pill-node" hidden title="The local DKG node is not responding">node offline</span>
         <span class="status-pill mode-audit" id="pill-mode" hidden>audit mode</span>
+        <button type="button" class="gear-btn chat-btn" id="chat-open" aria-label="Chat with Guardian" title="Chat with Guardian">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a4 4 0 0 1-4 4H8l-5 3V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4z"/><path d="M8 9h8M8 13h5"/></svg>
+        </button>
         <button type="button" class="gear-btn" id="settings-open" aria-label="Open detection settings" title="Detection settings">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
         </button>
@@ -3194,6 +3335,86 @@
       if (overlay && overlay.classList.contains("open")) closeActivityModal();
     }
   });
+
+  var chatBusy = false;
+  function chatAdd(role, text, extraClass) {
+    var log = $("chat-log");
+    if (!log) return null;
+    var msg = document.createElement("div");
+    msg.className = "chat-msg " + role + (extraClass ? " " + extraClass : "");
+    msg.textContent = text;
+    log.appendChild(msg);
+    log.scrollTop = log.scrollHeight;
+    return msg;
+  }
+  function openChat() {
+    var panel = $("chat-panel");
+    if (!panel) return;
+    panel.classList.add("open");
+    panel.setAttribute("aria-hidden", "false");
+    var input = $("chat-input");
+    if (input) input.focus();
+  }
+  function closeChat() {
+    var panel = $("chat-panel");
+    if (!panel) return;
+    panel.classList.remove("open");
+    panel.setAttribute("aria-hidden", "true");
+    var trigger = $("chat-open");
+    if (trigger) trigger.focus();
+  }
+  function setChatBusy(busy) {
+    chatBusy = !!busy;
+    var send = $("chat-send");
+    var input = $("chat-input");
+    if (send) { send.disabled = chatBusy; send.textContent = chatBusy ? "Sending…" : "Send"; }
+    if (input) input.disabled = chatBusy;
+  }
+  function submitChat() {
+    if (chatBusy) return;
+    var input = $("chat-input");
+    if (!input) return;
+    var text = input.value.trim();
+    if (!text) return;
+    input.value = "";
+    chatAdd("user", text);
+    var pending = chatAdd("guardian", "Guardian is checking…", "pending");
+    setChatBusy(true);
+    postJSON("/api/guardian-chat", { message: text }).then(function (res) {
+      var body = res.body || {};
+      if (pending && pending.parentNode) pending.parentNode.removeChild(pending);
+      if (res.ok && body.ok) {
+        chatAdd("guardian", body.answer || "(no response)");
+      } else {
+        chatAdd("guardian", body.error || ("Guardian chat failed (HTTP " + res.status + ")."));
+      }
+    }).catch(function () {
+      if (pending && pending.parentNode) pending.parentNode.removeChild(pending);
+      chatAdd("guardian", "Network error. Guardian could not answer.");
+    }).then(function () {
+      setChatBusy(false);
+      if (input) input.focus();
+    });
+  }
+  function wireChat() {
+    var panel = $("chat-panel");
+    var form = $("chat-form");
+    if (!panel || !form || panel.__wired) return;
+    panel.__wired = true;
+    $("chat-open").addEventListener("click", openChat);
+    $("chat-close").addEventListener("click", closeChat);
+    panel.addEventListener("click", function (e) { if (e.target === panel) closeChat(); });
+    form.addEventListener("submit", function (e) { e.preventDefault(); submitChat(); });
+    $("chat-input").addEventListener("keydown", function (e) {
+      if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); submitChat(); }
+    });
+    document.addEventListener("keydown", function (e) {
+      if (e.key === "Escape" && panel.classList.contains("open")) closeChat();
+    });
+  }
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", wireChat);
+  else wireChat();
+
   // warm the settings once at startup so the first open is instant (best-effort)
   loadSettings(false);
 
@@ -3201,6 +3422,28 @@
   setInterval(poll, POLL_MS);
 })();
 </script>
+
+<div class="chat-scrim" id="chat-panel" aria-hidden="true">
+  <aside class="chat-sheet" role="dialog" aria-modal="true" aria-labelledby="chat-title">
+    <div class="chat-head">
+      <div class="chat-ico" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="M9 12l2 2 4-5"/></svg>
+      </div>
+      <div>
+        <div class="chat-title" id="chat-title">Guardian chat</div>
+        <div class="chat-sub">Ask about protected agents, findings, setup, and enforcement.</div>
+      </div>
+      <button type="button" class="chat-close" id="chat-close" aria-label="Close Guardian chat">×</button>
+    </div>
+    <div class="chat-log" id="chat-log" aria-live="polite">
+      <div class="chat-msg guardian">I can inspect Guardian dashboard state, explain findings, and help with local setup.</div>
+    </div>
+    <form class="chat-form" id="chat-form">
+      <textarea class="chat-input" id="chat-input" rows="2" maxlength="4000" placeholder="Ask Guardian about this dashboard…"></textarea>
+      <button class="chat-send" id="chat-send" type="submit">Send</button>
+    </form>
+  </aside>
+</div>
 
 <!-- Threat detail modal -->
 <div class="modal-overlay" id="threat-modal" aria-hidden="true">

@@ -18,6 +18,9 @@ rest of the plugin has no web dependency. Served on ``127.0.0.1`` only.
 from __future__ import annotations
 
 import logging
+import os
+import shutil
+import subprocess
 import threading
 import time
 from pathlib import Path
@@ -163,6 +166,47 @@ def create_app():
         except Exception as exc:  # pragma: no cover - fail open
             logger.debug("guardian dashboard: write settings failed: %s", exc)
             return JSONResponse({"ok": False, "errors": ["internal error"]}, status_code=500)
+
+    def _clean_chat_output(text: str) -> str:
+        lines: List[str] = []
+        for line in (text or "").splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            if stripped.startswith("session_id:"):
+                continue
+            if "Context file AGENTS.md TRUNCATED" in stripped:
+                continue
+            lines.append(line.rstrip())
+        return "\n".join(lines).strip()
+
+    @app.post("/api/guardian-chat")
+    def guardian_chat(payload: Dict[str, Any] = Body(...)) -> Any:
+        """Run one scoped Guardian assistant turn through the managed profile."""
+        message = str((payload or {}).get("message") or "").strip()
+        if not message:
+            return JSONResponse({"ok": False, "error": "Message is required."}, status_code=400)
+        if len(message) > 4000:
+            return JSONResponse({"ok": False, "error": "Message is too long."}, status_code=400)
+        hermes = shutil.which("hermes") or os.environ.get("HERMES_BIN") or "hermes"
+        try:
+            proc = subprocess.run(
+                [hermes, "guardian", "chat", "--query", message, "--quiet"],
+                cwd=str(attach._repo_root()),
+                text=True,
+                capture_output=True,
+                timeout=120,
+            )
+        except subprocess.TimeoutExpired:
+            return JSONResponse({"ok": False, "error": "Guardian took too long to answer."}, status_code=504)
+        except Exception as exc:
+            logger.debug("guardian dashboard: chat failed: %s", exc)
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
+        answer = _clean_chat_output(proc.stdout)
+        err = _clean_chat_output(proc.stderr)
+        if proc.returncode != 0:
+            return JSONResponse({"ok": False, "error": err or answer or "Guardian chat failed."}, status_code=500)
+        return {"ok": True, "answer": answer or "(no response)"}
 
     @app.get("/api/findings")
     def findings(limit: int = Query(50, ge=1, le=500), offset: int = Query(0, ge=0)) -> Any:
