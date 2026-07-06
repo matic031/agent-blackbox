@@ -1,5 +1,6 @@
 """Tests for the Guardian plugin registration + hook contract."""
 
+import argparse
 import re
 
 import pytest
@@ -13,6 +14,7 @@ audit = load_guardian("audit")
 ruleset_mod = load_guardian("ruleset")
 config_mod = load_guardian("config")
 quads = load_guardian("quads")
+cli_mod = load_guardian("cli")
 
 
 def test_register_wires_hooks_and_cli():
@@ -35,6 +37,67 @@ def test_register_wires_hooks_and_cli():
         "on_session_end",
     ]
     assert cli and cli[0][0] == "guardian" and callable(cli[0][1])
+
+
+def test_guardian_parser_defaults_to_chat():
+    parser = argparse.ArgumentParser()
+    cli_mod.setup_cli(parser)
+    args = parser.parse_args([])
+    assert args.func is cli_mod._cmd_chat
+
+
+def test_guardian_chat_parser_accepts_query_flags():
+    parser = argparse.ArgumentParser()
+    cli_mod.setup_cli(parser)
+    args = parser.parse_args(["chat", "--query", "who are you?", "--quiet"])
+    assert args.func is cli_mod._cmd_chat
+    assert cli_mod._guardian_chat_args(args) == ["--query", "who are you?", "--quiet"]
+
+
+def test_guardian_chat_wraps_bare_prompt(monkeypatch):
+    monkeypatch.setattr(cli_mod.sys, "argv", ["hermes"])
+    assert cli_mod._guardian_chat_argv(["who", "are", "you?"]) == [
+        "hermes",
+        "--profile",
+        "guardian",
+        "chat",
+        "--query",
+        "who are you?",
+    ]
+    assert cli_mod._guardian_chat_argv(["--tui"]) == [
+        "hermes",
+        "--profile",
+        "guardian",
+        "chat",
+        "--tui",
+    ]
+
+
+def test_guardian_chat_profile_writes_identity_and_attaches(tmp_path, monkeypatch):
+    profile_dir = tmp_path / "guardian"
+    calls = []
+
+    monkeypatch.setattr(cli_mod.attach, "attach_hermes", lambda path: calls.append(path))
+
+    import hermes_cli.profiles as profiles
+
+    monkeypatch.setattr(profiles, "profile_exists", lambda name: False)
+
+    def fake_create_profile(name, clone_config=False, no_alias=False, description=None):
+        profile_dir.mkdir(parents=True)
+        (profile_dir / "SOUL.md").write_text("Hermes default identity", encoding="utf-8")
+        return profile_dir
+
+    monkeypatch.setattr(profiles, "create_profile", fake_create_profile)
+    monkeypatch.setattr(profiles, "get_profile_dir", lambda name: profile_dir)
+
+    assert cli_mod._ensure_guardian_chat_profile() == "guardian"
+    soul = (profile_dir / "SOUL.md").read_text(encoding="utf-8")
+    assert "You are Guardian" in soul
+    assert "Hermes default identity" in (profile_dir / "SOUL.md.before-guardian-chat").read_text(
+        encoding="utf-8"
+    )
+    assert calls == [profile_dir]
 
 
 def _escalation_ruleset():

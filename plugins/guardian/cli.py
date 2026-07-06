@@ -12,6 +12,7 @@ import argparse
 import json
 import logging
 import os
+import sys
 import urllib.request
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -23,6 +24,19 @@ from .dkg_client import DkgClient, DkgError, extract_binding
 logger = logging.getLogger(__name__)
 
 _OSV_BATCH_URL = "https://api.osv.dev/v1/querybatch"
+_GUARDIAN_CHAT_PROFILE = "guardian"
+_GUARDIAN_SOUL_MARKER = "<!-- managed-by: hermes-guardian-chat -->"
+_GUARDIAN_SOUL = f"""{_GUARDIAN_SOUL_MARKER}
+# Umanitek Agent Guardian
+
+You are Guardian, the Umanitek Agent Guardian assistant. When asked who you are,
+answer as Guardian rather than Hermes.
+
+Your job is to help operators work on Agent Guardian: setup, local agent
+attachment, audit/block mode, threat detection, dashboard behavior, and DKG
+threat-graph workflows. Be direct, technical, and verify claims against the
+local workspace before changing code.
+"""
 
 
 # ---------------------------------------------------------------------------
@@ -32,7 +46,20 @@ _OSV_BATCH_URL = "https://api.osv.dev/v1/querybatch"
 
 def setup_cli(parser: argparse.ArgumentParser) -> None:
     """Build the ``hermes guardian`` subparser tree."""
+    parser.set_defaults(func=_cmd_chat)
     sub = parser.add_subparsers(dest="guardian_command")
+
+    chat = sub.add_parser(
+        "chat",
+        help="Start a Guardian-named Hermes chat in the dedicated guardian profile",
+        description=(
+            "Create/update the dedicated Guardian profile, then launch normal "
+            "Hermes chat through that profile. Extra args are passed to "
+            "`hermes --profile guardian chat`; bare text becomes `--query`."
+        ),
+    )
+    _add_guardian_chat_args(chat)
+    chat.set_defaults(func=_cmd_chat)
 
     sub.add_parser("status", help="Show config, node reachability, ruleset + findings counts").set_defaults(
         func=_cmd_status
@@ -150,6 +177,140 @@ def setup_cli(parser: argparse.ArgumentParser) -> None:
 # ---------------------------------------------------------------------------
 # Commands
 # ---------------------------------------------------------------------------
+
+
+def _add_guardian_chat_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("prompt", nargs="*", help='Bare prompt text, e.g. "who are you?"')
+    parser.add_argument("-q", "--query", help="Single query (non-interactive mode)")
+    parser.add_argument("--image", help="Optional local image path to attach to a single query")
+    parser.add_argument("-m", "--model", help="Model to use")
+    parser.add_argument("--provider", help="Inference provider")
+    parser.add_argument("-t", "--toolsets", help="Comma-separated toolsets to enable")
+    parser.add_argument("-s", "--skills", action="append", help="Preload one or more skills")
+    parser.add_argument("-v", "--verbose", action="store_true", help="Verbose output")
+    parser.add_argument("-Q", "--quiet", action="store_true", help="Suppress banner/spinner/tool previews")
+    parser.add_argument("--resume", "-r", metavar="SESSION_ID", help="Resume a previous session by ID")
+    parser.add_argument(
+        "--continue",
+        "-c",
+        dest="continue_last",
+        nargs="?",
+        const=True,
+        metavar="SESSION_NAME",
+        help="Resume a session by name, or the most recent if no name given",
+    )
+    parser.add_argument("--worktree", "-w", action="store_true", help="Run in an isolated git worktree")
+    parser.add_argument("--accept-hooks", action="store_true", help="Auto-approve unseen shell hooks")
+    parser.add_argument("--checkpoints", action="store_true", help="Enable filesystem checkpoints")
+    parser.add_argument("--max-turns", type=int, metavar="N", help="Maximum tool-calling iterations")
+    parser.add_argument("--yolo", action="store_true", help="Bypass dangerous command approval prompts")
+    parser.add_argument("--pass-session-id", action="store_true", help="Include session ID in the system prompt")
+    parser.add_argument("--ignore-user-config", action="store_true", help="Ignore config.yaml")
+    parser.add_argument("--ignore-rules", action="store_true", help="Skip AGENTS.md/SOUL.md/rules injection")
+    parser.add_argument("--safe-mode", action="store_true", help="Disable all customizations")
+    parser.add_argument("--tui", action="store_true", help="Launch the modern TUI")
+    parser.add_argument("--cli", action="store_true", help="Force the classic prompt_toolkit REPL")
+    parser.add_argument("--dev", dest="tui_dev", action="store_true", help="With --tui: run TypeScript sources")
+
+
+def _cmd_chat(args: argparse.Namespace) -> int:
+    profile = _ensure_guardian_chat_profile()
+    argv = _guardian_chat_argv(_guardian_chat_args(args), profile=profile)
+    env = dict(os.environ)
+    env.pop("HERMES_HOME", None)
+    env["HERMES_GUARDIAN_CHAT"] = "1"
+    os.execvpe(argv[0], argv, env)
+    return 1
+
+
+def _ensure_guardian_chat_profile(profile: str = _GUARDIAN_CHAT_PROFILE) -> str:
+    from hermes_cli.profiles import create_profile, get_profile_dir, profile_exists
+
+    if not profile_exists(profile):
+        create_profile(
+            profile,
+            clone_config=True,
+            no_alias=True,
+            description="Umanitek Agent Guardian chat profile",
+        )
+    profile_dir = get_profile_dir(profile)
+    _write_guardian_soul(profile_dir)
+    attach.attach_hermes(profile_dir)
+    return profile
+
+
+def _guardian_chat_args(args: argparse.Namespace) -> List[str]:
+    out: List[str] = []
+    for attr, flag in [
+        ("query", "--query"),
+        ("image", "--image"),
+        ("model", "--model"),
+        ("provider", "--provider"),
+        ("toolsets", "--toolsets"),
+        ("resume", "--resume"),
+        ("max_turns", "--max-turns"),
+    ]:
+        value = getattr(args, attr, None)
+        if value is not None:
+            out.extend([flag, str(value)])
+    for skill in getattr(args, "skills", None) or []:
+        out.extend(["--skills", skill])
+    continue_last = getattr(args, "continue_last", None)
+    if continue_last is True:
+        out.append("--continue")
+    elif continue_last:
+        out.extend(["--continue", str(continue_last)])
+    for attr, flag in [
+        ("verbose", "--verbose"),
+        ("quiet", "--quiet"),
+        ("worktree", "--worktree"),
+        ("accept_hooks", "--accept-hooks"),
+        ("checkpoints", "--checkpoints"),
+        ("yolo", "--yolo"),
+        ("pass_session_id", "--pass-session-id"),
+        ("ignore_user_config", "--ignore-user-config"),
+        ("ignore_rules", "--ignore-rules"),
+        ("safe_mode", "--safe-mode"),
+        ("tui", "--tui"),
+        ("cli", "--cli"),
+        ("tui_dev", "--dev"),
+    ]:
+        if getattr(args, attr, False):
+            out.append(flag)
+    prompt = getattr(args, "prompt", None) or []
+    if prompt and not getattr(args, "query", None):
+        out.extend(["--query", " ".join(prompt)])
+    return out
+
+
+def _write_guardian_soul(profile_dir: Path) -> None:
+    soul_path = profile_dir / "SOUL.md"
+    existing = ""
+    if soul_path.exists():
+        try:
+            existing = soul_path.read_text(encoding="utf-8")
+        except OSError:
+            existing = ""
+    if existing == _GUARDIAN_SOUL:
+        return
+    if existing and _GUARDIAN_SOUL_MARKER not in existing:
+        backup = profile_dir / "SOUL.md.before-guardian-chat"
+        if not backup.exists():
+            try:
+                backup.write_text(existing, encoding="utf-8")
+            except OSError:
+                pass
+    soul_path.write_text(_GUARDIAN_SOUL, encoding="utf-8")
+
+
+def _guardian_chat_argv(chat_args: Optional[List[str]], profile: str = _GUARDIAN_CHAT_PROFILE) -> List[str]:
+    args = [a for a in (chat_args or []) if a != "--"]
+    argv = [sys.argv[0] or "hermes", "--profile", profile, "chat"]
+    if args and not args[0].startswith("-"):
+        argv.extend(["--query", " ".join(args)])
+    else:
+        argv.extend(args)
+    return argv
 
 
 def _cmd_status(args: argparse.Namespace) -> int:
