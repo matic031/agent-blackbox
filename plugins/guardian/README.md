@@ -68,7 +68,7 @@ evidence stays in the node's private WM audit KA.
 | key | default | env |
 |-----|---------|-----|
 | `mode` | `audit` | `GUARDIAN_MODE` |
-| `context_graph_id` | `umanitek/guardian-threats` | `GUARDIAN_CONTEXT_GRAPH_ID` |
+| `context_graph_id` | `umanitek/guardian-threats-staging` | `GUARDIAN_CONTEXT_GRAPH_ID` |
 | `dkg_url` | `http://127.0.0.1:9200` | `DKG_DAEMON_URL` |
 | `sync_interval` | `300` | `GUARDIAN_SYNC_INTERVAL` |
 | `report` | `true` | `GUARDIAN_REPORT` |
@@ -179,8 +179,9 @@ locally only (`_report_and_audit` skips SWM/private-KA for `source=="llm"`).
 The reviewer is a tiny stdlib `urllib` client (`llm.py`) for OpenAI
 (`/v1/chat/completions`) and Anthropic (`/v1/messages`); every path fails open
 to `None`, and reviewed text is capped and secret-redacted before it leaves the
-machine. Configure it interactively with `hermes guardian setup-llm` (which
-copies the key from Hermes's env, OpenClaw, or a pasted value) or disable with
+machine. Configure it with `hermes guardian setup-llm`; it reuses Guardian,
+Hermes, or OpenClaw model credentials first, then asks for provider/key/model
+only when nothing reusable is found. Disable with
 `hermes guardian setup-llm --disable`.
 
 > Enabling this sends the reviewed message text to the chosen provider, and the

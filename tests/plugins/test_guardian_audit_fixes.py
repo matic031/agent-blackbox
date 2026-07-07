@@ -107,6 +107,29 @@ def test_ruleset_sync_is_uncapped(monkeypatch):
     assert len(rs.dependency) == 6500  # far past the old LIMIT 2000
 
 
+def test_empty_initial_sync_retries_soon_after_subscribe(monkeypatch):
+    monkeypatch.setattr(ruleset_mod, "_write_cache", lambda rs: None)
+    monkeypatch.setattr(ruleset_mod, "_memory_cache", None)
+    monkeypatch.setattr(ruleset_mod, "_last_subscribe_at", 0.0)
+    monkeypatch.setattr(ruleset_mod.time, "time", lambda: 1000.0)
+    calls = []
+
+    class _Empty:
+        def query(self, sparql, cg_id, view=None, on_error=None):
+            return []
+
+        def query_store(self, sparql, on_error=None):
+            return []
+
+        def subscribe_context_graph(self, cg_id):
+            calls.append(cg_id)
+
+    cfg = config_mod.GuardianConfig(sync_interval=300, context_graph_id="cg")
+    rs = ruleset_mod.refresh(cfg, _Empty())
+    assert calls == ["cg"]
+    assert rs.synced_at == 730.0  # now - sync_interval + 30s retry delay
+
+
 def test_partial_tier_error_preserves_public_rules(monkeypatch):
     monkeypatch.setattr(ruleset_mod, "_write_cache", lambda rs: None)
     prior = Ruleset(dependency={"npm:evil@1.0": {"identifier": "dep:npm:evil@1.0", "source": "public",

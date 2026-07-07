@@ -42,7 +42,7 @@ ln -sf "$PWD/venv/bin/hermes" ~/.local/bin/hermes
 
 # 4. Local DKG node (optional - without it Umanitek Agent Guardian still runs, with an empty ruleset)
 npm i -g @origintrail-official/dkg
-dkg hermes setup --network mainnet   # mainnet only - reading the public threat graph is free
+dkg hermes setup --network mainnet-base --no-fund   # reading the public graph is free
 
 # 5. Enable Umanitek Agent Guardian and protect every local agent
 hermes plugins enable guardian
@@ -113,13 +113,13 @@ Every detection is logged to the audit trail and shown live in the dashboard. Cu
 
 ### Optional: AI reviewer
 
-On top of the built-in pattern and graph detection, Guardian can use an LLM for a second opinion on prompt injection. It's off by default. The installer offers to set it up, or run it anytime:
+On top of the built-in pattern and graph detection, Guardian can use an LLM for a second opinion on prompt injection. The installer reuses an existing Hermes/OpenClaw LLM config when it can; otherwise it asks for provider, key, and model on a real terminal. Run it anytime:
 
 ```bash
 hermes guardian setup-llm
 ```
 
-You pick the provider (OpenAI or Anthropic), where the API key comes from (copied from Hermes's environment, from OpenClaw, or a key you paste), and the model. The reviewer only flags - it never blocks, and its verdicts stay on your machine (never shared to the community graph). Turn it off with `hermes guardian setup-llm --disable`.
+The reviewer only flags - it never blocks, and its verdicts stay on your machine (never shared to the community graph). Turn it off with `hermes guardian setup-llm --disable`.
 
 ### Try it
 
@@ -193,7 +193,7 @@ Set under `plugins.entries.guardian.*` in `config.yaml`.
 |-----|---------|---------|
 | `mode` | `audit` | `audit` or `block` |
 | `dkg_url` | `http://127.0.0.1:9200` | local DKG node |
-| `context_graph_id` | `umanitek/guardian-threats` | the public curated threat graph |
+| `context_graph_id` | `umanitek/guardian-threats-staging` | staging curated threat graph until production is seeded |
 | `daily_report_limit` | `9999` | max threat reports sent to the community graph per day |
 | `report_min_severity` | `high` | minimum severity for heuristic candidates to be flagged and reported |
 | `detection.<category>.enabled` | `true` | turn a whole category on/off (`injection`, `escalation`, `dependency`, `fileaccess`, `skill`) |

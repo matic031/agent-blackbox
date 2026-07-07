@@ -12,10 +12,13 @@ import argparse
 import json
 import logging
 import os
+import shutil
+import subprocess
 import sys
+import time
 import urllib.request
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
 from . import attach, audit, constants, llm, quads, ruleset, settings
 from .config import GuardianConfig, load_guardian_config
@@ -113,7 +116,19 @@ def setup_cli(parser: argparse.ArgumentParser) -> None:
     sub.add_parser("status", help="Show config, node reachability, ruleset + findings counts").set_defaults(
         func=_cmd_status
     )
-    sub.add_parser("sync", help="Force a ruleset refresh from the DKG node").set_defaults(func=_cmd_sync)
+    sync = sub.add_parser("sync", help="Force a ruleset refresh from the DKG node")
+    sync.add_argument(
+        "--wait",
+        action="store_true",
+        help="Wait for DKG catch-up before refreshing the Guardian cache",
+    )
+    sync.add_argument(
+        "--timeout",
+        type=int,
+        default=180,
+        help="Seconds to wait for catch-up with --wait (default: 180)",
+    )
+    sync.set_defaults(func=_cmd_sync)
 
     attach_p = sub.add_parser(
         "attach", help="Auto-protect every local Hermes home + OpenClaw workspace"
@@ -223,6 +238,11 @@ def setup_cli(parser: argparse.ArgumentParser) -> None:
         "--key-source", choices=["hermes", "openclaw", "new"], help="Where to copy the API key from"
     )
     setup_llm.add_argument("--api-key", help="Skip the prompt: use this API key (with --key-source new)")
+    setup_llm.add_argument(
+        "--auto",
+        action="store_true",
+        help="Reuse existing Guardian, Hermes, or OpenClaw model credentials without prompting",
+    )
     setup_llm.add_argument("--disable", action="store_true", help="Turn the LLM reviewer off and exit")
     setup_llm.set_defaults(func=_cmd_setup_llm)
 
@@ -488,15 +508,77 @@ def _cmd_sync(args: argparse.Namespace) -> int:
         client.subscribe_context_graph(cfg.context_graph_id)
     except DkgError as exc:
         print(f"warning: could not subscribe to {cfg.context_graph_id}: {exc}")
+    if getattr(args, "wait", False):
+        result = _wait_for_context_graph_catchup(cfg.context_graph_id, timeout_s=getattr(args, "timeout", 180))
+        if result["status"]:
+            print(f"DKG catch-up: {result['status']}")
+        if result["detail"]:
+            print(f"  {result['detail']}")
+        if not result["ok"]:
+            print("  continuing with best-effort Guardian cache refresh")
     rs = ruleset.refresh(cfg, client)
     counts = rs.counts()
     print(f"Ruleset synced from {cfg.context_graph_id}:")
     print(f"  {counts['injection']} injection, {counts['escalation']} escalation, "
           f"{counts['dependency']} dependency")
     if sum(counts.values()) == 0:
-        print("  0 rules — if this is a fresh node the shared-memory catch-up may still be")
-        print("  running; re-run `hermes guardian sync` in ~30s (the subscribe kicks it off).")
+        print("  0 rules — no local public/SWM threat rows are available yet.")
+        print("  Guardian will retry automatically; force it with `hermes guardian sync --wait`.")
     return 0
+
+
+def _wait_for_context_graph_catchup(
+    cg_id: str,
+    *,
+    timeout_s: int = 180,
+    interval_s: float = 3.0,
+) -> Dict[str, Any]:
+    """Poll ``dkg sync catchup-status`` until the graph catch-up finishes.
+
+    The daemon HTTP subscribe call queues catch-up asynchronously, but the
+    status endpoint currently lives in the DKG CLI. This helper is best-effort:
+    missing CLI, unsupported status, or timeout never blocks Guardian from
+    doing a normal fail-open cache refresh.
+    """
+    if not shutil.which("dkg"):
+        return {"ok": False, "status": "unavailable", "detail": "dkg CLI not found"}
+    deadline = time.monotonic() + max(1, int(timeout_s or 1))
+    last_status = ""
+    last_detail = ""
+    while time.monotonic() < deadline:
+        try:
+            proc = subprocess.run(
+                ["dkg", "sync", "catchup-status", cg_id],
+                text=True,
+                capture_output=True,
+                timeout=15,
+            )
+            output = (proc.stdout or "") + (proc.stderr or "")
+        except Exception as exc:  # noqa: BLE001 - best-effort status only
+            return {"ok": False, "status": "error", "detail": str(exc)}
+        status = _parse_catchup_field(output, "Status").lower()
+        detail = _parse_catchup_field(output, "Result") or _parse_catchup_field(output, "Diagnostics")
+        if status:
+            last_status = status
+        if detail:
+            last_detail = detail
+        if status == "done":
+            return {"ok": True, "status": status, "detail": detail}
+        if status in {"failed", "cancelled", "canceled"}:
+            return {"ok": False, "status": status, "detail": detail or output.strip()}
+        if proc.returncode != 0 and not status:
+            return {"ok": False, "status": "unknown", "detail": output.strip()}
+        time.sleep(max(0.2, interval_s))
+    return {"ok": False, "status": last_status or "timeout", "detail": last_detail}
+
+
+def _parse_catchup_field(output: str, field: str) -> str:
+    prefix = f"{field}:"
+    for line in (output or "").splitlines():
+        stripped = line.strip()
+        if stripped.startswith(prefix):
+            return stripped[len(prefix):].strip()
+    return ""
 
 
 def _cmd_attach(args: argparse.Namespace) -> int:
@@ -1213,6 +1295,21 @@ _LLM_KEY_ENV_VARS = {
     "anthropic": ("ANTHROPIC_API_KEY", "ANTHROPIC_TOKEN"),
 }
 
+_PROVIDER_ALIASES = {
+    "openai": "openai",
+    "openai-api": "openai",
+    "openai-responses": "openai",
+    "openai-chat": "openai",
+    "anthropic": "anthropic",
+    "claude": "anthropic",
+    "anthropic-api": "anthropic",
+}
+
+_PROVIDER_KEYS = ("provider", "model_provider", "modelProvider", "llm_provider", "llmProvider")
+_MODEL_KEYS = ("model", "default", "default_model", "defaultModel", "llm_model", "llmModel")
+_API_KEY_KEYS = ("api_key", "apiKey", "key", "token")
+_API_KEY_ENV_KEYS = ("key_env", "keyEnv", "api_key_env", "apiKeyEnv", "env", "env_var", "envVar")
+
 
 def _tty():
     """Return an interactive /dev/tty handle, or None (piped / no terminal)."""
@@ -1252,11 +1349,138 @@ def _env_key(provider: str) -> str:
     return ""
 
 
+def _provider_alias(value: object) -> str:
+    raw = str(value or "").strip().lower().replace("_", "-")
+    return _PROVIDER_ALIASES.get(raw, "")
+
+
+def _env_lookup(name: str, env: Optional[Dict[str, str]] = None) -> str:
+    if not name:
+        return ""
+    if env and env.get(name):
+        return str(env[name]).strip()
+    return str(os.environ.get(name, "") or "").strip()
+
+
+def _env_key_from(provider: str, env: Optional[Dict[str, str]] = None) -> str:
+    for name in _LLM_KEY_ENV_VARS.get(provider, ()):
+        val = _env_lookup(name, env)
+        if val:
+            return val
+    return ""
+
+
+def _value_from(mapping: Dict[str, Any], keys: Iterable[str]) -> str:
+    for key in keys:
+        val = mapping.get(key)
+        if val is not None and str(val).strip():
+            return str(val).strip()
+    return ""
+
+
+def _key_from_mapping(mapping: Dict[str, Any], provider: str, env: Optional[Dict[str, str]] = None) -> str:
+    direct = _value_from(mapping, _API_KEY_KEYS)
+    if direct:
+        return direct
+    for key in _API_KEY_ENV_KEYS:
+        env_name = mapping.get(key)
+        if env_name is not None:
+            found = _env_lookup(str(env_name).strip(), env)
+            if found:
+                return found
+    return _env_key_from(provider, env)
+
+
+def _iter_dicts(value: Any) -> Iterable[Dict[str, Any]]:
+    if isinstance(value, dict):
+        yield value
+        for child in value.values():
+            yield from _iter_dicts(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from _iter_dicts(child)
+
+
+def _candidate_from_mapping(
+    mapping: Dict[str, Any],
+    source: str,
+    env: Optional[Dict[str, str]] = None,
+) -> Optional[Dict[str, str]]:
+    provider = _provider_alias(_value_from(mapping, _PROVIDER_KEYS))
+    if not provider:
+        return None
+    api_key = _key_from_mapping(mapping, provider, env)
+    if not api_key:
+        return None
+    model = _value_from(mapping, _MODEL_KEYS) or llm.default_model(provider)
+    return {"source": source, "provider": provider, "model": model, "api_key": api_key}
+
+
+def _hermes_llm_candidate() -> Optional[Dict[str, str]]:
+    try:
+        from hermes_cli import config as hconfig
+
+        cfg = hconfig.load_config()
+        env = hconfig.load_env()
+    except Exception:
+        cfg, env = {}, {}
+    if not isinstance(cfg, dict):
+        return None
+
+    model_cfg = cfg.get("model") if isinstance(cfg.get("model"), dict) else {}
+    candidates = [model_cfg, cfg]
+    custom = cfg.get("custom_providers") or cfg.get("providers")
+    if isinstance(custom, dict):
+        candidates.extend(v for v in custom.values() if isinstance(v, dict))
+    for candidate in candidates:
+        resolved = _candidate_from_mapping(candidate, "Hermes", env)
+        if resolved:
+            return resolved
+    return None
+
+
+def _openclaw_llm_candidate() -> Optional[Dict[str, str]]:
+    for workspace in attach.discover_openclaw_workspaces():
+        path = workspace / "openclaw.json"
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        for mapping in _iter_dicts(data):
+            resolved = _candidate_from_mapping(mapping, f"OpenClaw ({workspace})")
+            if resolved:
+                return resolved
+    return None
+
+
+def _auto_llm_candidate() -> tuple[str, Optional[Dict[str, str]]]:
+    cfg = load_guardian_config()
+    if cfg.llm_ready:
+        return "Guardian", {
+            "source": "Guardian",
+            "provider": cfg.llm_provider,
+            "model": cfg.llm_model,
+            "api_key": cfg.llm_api_key,
+        }
+    for resolver in (_hermes_llm_candidate, _openclaw_llm_candidate):
+        candidate = resolver()
+        if candidate:
+            return candidate["source"], candidate
+    return "", None
+
+
 def _resolve_key(source: str, provider: str) -> str:
     """Resolve an API key for *provider* from the chosen *source*."""
     if source == "new":
         return ""
-    # "hermes" (default) and "openclaw" both read the environment the CLI runs in.
+    if source == "openclaw":
+        candidate = _openclaw_llm_candidate()
+        if candidate and candidate["provider"] == provider:
+            return candidate["api_key"]
+    if source == "hermes":
+        candidate = _hermes_llm_candidate()
+        if candidate and candidate["provider"] == provider:
+            return candidate["api_key"]
     return _env_key(provider)
 
 
@@ -1271,6 +1495,39 @@ def _cmd_setup_llm(args: argparse.Namespace) -> int:
         print("LLM reviewer disabled." if result.get("ok") else f"error: {result.get('errors')}")
         return 0 if result.get("ok") else 1
 
+    explicit = any(
+        getattr(args, name, None)
+        for name in ("provider", "model", "key_source", "api_key")
+    )
+    if not explicit:
+        source, candidate = _auto_llm_candidate()
+        if candidate:
+            if source == "Guardian":
+                print(
+                    f"LLM reviewer already configured: "
+                    f"provider={candidate['provider']}  model={candidate['model']}"
+                )
+                return 0
+            result = settings.write_settings({
+                "llm": {
+                    "enabled": True,
+                    "provider": candidate["provider"],
+                    "model": candidate["model"],
+                    "api_key": candidate["api_key"],
+                }
+            })
+            if not result.get("ok"):
+                print(f"error: could not save settings: {result.get('errors')}")
+                return 1
+            print(
+                f"LLM reviewer enabled from {source}: "
+                f"provider={candidate['provider']}  model={candidate['model']}"
+            )
+            return 0
+        if args.auto:
+            print("No reusable Hermes/OpenClaw LLM config found.")
+            return 2
+
     tty = _tty()
     try:
         # --- provider -------------------------------------------------------
@@ -1279,8 +1536,8 @@ def _cmd_setup_llm(args: argparse.Namespace) -> int:
             if tty is None and not args.api_key:
                 print("error: setup-llm needs a terminal, or pass --provider/--model/--api-key.")
                 return 2
-            ans = _ask("AI provider for the reviewer — [1] Anthropic (default)  [2] OpenAI: ", tty)
-            provider = "openai" if ans in ("2", "openai") else "anthropic"
+            ans = _ask("AI provider for the reviewer — [1] OpenAI (default)  [2] Anthropic: ", tty)
+            provider = "anthropic" if ans in ("2", "anthropic") else "openai"
 
         # --- key source + resolution ---------------------------------------
         source = args.key_source

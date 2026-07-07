@@ -25,6 +25,8 @@ REPO_BRANCH="${GUARDIAN_REPO_BRANCH:-feat/guardian}"
 HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
 DKG_NETWORK="${GUARDIAN_DKG_NETWORK:-mainnet-base}"   # a valid dkg mainnet (mainnet-base | mainnet-gnosis). Base uses ETH for gas. No testnet.
 NODE_MAJOR="${GUARDIAN_NODE_MAJOR:-22}"
+GUARDIAN_CONTEXT_GRAPH_ID="${GUARDIAN_CONTEXT_GRAPH_ID:-umanitek/guardian-threats-staging}"
+GUARDIAN_DKG_CATCHUP_TIMEOUT="${GUARDIAN_DKG_CATCHUP_TIMEOUT:-180}"
 
 # ── Colors / echo helpers (DRY) ─────────────────────────────────────────────
 # ANSI-C ($'...') quoting stores REAL escape bytes, so the codes render both
@@ -45,13 +47,7 @@ heading() { echo ""; echo "${MINT}${BOLD}$1${NC}"; }
 banner() {
     echo ""
     echo -e "${MINT}${BOLD}"
-    echo "  ┌───────────────────────────────────────────────────────────┐"
-    echo "  │        🛡  Umanitek Agent Guardian — installer            │"
-    echo "  ├───────────────────────────────────────────────────────────┤"
-    echo "  │  A threat-graph immune system for your AI agent.          │"
-    echo "  │  Detect prompt injection, tool escalation & bad deps —    │"
-    echo "  │  shared across agents via the OriginTrail DKG.            │"
-    echo "  └───────────────────────────────────────────────────────────┘"
+    echo "  Umanitek Agent Guardian installer"
     echo -e "${NC}"
 }
 
@@ -62,19 +58,15 @@ Umanitek Agent Guardian installer
 Usage: guardian-install.sh [OPTIONS]
 
 Options:
-  --skip-dkg     Skip the DKG node install/bootstrap (plugin still installs;
-                 you can bootstrap the node later — see next-steps output)
-  -h, --help     Show this help and exit
-
-The DKG node always bootstraps on mainnet — the real public threat graph.
-Reading it is free; publishing costs TRAC. Guardian does not support testnet.
+  --skip-dkg     Skip local DKG node setup
+  -h, --help     Show this help
 
 Environment overrides:
   GUARDIAN_REPO_URL, GUARDIAN_REPO_BRANCH, HERMES_HOME,
-  GUARDIAN_NODE_MAJOR, GUARDIAN_INSTALL_DIR
+  GUARDIAN_NODE_MAJOR, GUARDIAN_INSTALL_DIR, GUARDIAN_CONTEXT_GRAPH_ID
 
-This installer is idempotent — re-running it repairs a partial install.
-Optional steps (the DKG node) never hard-fail; you always get guidance.
+Installs Guardian in audit mode, reuses existing Hermes/OpenClaw LLM config
+when present, and prompts only for missing LLM credentials on a real terminal.
 EOF
 }
 
@@ -361,20 +353,56 @@ sync_ruleset() {
     heading "Syncing the threat ruleset"
     # Subscribe the daemon (--save persists it) so it catches up the community
     # pool — a fresh node never subscribes on its own, so sync would return 0.
-    local guardian_cg="umanitek/guardian-threats-staging"
+    local guardian_cg="$GUARDIAN_CONTEXT_GRAPH_ID"
     step "Subscribing the node to $guardian_cg (dkg subscribe --save) ..."
     if dkg subscribe "$guardian_cg" --save >/dev/null 2>&1; then
         ok "Subscribed — the node will catch up the community pool from peers"
+        wait_for_dkg_catchup "$guardian_cg" "$GUARDIAN_DKG_CATCHUP_TIMEOUT" || true
     else
-        step "  (subscribe will also run automatically on 'hermes guardian sync')"
+        step "  (subscribe also runs automatically on 'hermes guardian sync --wait')"
     fi
-    step "Pulling curated threats from the graph (hermes guardian sync) ..."
-    if "$HERMES_BIN" guardian sync >/dev/null 2>&1; then
+    step "Refreshing the Guardian cache ..."
+    if "$HERMES_BIN" guardian sync --wait --timeout "$GUARDIAN_DKG_CATCHUP_TIMEOUT" >/dev/null 2>&1; then
         ok "Ruleset synced — Guardian is watching with the latest threats"
     else
         warn "Initial sync skipped (the graph may be empty or the node still warming up)."
-        step "It syncs automatically every few minutes; force it anytime with: hermes guardian sync"
+        step "It retries automatically; force it anytime with: hermes guardian sync --wait"
     fi
+}
+
+wait_for_dkg_catchup() {
+    local cg="$1"
+    local timeout="${2:-180}"
+    local deadline=$((SECONDS + timeout))
+    local out status result announced=false
+    command -v dkg >/dev/null 2>&1 || return 0
+    while [ "$SECONDS" -lt "$deadline" ]; do
+        out="$(dkg sync catchup-status "$cg" 2>&1 || true)"
+        status="$(printf '%s\n' "$out" | awk -F: '/^[[:space:]]*Status:/ {gsub(/^[ \t]+/, "", $2); print tolower($2); exit}')"
+        result="$(printf '%s\n' "$out" | awk -F: '/^[[:space:]]*Result:/ {gsub(/^[ \t]+/, "", $2); print $2; exit}')"
+        case "$status" in
+            done)
+                [ -n "$result" ] && ok "DKG catch-up finished: $result" || ok "DKG catch-up finished"
+                return 0
+                ;;
+            failed|cancelled|canceled)
+                warn "DKG catch-up ended with status: $status"
+                return 1
+                ;;
+            running|queued|pending)
+                if [ "$announced" = false ]; then
+                    step "Waiting for DKG catch-up (up to ${timeout}s) ..."
+                    announced=true
+                fi
+                ;;
+            "")
+                return 0
+                ;;
+        esac
+        sleep 3
+    done
+    warn "DKG catch-up is still running; Guardian will keep retrying in the background."
+    return 1
 }
 
 dkg_manual_hint() {
@@ -397,9 +425,9 @@ enable_and_seed() {
     fi
 
     step "Seeding plugins.entries.guardian defaults into $HERMES_HOME/config.yaml ..."
-    if "$VENV_DIR/bin/python" - "$HERMES_HOME/config.yaml" "$DKG_NETWORK" <<'PYEOF'
+    if "$VENV_DIR/bin/python" - "$HERMES_HOME/config.yaml" "$DKG_NETWORK" "$GUARDIAN_CONTEXT_GRAPH_ID" <<'PYEOF'
 import sys, os
-cfg_path, network = sys.argv[1], sys.argv[2]
+cfg_path, network, context_graph_id = sys.argv[1], sys.argv[2], sys.argv[3]
 try:
     import yaml
 except Exception:
@@ -420,7 +448,7 @@ defaults = {
     "mode": "audit",
     # TEMPORARY: default to the STAGING graph while production is still being
     # seeded. TODO(launch): switch back to "umanitek/guardian-threats" (production).
-    "context_graph_id": "umanitek/guardian-threats-staging",
+    "context_graph_id": context_graph_id,
     "dkg_url": "http://127.0.0.1:9200",
     "sync_interval": 300,
     "report": True,
@@ -496,47 +524,16 @@ PYEOF
 }
 
 configure_guardian_mode() {
-    heading "Choosing Guardian enforcement mode"
+    heading "Guardian mode"
     local current="${GUARDIAN_MODE:-}"
     current="$(printf '%s' "$current" | tr '[:upper:]' '[:lower:]')"
-    if [ "$current" != "audit" ] && [ "$current" != "block" ]; then
-        current="$(read_guardian_mode 2>/dev/null || echo audit)"
-    fi
     [ "$current" = "block" ] || current="audit"
-
-    # An explicit GUARDIAN_MODE is a non-interactive choice — honor it, skip the prompt.
-    if [ -n "${GUARDIAN_MODE:-}" ]; then
-        GUARDIAN_SELECTED_MODE="$current"
-        step "Using GUARDIAN_MODE=$current (non-interactive)."
-        return 0
-    fi
-    # Only prompt if /dev/tty actually opens — a perms check isn't enough (setsid /
-    # ssh has no controlling tty, so open() fails with ENXIO).
-    if ! { : > /dev/tty; } 2>/dev/null; then
-        GUARDIAN_SELECTED_MODE="$current"
-        step "Non-interactive install — keeping Guardian in $current mode."
-        return 0
-    fi
-
-    printf '  Choose how Guardian should react when it finds threats.\n' > /dev/tty
-    printf '    1) Audit — log and report findings, but do not stop actions. [recommended]\n' > /dev/tty
-    printf '    2) Block — stop confirmed threats at/above the configured severity.\n' > /dev/tty
-    printf '  Protection mode [1/2, Enter keeps %s]: ' "$current" > /dev/tty
-    local ans=""
-    read -r ans < /dev/tty || ans=""
-    case "$ans" in
-        2|b|B|block|BLOCK|Block) GUARDIAN_SELECTED_MODE="block" ;;
-        1|a|A|audit|AUDIT|Audit|"") GUARDIAN_SELECTED_MODE="$current" ;;
-        *)
-            warn "Unknown protection mode '$ans' — keeping $current."
-            GUARDIAN_SELECTED_MODE="$current"
-            ;;
-    esac
+    GUARDIAN_SELECTED_MODE="$current"
 
     if write_guardian_mode "$GUARDIAN_SELECTED_MODE"; then
-        ok "Guardian protection mode set to: $GUARDIAN_SELECTED_MODE"
+        ok "Guardian runs in $GUARDIAN_SELECTED_MODE mode"
     else
-        warn "Could not save Guardian protection mode. Set it later in the dashboard or config.yaml."
+        warn "Could not save Guardian mode. Set plugins.entries.guardian.mode in config.yaml."
     fi
 }
 
@@ -559,30 +556,21 @@ attach_all_agents() {
 # talk to the user through /dev/tty directly and skip cleanly when there isn't
 # one (CI, non-interactive installs). Never fatal.
 setup_llm() {
-    heading "Optional: AI prompt-injection reviewer"
-    if ! { [ -r /dev/tty ] && [ -w /dev/tty ]; }; then
-        step "Non-interactive install - skipping."
-        step "Set it up later with:  hermes guardian setup-llm"
+    heading "LLM reviewer"
+    if "$HERMES_BIN" guardian setup-llm --auto; then
+        ok "LLM reviewer ready"
         return 0
     fi
-    printf '  Guardian can use an LLM (OpenAI or Anthropic) for a second opinion on\n' > /dev/tty
-    printf '  prompt injection. It only flags, never blocks. Off unless you enable it.\n' > /dev/tty
-    printf '  Configure it now? [y/N]: ' > /dev/tty
-    local ans=""
-    read -r ans < /dev/tty || ans=""
-    case "$ans" in
-        y|Y|yes|YES|Yes)
-            # The subcommand reads /dev/tty itself for its prompts.
-            if "$HERMES_BIN" guardian setup-llm; then
-                ok "LLM reviewer configured"
-            else
-                warn "LLM setup skipped or failed (non-fatal). Re-run: hermes guardian setup-llm"
-            fi
-            ;;
-        *)
-            step "Skipped. Enable anytime with:  hermes guardian setup-llm"
-            ;;
-    esac
+    if ! { [ -r /dev/tty ] && [ -w /dev/tty ]; }; then
+        step "No reusable config found. Set up later: hermes guardian setup-llm"
+        return 0
+    fi
+    step "No Hermes/OpenClaw LLM config found. Configure provider, key, and model."
+    if "$HERMES_BIN" guardian setup-llm; then
+        ok "LLM reviewer configured"
+    else
+        warn "LLM setup skipped. Re-run: hermes guardian setup-llm"
+    fi
 }
 
 # ── Guided next steps (short — everything above already ran) ─────────────────
@@ -590,28 +578,17 @@ next_steps() {
     local docs_url="${REPO_URL%.git}"
     local path_note=""
     local mode="${GUARDIAN_SELECTED_MODE:-$(read_guardian_mode 2>/dev/null || echo audit)}"
-    local mode_note="Audit-only by default - switch to Block anytime in the dashboard."
-    if [ "$mode" = "block" ]; then
-        mode_note="Block mode is on - confirmed threats at/above the block severity are stopped."
-    fi
     case ":$PATH:" in
         *":$HOME/.local/bin:"*) : ;;
         *) path_note=$'\n  First reload your shell so `hermes` is on PATH:  exec $SHELL -l' ;;
     esac
-    heading "🎉 Guardian is ready — it now protects all your local agents ($mode mode)."
+    heading "Guardian is ready ($mode mode)."
     cat <<EOF
 ${path_note}
-  ${BOLD}Start your agent${NC}   — Guardian watches every tool call automatically:
-       hermes guardian chat
-
-  ${BOLD}Watch it live${NC}      — findings + threat-graph status in your browser:
-       hermes guardian dashboard      →  http://127.0.0.1:${GUARDIAN_DASHBOARD_PORT:-9700}
-
-  ${BOLD}Try it${NC}            - in the Guardian chat, ask it to run:
-       rm -rf ~/
-       Guardian flags this as an 'rm-rf-system-paths' escalation. $mode_note
-
-  Docs & community:  $docs_url
+  Chat:       hermes guardian chat
+  Dashboard:  hermes guardian dashboard  →  http://127.0.0.1:${GUARDIAN_DASHBOARD_PORT:-9700}
+  Sync now:    hermes guardian sync --wait
+  Docs:        $docs_url
 EOF
     echo ""
 }

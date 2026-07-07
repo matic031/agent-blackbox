@@ -16,10 +16,12 @@ config writes never touch the real home.
 """
 
 import time
+from types import SimpleNamespace
 
 from _guardian_loader import load_guardian
 
 
+cli_mod = load_guardian("cli")
 config_mod = load_guardian("config")
 detection = load_guardian("detection")
 hooks = load_guardian("hooks")
@@ -203,6 +205,88 @@ def test_settings_write_read_roundtrip():
     view = settings.read_settings()
     assert view["llm"]["has_key"] is True
     assert "api_key" not in view["llm"]
+
+
+def test_setup_llm_reuses_hermes_model_config(monkeypatch):
+    from hermes_cli import config as hconfig
+
+    monkeypatch.setattr(
+        hconfig,
+        "load_config",
+        lambda: {"model": {"provider": "openai-api", "default": "gpt-4o-mini"}},
+    )
+    monkeypatch.setattr(hconfig, "load_env", lambda: {"OPENAI_API_KEY": "sk-hermes"})
+
+    candidate = cli_mod._hermes_llm_candidate()
+    assert candidate == {
+        "source": "Hermes",
+        "provider": "openai",
+        "model": "gpt-4o-mini",
+        "api_key": "sk-hermes",
+    }
+
+
+def test_setup_llm_reuses_openclaw_json_config(tmp_path, monkeypatch):
+    ws = tmp_path / ".openclaw"
+    ws.mkdir()
+    (ws / "openclaw.json").write_text(
+        """
+        {
+          "model": {
+            "provider": "anthropic",
+            "model": "claude-haiku-4-5-20251001",
+            "apiKey": "sk-ant-openclaw"
+          }
+        }
+        """,
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(cli_mod.attach, "discover_openclaw_workspaces", lambda: [ws])
+
+    candidate = cli_mod._openclaw_llm_candidate()
+    assert candidate["source"] == f"OpenClaw ({ws})"
+    assert candidate["provider"] == "anthropic"
+    assert candidate["model"] == "claude-haiku-4-5-20251001"
+    assert candidate["api_key"] == "sk-ant-openclaw"
+
+
+def test_setup_llm_auto_persists_reused_config(monkeypatch):
+    saved = []
+    monkeypatch.setattr(
+        cli_mod,
+        "_auto_llm_candidate",
+        lambda: (
+            "Hermes",
+            {
+                "source": "Hermes",
+                "provider": "openai",
+                "model": "gpt-4o-mini",
+                "api_key": "sk-hermes",
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        settings,
+        "write_settings",
+        lambda payload: saved.append(payload) or {"ok": True},
+    )
+    monkeypatch.setattr(cli_mod, "settings", settings)
+
+    rc = cli_mod._cmd_setup_llm(
+        SimpleNamespace(disable=False, provider=None, model=None, key_source=None, api_key=None, auto=True)
+    )
+
+    assert rc == 0
+    assert saved == [
+        {
+            "llm": {
+                "enabled": True,
+                "provider": "openai",
+                "model": "gpt-4o-mini",
+                "api_key": "sk-hermes",
+            }
+        }
+    ]
 
 
 # ---------------------------------------------------------------------------

@@ -54,6 +54,25 @@ def test_guardian_chat_parser_accepts_query_flags():
     assert cli_mod._guardian_chat_args(args) == ["--query", "who are you?", "--quiet"]
 
 
+def test_guardian_sync_parser_accepts_wait_timeout():
+    parser = argparse.ArgumentParser()
+    cli_mod.setup_cli(parser)
+    args = parser.parse_args(["sync", "--wait", "--timeout", "45"])
+    assert args.func is cli_mod._cmd_sync
+    assert args.wait is True
+    assert args.timeout == 45
+
+
+def test_parse_catchup_status_fields():
+    output = """
+Context Graph: umanitek/guardian-threats-staging
+Status:        done
+Result:        peers 21/21, data 2, shared memory 3
+"""
+    assert cli_mod._parse_catchup_field(output, "Status") == "done"
+    assert cli_mod._parse_catchup_field(output, "Result") == "peers 21/21, data 2, shared memory 3"
+
+
 def test_guardian_chat_wraps_bare_prompt(monkeypatch):
     monkeypatch.setattr(cli_mod.sys, "argv", ["hermes"])
     assert cli_mod._guardian_chat_argv(["who", "are", "you?"]) == [

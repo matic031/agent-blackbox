@@ -440,6 +440,7 @@ def _fetch_tier(client: DkgClient, cg_id: str, view: str) -> Optional[List[Dict[
 
 _last_subscribe_at = 0.0
 _SUBSCRIBE_RETRY_S = 300.0
+_EMPTY_RULESET_RETRY_S = 30.0
 
 
 def _maybe_subscribe(client: DkgClient, cg_id: str) -> None:
@@ -484,7 +485,8 @@ def refresh(config: Optional[GuardianConfig] = None, client: Optional[DkgClient]
     fetched = {tier: _fetch_tier(client, config.context_graph_id, view) for view, tier in tiers}
 
     # Empty store usually means the daemon was never subscribed — self-heal.
-    if all(rows == [] for rows in fetched.values()):
+    empty_success = all(rows == [] for rows in fetched.values())
+    if empty_success:
         _maybe_subscribe(client, config.context_graph_id)
 
     if all(rows is None for rows in fetched.values()):
@@ -502,6 +504,13 @@ def refresh(config: Optional[GuardianConfig] = None, client: Optional[DkgClient]
         if view_rows is not None:  # a successful tier (possibly genuinely empty)
             rows.extend((row, tier) for row in view_rows)
     rs = build_from_rows(rows)
+    if empty_success:
+        # A fresh node's subscribe/catch-up is async. Do not cache "0 rules" as
+        # fresh for the full sync interval; retry soon so the dashboard updates
+        # shortly after SWM lands locally.
+        interval = max(1.0, float(config.sync_interval or 1))
+        retry_after = min(_EMPTY_RULESET_RETRY_S, interval)
+        rs.synced_at = time.time() - interval + retry_after
 
     errored = [tier for tier, view_rows in fetched.items() if view_rows is None]
     if errored:
