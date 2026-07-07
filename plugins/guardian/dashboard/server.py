@@ -440,15 +440,27 @@ def create_app():
                 return None   # keep default cached briefly; retry next poll
             try:
                 client = DkgClient(url=cfg.dkg_url)
+                # Read the RAW store (ms), scoped to the CG's shared-memory named
+                # graphs, instead of the shared-working-memory view. The view's
+                # per-slice trust work is O(slices) and times out (~160s) once the
+                # pool holds thousands of reports, saturating oxigraph and starving
+                # the node's P2P (peers drop to 0-alive → API offline). A flag-only
+                # reporter count never needs the view. Mirrors
+                # ruleset.community_report_count.
+                prefix = f"did:dkg:context-graph:{cfg.context_graph_id}/_shared_memory"
                 sparql = (
                     "PREFIX g: <http://umanitek.ai/ontology/guardian/> "
-                    "SELECT ?reporter ?framework (COUNT(?r) AS ?n) WHERE { "
+                    "SELECT ?reporter ?framework (COUNT(?r) AS ?n) WHERE { GRAPH ?g { "
                     "?r a g:ThreatReport . "
                     "OPTIONAL { ?r g:reporter ?reporter } "
                     "OPTIONAL { ?r g:framework ?framework } "
+                    "} "
+                    f'FILTER(STRSTARTS(STR(?g), "{prefix}")) '
                     "} GROUP BY ?reporter ?framework"
                 )
-                rows = client.query(sparql, cfg.context_graph_id, view=constants.VIEW_SHARED_WORKING_MEMORY)
+                rows = client.query_store(sparql, on_error=None)
+                if rows is None:
+                    return None  # store error — keep the last cached reporters
             except Exception as exc:  # pragma: no cover - fail open
                 logger.debug("guardian dashboard: agents query failed: %s", exc)
                 return None  # transient failure — keep the last cached reporters
@@ -655,15 +667,20 @@ def create_app():
             out: List[Dict[str, Any]] = []
             try:
                 client = DkgClient(url=cfg.dkg_url)
+                # Raw store scoped to the CG's shared-memory graphs, not the
+                # shared-working-memory view (O(slices), times out on the 15k pool
+                # and saturates the node). Mirrors the community list/detail paths.
+                prefix = f"did:dkg:context-graph:{cfg.context_graph_id}/_shared_memory"
                 sparql = (
                     "PREFIX g: <http://umanitek.ai/ontology/guardian/> "
                     "SELECT ?identifier (COUNT(DISTINCT ?reporter) AS ?reporters) "
-                    "(SAMPLE(?severity) AS ?sev) WHERE { "
+                    "(SAMPLE(?severity) AS ?sev) WHERE { GRAPH ?g { "
                     "?r a g:ThreatReport . ?r g:identifier ?identifier . ?r g:reporter ?reporter . "
                     "OPTIONAL { ?r g:severity ?severity . } } "
+                    f'FILTER(STRSTARTS(STR(?g), "{prefix}")) }} '
                     f"GROUP BY ?identifier ORDER BY DESC(?reporters) LIMIT {int(limit)}"
                 )
-                rows = client.query(sparql, cfg.context_graph_id, view=constants.VIEW_SHARED_WORKING_MEMORY)
+                rows = client.query_store(sparql, on_error=[]) or []
                 for row in rows:
                     out.append({
                         "identifier": extract_binding(row.get("identifier")),

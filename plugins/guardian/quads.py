@@ -778,10 +778,29 @@ def iri(value: str) -> str:
     return value
 
 
+# The DKG store enforces a cross-backend (Blazegraph-compatible) cap of 65535
+# MUTF-8 bytes per RDF literal (RFC-57 backend independence). A single literal
+# over this aborts a *peer's* sync insert for the WHOLE graph — one oversized
+# field makes the entire community graph invisible to that peer. A 177 KB
+# node-ipc `schema:description` did exactly this. Cap well under the limit
+# (with margin for multi-byte → MUTF-8 expansion); real threat text is tiny.
+_MAX_LITERAL_BYTES = 50000
+
+
 def literal(value: str) -> str:
-    """Render a plain-string literal term with N-Triples escaping."""
+    """Render a plain-string literal term with N-Triples escaping.
+
+    Oversized values are truncated to keep every literal below the DKG store's
+    per-literal byte cap (:data:`_MAX_LITERAL_BYTES`); an over-limit literal
+    aborts a peer's graph sync and hides the whole community graph from them.
+    """
+    text = str(value)
+    if len(text.encode("utf-8")) > _MAX_LITERAL_BYTES:
+        # Cut on a UTF-8 boundary (drop any partial trailing char), then mark it.
+        text = text.encode("utf-8")[:_MAX_LITERAL_BYTES].decode("utf-8", "ignore")
+        text += " …[truncated]"
     escaped = (
-        str(value)
+        text
         .replace("\\", "\\\\")
         .replace('"', '\\"')
         .replace("\n", "\\n")

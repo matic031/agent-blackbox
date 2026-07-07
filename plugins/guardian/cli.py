@@ -1838,12 +1838,8 @@ def _flatten_bumblebee(catalog: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 
 def _catalog_provenance_defaults(catalog: Any) -> Dict[str, Any]:
-    """Top-level ``source``/``sources``/``contributor`` defaults for a catalog.
-
-    A catalog file may declare provenance once at the root and have it apply to
-    every entry that doesn't carry its own — convenient for a whole OSV/Socket
-    dump ("this entire file came from OSV.dev, contributed by Umanitek").
-    """
+    """Top-level ``source``/``contributor`` defaults, applied to entries that
+    don't set their own (e.g. one root ``source`` for a whole OSV dump)."""
     if not isinstance(catalog, dict):
         return {}
     defaults: Dict[str, Any] = {}
@@ -1864,13 +1860,10 @@ def _apply_provenance_defaults(entry: Dict[str, Any], defaults: Dict[str, Any]) 
 
 
 def _entry_provenance(entry: Dict[str, Any]) -> Dict[str, Any]:
-    """Extract provenance from a catalog entry, shown in the dashboard modal.
+    """Extract ``{sources, references, contributor}`` from a catalog entry.
 
-    ``source``/``sources`` are named feeds or datasets (e.g. "OSV.dev",
-    "Socket", "OWASP LLM Top 10"); ``references`` are clickable source URLs;
-    ``contributor`` is optional attribution. Returns
-    ``{sources: [...], references: [...], contributor: str|None}``. A source
-    given as a URL is also surfaced as a clickable reference.
+    ``source``/``sources`` are named feeds; ``references`` are URLs; a source
+    given as a URL is also surfaced as a reference.
     """
     raw_sources = entry.get("sources")
     if raw_sources is None:
