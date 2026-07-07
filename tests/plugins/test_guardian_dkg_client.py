@@ -156,3 +156,64 @@ def test_extract_binding_shapes():
 def test_normalize_bindings_nested_shape():
     result = {"results": {"bindings": [{"n": {"value": "3"}}]}}
     assert dkg_client.normalize_bindings(result) == [{"n": {"value": "3"}}]
+
+
+def test_chain_info_parses_base_mainnet(monkeypatch):
+    # /api/status reports the chain as a "base:8453" string on some builds.
+    _capture(monkeypatch, body='{"chainId":"base:8453","networkName":"DKG V10 Base Mainnet"}')
+    client = dkg_client.DkgClient(url="http://node", token="t")
+    info = client.chain_info()
+    assert info["chain_id"] == 8453
+    assert info["is_mainnet"] is True
+    assert info["is_testnet"] is False
+
+
+def test_chain_info_flags_testnet(monkeypatch):
+    _capture(monkeypatch, body='{"chainId":"base:84532","networkName":"Base Sepolia"}')
+    client = dkg_client.DkgClient(url="http://node", token="t")
+    info = client.chain_info()
+    assert info["chain_id"] == 84532
+    assert info["is_testnet"] is True
+    assert info["is_mainnet"] is False
+
+
+def test_chain_info_gnosis_is_mainnet_but_not_base(monkeypatch):
+    # Nested chain object with an int id; Gnosis is a valid mainnet, not Base.
+    _capture(monkeypatch, body='{"chain":{"chainId":100,"name":"gnosis"}}')
+    client = dkg_client.DkgClient(url="http://node", token="t")
+    info = client.chain_info()
+    assert info["chain_id"] == 100
+    assert info["is_mainnet"] is True
+    assert info["chain_id"] != dkg_client.constants.DEFAULT_DKG_CHAIN_ID
+
+
+def test_chain_info_unparseable_returns_none(monkeypatch):
+    # An unrecognized status shape must not falsely claim mainnet/testnet.
+    _capture(monkeypatch, body='{"foo":"bar"}')
+    client = dkg_client.DkgClient(url="http://node", token="t")
+    info = client.chain_info()
+    assert info["chain_id"] is None
+    assert info["is_mainnet"] is None
+    assert info["is_testnet"] is None
+
+
+def test_publish_idempotent_on_already_published(monkeypatch):
+    # Re-publishing an already-minted KA (lost ledger / post-timeout confirm) is a
+    # no-op success, never a paid retry or hard error.
+    body = b'{"error":"knowledge asset is already published on chain"}'
+
+    def raise_pub(req, timeout=None):
+        raise urllib.error.HTTPError(req.full_url, 409, "err", {}, io.BytesIO(body))
+
+    monkeypatch.setattr(dkg_client.urllib.request, "urlopen", raise_pub)
+    client = dkg_client.DkgClient(url="http://node", token="t")
+    assert client.publish("cg", "threat-x").get("idempotent") is True
+
+
+def test_publish_raises_on_context_graph_bind_failure(monkeypatch):
+    # HTTP 207: minted (UAL valid) but CG binding failed — must surface as an
+    # error, or the caller would ledger a threat that isn't queryable in the graph.
+    _capture(monkeypatch, body='{"ual":"did:dkg:8453/0xabc/1","contextGraphError":"binding timed out"}')
+    client = dkg_client.DkgClient(url="http://node", token="t")
+    with pytest.raises(dkg_client.DkgError):
+        client.publish("cg", "threat-x")

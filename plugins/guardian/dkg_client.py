@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import time
 import urllib.error
 import urllib.parse
@@ -47,6 +48,34 @@ def _is_already_finalized(exc: DkgError) -> bool:
     """
     msg = str(exc).lower()
     return "already finalized" in msg or "already exists" in msg
+
+
+def _is_already_published(exc: DkgError) -> bool:
+    """True when ``vm/publish`` failed only because the KA is already on-chain.
+
+    Re-publishing a KA we already minted — e.g. the local seeded ledger was lost,
+    or a prior publish confirmed on-chain *after* our client hit its timeout — is
+    a no-op we can treat as success rather than a paid retry or a hard error.
+    """
+    msg = str(exc).lower()
+    return (
+        "already published" in msg
+        or "already on chain" in msg
+        or "already exists on chain" in msg
+    )
+
+
+def _coerce_chain_id(value: Any) -> Optional[int]:
+    """Parse a chain id from an int or a ``"base:8453"``-style string."""
+    if isinstance(value, bool):  # bool is an int subclass — reject it explicitly
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        m = re.search(r"(\d{2,7})", value)  # "base:8453" -> 8453
+        if m:
+            return int(m.group(1))
+    return None
 
 
 def _dkg_home() -> Path:
@@ -137,16 +166,17 @@ class DkgClient:
         """Return node status; raises :class:`DkgError` if unreachable.
 
         ``GET /api/status`` is the public (no-auth) liveness endpoint; older
-        daemons are probed via ``/api/info`` then ``/api/health``. Pass
-        ``timeout`` for a fast liveness probe (e.g. the dashboard) so a dead
-        node fails in a second or two rather than the default read timeout.
+        daemons are probed via ``/api/info`` as a fallback (``/api/health`` is
+        not a DKG v10 route, so we don't probe it). Pass ``timeout`` for a fast
+        liveness probe (e.g. the dashboard) so a dead node fails in a second or
+        two rather than the default read timeout.
         """
-        for route in ("/api/status", "/api/info", "/api/health"):
+        for route in ("/api/status", "/api/info"):
             try:
                 return self._request("GET", route, timeout=timeout)
             except DkgError:
                 continue
-        raise DkgError("node unreachable on /api/status, /api/info, /api/health")
+        raise DkgError("node unreachable on /api/status, /api/info")
 
     def agent_identity(self) -> Dict[str, Any]:
         """Resolve the calling token to its agent identity.
@@ -155,6 +185,48 @@ class DkgClient:
         the definitive way to learn which agent the node sees us as.
         """
         return self._request("GET", "/api/agent/identity")
+
+    def chain_info(self) -> Dict[str, Any]:
+        """Best-effort network identity from ``/api/status``.
+
+        DKG v10 reports its chain a few ways across builds — a bare ``chainId``
+        (int, or a ``"base:8453"`` string), a nested ``chain`` object, and/or the
+        human ``networkName``/``networkConfig`` strings. We parse whatever's
+        present into ``{chain_id, network, is_mainnet, is_testnet}`` so callers
+        can verify the node is on a supported MAINNET before spending TRAC.
+
+        Never raises: unresolved fields come back ``None`` and callers decide
+        policy (the seed preflight blocks a *positively-identified* testnet and
+        only warns when the chain can't be determined).
+        """
+        try:
+            st = self.status()
+        except DkgError:
+            return {"chain_id": None, "network": "", "is_mainnet": None, "is_testnet": None}
+        chain = st.get("chain") if isinstance(st.get("chain"), dict) else {}
+        chain_id = None
+        for src in (st.get("chainId"), st.get("chain_id"), chain.get("chainId"), chain.get("chain_id"), chain.get("id")):
+            chain_id = _coerce_chain_id(src)
+            if chain_id is not None:
+                break
+        network = str(
+            st.get("networkConfig") or st.get("networkName") or chain.get("name") or ""
+        ).strip()
+        is_mainnet: Optional[bool]
+        is_testnet: Optional[bool]
+        if chain_id is not None:
+            is_mainnet = chain_id in constants.DKG_MAINNET_CHAINS
+            is_testnet = chain_id in constants.DKG_TESTNET_CHAINS
+        else:
+            # No numeric id — fall back to keyword-matching the network string.
+            low = network.lower()
+            if any(t in low for t in ("testnet", "sepolia", "chiado", "lofar")):
+                is_mainnet, is_testnet = False, True
+            elif "mainnet" in low:
+                is_mainnet, is_testnet = True, False
+            else:
+                is_mainnet = is_testnet = None
+        return {"chain_id": chain_id, "network": network, "is_mainnet": is_mainnet, "is_testnet": is_testnet}
 
     def reachable(self, timeout: Optional[float] = None) -> bool:
         try:
@@ -165,11 +237,25 @@ class DkgClient:
 
     # -- context graph -----------------------------------------------------
 
-    def create_context_graph(self, cg_id: str, name: str, description: str = "") -> Dict[str, Any]:
-        """Create a local context graph (free, off-chain)."""
+    def create_context_graph(self, cg_id: str, name: str, description: str = "",
+                             access_policy: Optional[int] = None) -> Dict[str, Any]:
+        """Create a local context graph (free, off-chain).
+
+        Pass ``access_policy=0`` to create it PUBLIC. This is the *local*
+        privacy classification the daemon writes into the CG's ``_meta`` graph
+        and checks (``canReadContextGraph``) on every read. A new CG otherwise
+        defaults to curated/private, and shared-working-memory reads fail closed
+        on a private CG ("local node is not authorized") — so no other Guardian
+        user can ever see the community pool. ``0`` = public (anyone reads +
+        subscribes to SWM), ``1`` = curated/private (allowlist-gated). Keep this
+        in sync with ``register_context_graph(access_policy=0)`` so the on-chain
+        and local classifications agree.
+        """
         body: Dict[str, Any] = {"id": cg_id, "name": name}
         if description:
             body["description"] = description
+        if access_policy is not None:
+            body["accessPolicy"] = access_policy
         return self._request("POST", "/api/context-graph/create", body)
 
     def register_context_graph(self, cg_id: str, access_policy: int, publish_policy: int) -> Dict[str, Any]:
@@ -221,13 +307,36 @@ class DkgClient:
         )
 
     def publish(self, cg_id: str, name: str, epochs: int = 1) -> Dict[str, Any]:
-        """Mint a sealed KA on-chain (VM). Returns ``{kaId, ual, txHash, ...}``."""
-        return self._request(
-            "POST",
-            f"/api/knowledge-assets/{name}/vm/publish",
-            {"contextGraphId": cg_id, "options": {"publishEpochs": max(1, int(epochs))}},
-            timeout=_ONCHAIN_TIMEOUT,
-        )
+        """Mint a sealed KA on-chain (VM). Returns ``{kaId, ual, txHash, ...}``.
+
+        Idempotent on re-publish: if the KA is already on-chain (lost ledger, or
+        a prior publish that confirmed after our client timed out), we treat it
+        as success instead of paying for a retry.
+
+        Guards the DKG v10 **HTTP 207** "minted-but-context-graph-binding-failed"
+        case: the KA mints (UAL is valid, TRAC is spent) but isn't bound to the
+        CG, so it never appears in CG-scoped queries — useless for the threat
+        graph. 207 is a 2xx, so it wouldn't otherwise raise; we turn a present
+        ``contextGraphError`` into a :class:`DkgError` so the caller does NOT
+        record it to the seeded ledger as "landed".
+        """
+        try:
+            result = self._request(
+                "POST",
+                f"/api/knowledge-assets/{name}/vm/publish",
+                {"contextGraphId": cg_id, "options": {"publishEpochs": max(1, int(epochs))}},
+                timeout=_ONCHAIN_TIMEOUT,
+            )
+        except DkgError as exc:
+            if _is_already_published(exc):
+                return {"name": name, "idempotent": True}
+            raise
+        if isinstance(result, dict) and result.get("contextGraphError"):
+            raise DkgError(
+                f"vm/publish {name}: KA minted (ual={result.get('ual')}) but context-graph "
+                f"binding failed: {result.get('contextGraphError')} — not recording as published"
+            )
+        return result
 
     # -- query -------------------------------------------------------------
 

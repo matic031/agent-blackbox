@@ -819,6 +819,10 @@ def build_threat_quads(
     curated: bool = True,
     kind: Optional[str] = None,
     ts: Optional[datetime] = None,
+    # provenance — applies to every category
+    sources: Optional[Iterable[str]] = None,
+    references: Optional[Iterable[str]] = None,
+    contributor: Optional[str] = None,
     # injection
     pattern: Optional[str] = None,
     owasp_category: Optional[str] = None,
@@ -831,7 +835,6 @@ def build_threat_quads(
     package_version: Optional[str] = None,
     advisory_id: Optional[str] = None,
     fixed_version: Optional[str] = None,
-    references: Optional[Iterable[str]] = None,
     # fileaccess
     file_category: Optional[str] = None,
     # skill
@@ -844,6 +847,11 @@ def build_threat_quads(
     *category* ∈ ``{"injection", "escalation", "dependency", "fileaccess",
     "skill"}``. The subject URI is :func:`threat_uri` of *identifier*, so
     re-authoring the same threat targets the same KA.
+
+    *sources* (named feeds/datasets), *references* (source URLs) and
+    *contributor* (optional attribution) are provenance and are emitted for
+    every category so the dashboard can show where a threat came from and who
+    contributed it.
     """
     subj = threat_uri(identifier)
     type_iri = {
@@ -869,6 +877,15 @@ def build_threat_quads(
     if kind:
         out.append(_q(subj, constants.KIND_PRED, literal(kind)))
 
+    for src in list(sources or [])[:20]:
+        if src:
+            out.append(_q(subj, constants.SOURCE_PRED, literal(str(src))))
+    for ref in list(references or [])[:20]:
+        if ref:
+            out.append(_q(subj, constants.REFERENCE_PRED, literal(str(ref))))
+    if contributor:
+        out.append(_q(subj, constants.SCHEMA_CONTRIBUTOR_PRED, literal(str(contributor))))
+
     if category == "injection":
         if pattern:
             out.append(_q(subj, constants.PATTERN_PRED, literal(pattern)))
@@ -890,9 +907,6 @@ def build_threat_quads(
             out.append(_q(subj, constants.SCHEMA_IDENTIFIER_PRED, literal(advisory_id)))
         if fixed_version:
             out.append(_q(subj, constants.FIXED_VERSION_PRED, literal(fixed_version)))
-        for ref in list(references or [])[:20]:
-            if ref:
-                out.append(_q(subj, constants.REFERENCE_PRED, literal(str(ref))))
     elif category == "fileaccess":
         if tool_name:
             out.append(_q(subj, constants.TOOL_NAME_PRED, literal(tool_name)))

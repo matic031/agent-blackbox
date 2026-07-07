@@ -696,6 +696,7 @@ def create_app():
         constants.PATTERN_PRED: "pattern",
         constants.CURATED_PRED: "curated",
         constants.SCHEMA_DATE_MODIFIED_PRED: "modified",
+        constants.SCHEMA_CONTRIBUTOR_PRED: "contributor",
     }
 
     @app.get("/api/threat")
@@ -713,6 +714,7 @@ def create_app():
             "identifier": identifier,
             "tier": tier,
             "category": category,
+            "sources": [],
             "references": [],
             "found": False,
         }
@@ -726,11 +728,25 @@ def create_app():
             # Skip the point-lookup on an unreachable node so opening a threat
             # can't hang on a dead node.
             client = DkgClient(url=cfg.dkg_url) if _node_reachable(cfg) else None
-            rows = client.query(
-                _PREFIX + f'SELECT ?t ?p ?o WHERE {{ ?t g:identifier "{lit}" . ?t ?p ?o }}',
-                cfg.context_graph_id,
-                view=view,
-            ) if client else []
+            if client is None:
+                rows = []
+            elif tier == "community":
+                # Community detail from the store, not the shared-memory view —
+                # the view does O(slice) trust work and times out on a large pool
+                # (same reason the community list uses query_store), which would
+                # otherwise hang the detail modal. Scope to this CG's SWM slices.
+                sm = f"did:dkg:context-graph:{cfg.context_graph_id}/_shared_memory"
+                rows = client.query_store(
+                    _PREFIX + f'SELECT ?t ?p ?o WHERE {{ GRAPH ?gr {{ ?t g:identifier "{lit}" . ?t ?p ?o }} '
+                    f'FILTER(STRSTARTS(STR(?gr), "{sm}")) }}',
+                    on_error=[],
+                )
+            else:
+                rows = client.query(
+                    _PREFIX + f'SELECT ?t ?p ?o WHERE {{ ?t g:identifier "{lit}" . ?t ?p ?o }}',
+                    cfg.context_graph_id,
+                    view=view,
+                )
             subjects: Dict[str, List[Any]] = {}
             for row in rows:
                 subjects.setdefault(extract_binding(row.get("t")), []).append(
@@ -753,6 +769,9 @@ def create_app():
                     if pred == constants.REFERENCE_PRED:
                         if obj and obj not in detail["references"]:
                             detail["references"].append(obj)
+                    elif pred == constants.SOURCE_PRED:
+                        if obj and obj not in detail["sources"]:
+                            detail["sources"].append(obj)
                     elif pred in _DETAIL_FIELDS:
                         detail[_DETAIL_FIELDS[pred]] = obj
             detail["reporters"] = len(reporters)

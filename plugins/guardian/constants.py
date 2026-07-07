@@ -50,6 +50,11 @@ PACKAGE_VERSION_PRED = f"{GUARDIAN_ONTOLOGY}packageVersion"
 PACKAGE_ECOSYSTEM_PRED = f"{GUARDIAN_ONTOLOGY}packageEcosystem"
 FIXED_VERSION_PRED = f"{GUARDIAN_ONTOLOGY}fixedVersion"
 REFERENCE_PRED = f"{GUARDIAN_ONTOLOGY}reference"
+# Named provenance of the threat intel — the feed/dataset/publication it came
+# from (e.g. "OSV.dev", "Socket", "OWASP LLM Top 10"). Distinct from
+# g:reference (a clickable source URL) and from the tier/graph it lives in.
+# Multi-valued: an entry may cite more than one source.
+SOURCE_PRED = f"{GUARDIAN_ONTOLOGY}source"
 REPORTS_THREAT_PRED = f"{GUARDIAN_ONTOLOGY}reportsThreat"
 REPORTER_PRED = f"{GUARDIAN_ONTOLOGY}reporter"
 FRAMEWORK_PRED = f"{GUARDIAN_ONTOLOGY}framework"
@@ -75,6 +80,9 @@ SCHEMA_NAME_PRED = "http://schema.org/name"
 SCHEMA_DESCRIPTION_PRED = "http://schema.org/description"
 SCHEMA_IDENTIFIER_PRED = "http://schema.org/identifier"
 SCHEMA_DATE_MODIFIED_PRED = "http://schema.org/dateModified"
+#: Optional attribution — who contributed this curated asset (an org, handle,
+#: or wallet). schema.org/contributor keeps the attribution interoperable.
+SCHEMA_CONTRIBUTOR_PRED = "http://schema.org/contributor"
 
 # ---------------------------------------------------------------------------
 # Defaults
@@ -88,6 +96,20 @@ DEFAULT_CONTEXT_GRAPH_ID = "umanitek/guardian-threats-staging"
 
 #: Default local DKG node HTTP endpoint.
 DEFAULT_DKG_URL = "http://127.0.0.1:9200"
+
+# ---------------------------------------------------------------------------
+# DKG networks — Guardian is MAINNET ONLY (never publishes to a testnet)
+# ---------------------------------------------------------------------------
+#: Supported DKG mainnets, by EVM chain id → dkg network slug. Base is the
+#: default: the curator wallet is funded with ETH on Base. Gnosis/NeuroWeb are
+#: allowed overrides (via ``GUARDIAN_DKG_NETWORK`` / ``setup-graph --network``).
+DKG_MAINNET_CHAINS = {8453: "mainnet-base", 100: "mainnet-gnosis", 2043: "mainnet-neuroweb"}
+#: Known DKG testnets. A node on any of these must NEVER be published to — the
+#: real threat graph lives on mainnet. The preflight blocks these outright.
+DKG_TESTNET_CHAINS = {84532: "testnet-base-sepolia", 10200: "testnet-gnosis-chiado", 20430: "testnet-neuroweb"}
+#: The intended default chain. Fresh DKG v10 nodes can come up on a different
+#: chain (the node default is Gnosis), so seeding verifies against this.
+DEFAULT_DKG_CHAIN_ID = 8453  # Base mainnet
 
 #: Severity ladder, lowest → highest. ``info`` < ... < ``critical``.
 SEVERITY_ORDER = ("info", "low", "medium", "high", "critical")

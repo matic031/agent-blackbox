@@ -110,6 +110,40 @@ def test_build_threat_quads_dependency_shape():
     assert any(t["object"] == '"true"' and t["predicate"] == constants.CURATED_PRED for t in q)
 
 
+def test_build_threat_quads_emits_provenance_for_any_category():
+    # source (named feed), reference (URL) and contributor now emit for every
+    # category — injection references used to be dropped.
+    q = quads.build_threat_quads(
+        category="injection",
+        identifier="injection:abc",
+        severity="high",
+        name="override",
+        description="",
+        pattern="ignore previous",
+        sources=["OWASP LLM Top 10", "JailbreakHub"],
+        references=["https://owasp.org/x"],
+        contributor="Umanitek",
+    )
+    sources = [t["object"] for t in q if t["predicate"] == constants.SOURCE_PRED]
+    refs = [t["object"] for t in q if t["predicate"] == constants.REFERENCE_PRED]
+    contrib = [t["object"] for t in q if t["predicate"] == constants.SCHEMA_CONTRIBUTOR_PRED]
+    assert sources == ['"OWASP LLM Top 10"', '"JailbreakHub"']
+    assert refs == ['"https://owasp.org/x"']
+    assert contrib == ['"Umanitek"']
+
+
+def test_build_threat_quads_provenance_is_optional():
+    # Omitting provenance emits none of the provenance predicates.
+    q = quads.build_threat_quads(
+        category="skill", identifier="skill:x@1", severity="critical",
+        name="x", description="", skill_name="x", skill_version="1",
+    )
+    preds = {t["predicate"] for t in q}
+    assert constants.SOURCE_PRED not in preds
+    assert constants.SCHEMA_CONTRIBUTOR_PRED not in preds
+    assert constants.REFERENCE_PRED not in preds
+
+
 def test_build_report_quads_no_command_text_and_links_threat():
     q = quads.build_report_quads(
         identifier="injection:abc",

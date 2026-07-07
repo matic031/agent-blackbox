@@ -182,6 +182,8 @@ def setup_cli(parser: argparse.ArgumentParser) -> None:
     capprove.add_argument("--description", default="", help="Override description")
     capprove.add_argument("--epochs", type=int, default=1, help="VM publish epochs")
     capprove.add_argument("--no-publish", action="store_true", help="Share to SWM only, skip vm/publish")
+    capprove.add_argument("--source", help="Named source/feed for this threat (shown in the dashboard modal).")
+    capprove.add_argument("--contributor", help="Attribution — who contributed this asset.")
     capprove.set_defaults(func=_cmd_curate_approve)
 
     creject = csub.add_parser("reject", help="Mark a candidate rejected (locally; optional SWM false-positive)")
@@ -204,6 +206,8 @@ def setup_cli(parser: argparse.ArgumentParser) -> None:
     cimport.add_argument("--check-graph", action="store_true", help="Also skip identifiers already on-chain (queries the VM once)")
     cimport.add_argument("--epochs", type=int, default=1, help="Storage epochs per asset — higher = longer on-chain life, more TRAC (default 1)")
     cimport.add_argument("--limit", type=int, help="Publish at most N NEW threats this run (batch seeding). Re-run to continue — the seeded ledger resumes where you left off, so it never double-pays.")
+    cimport.add_argument("--source", help="Named source/feed for entries that don't set their own (e.g. 'OSV.dev', 'Socket'). Shown in the dashboard modal.")
+    cimport.add_argument("--contributor", help="Attribution stamped on entries that don't set their own — who contributed this batch (e.g. 'Umanitek').")
     cimport.set_defaults(func=_cmd_curate_import)
 
     dash = sub.add_parser("dashboard", help="Start the local Guardian dashboard")
@@ -418,6 +422,22 @@ def _cmd_status(args: argparse.Namespace) -> int:
     print(f"  block severity:    {cfg.block_severity}")
     print(f"  context graph:     {cfg.context_graph_id}")
     print(f"  DKG node:          {cfg.dkg_url}  [{'reachable' if reachable else 'unreachable'}]")
+    if reachable:
+        info = client.chain_info()
+        cid = info.get("chain_id")
+        net = info.get("network") or "unknown"
+        if info.get("is_testnet"):
+            suffix = " — TESTNET (publishing disabled)"
+        elif info.get("is_mainnet") and cid == constants.DEFAULT_DKG_CHAIN_ID:
+            suffix = " (Base mainnet)"
+        elif info.get("is_mainnet"):
+            suffix = " (mainnet, not Base — wallet is funded on Base)"
+        elif cid is not None:
+            suffix = " — unrecognized chain"
+        else:
+            suffix = ""
+        idpart = f"chainId {cid}" if cid is not None else "chain unknown"
+        print(f"  DKG network:       {net} ({idpart}){suffix}")
     print(f"  reports:           {'on' if cfg.report else 'off'} (limit {cfg.daily_report_limit}/day)")
     print(f"  sync interval:     {cfg.sync_interval}s")
     print(f"  ruleset:           {counts['injection']} injection, "
@@ -569,14 +589,51 @@ def _cmd_report(args: argparse.Namespace) -> int:
     return 0
 
 
+def _require_mainnet_for_publish(client: DkgClient) -> bool:
+    """Preflight before spending TRAC: is the node on a supported mainnet?
+
+    Fresh DKG v10 nodes can come up on a testnet, or on a different mainnet than
+    the curator wallet is funded on (the node's own default is Gnosis, not Base)
+    — and publishing then silently goes to the wrong chain, or to a testnet, with
+    no signal. So before any paid publish we check the node's real chain:
+
+    * positively-identified **testnet** or an **unrecognized** chain → BLOCK.
+    * a **mainnet that isn't Base** (Gnosis/NeuroWeb) → WARN, allow (valid override).
+    * chain **can't be read** from ``/api/status`` → WARN, allow (fail-open so a
+      healthy node whose status shape we don't recognize is never falsely blocked).
+    """
+    info = client.chain_info()
+    cid = info.get("chain_id")
+    net = info.get("network") or "unknown"
+    if info.get("is_testnet"):
+        print(f"error: DKG node is on a TESTNET ({net}, chainId={cid}). Guardian is mainnet-only — refusing to publish.")
+        print("       Re-bootstrap on mainnet:  dkg hermes setup --network mainnet-base")
+        return False
+    if cid is not None and not info.get("is_mainnet"):
+        print(f"error: DKG node is on an unrecognized chain (chainId={cid}, {net}); refusing to publish.")
+        print("       Guardian publishes only to a DKG mainnet (mainnet-base). Check your node config.")
+        return False
+    if cid is not None and cid != constants.DEFAULT_DKG_CHAIN_ID:
+        print(f"warning: DKG node is on {net} (chainId={cid}), not Base (8453) — the curator wallet is funded")
+        print("         with ETH on Base, so publishes go to this chain instead. Continue only if intentional.")
+    elif cid is None:
+        print(f"warning: could not read the DKG node's chain from /api/status (network={net!r}); proceeding without a mainnet check.")
+    return True
+
+
 def _cmd_setup_graph(args: argparse.Namespace) -> int:
     cfg = load_guardian_config()
     client = DkgClient(url=cfg.dkg_url)
+    if not _require_mainnet_for_publish(client):
+        return 1
     cg = cfg.context_graph_id
     try:
+        # PUBLIC (access_policy=0), or the CG stays private and SWM reads fail
+        # closed — no peer ever sees the community graph. See create_context_graph.
         client.create_context_graph(cg, name="Umanitek Guardian Threats",
-                                    description="Curated agent-security threat intelligence.")
-        print(f"Created context graph {cg} (or already existed).")
+                                    description="Curated agent-security threat intelligence.",
+                                    access_policy=0)
+        print(f"Created context graph {cg} as PUBLIC (or already existed).")
     except DkgError as exc:
         print(f"note: create returned: {exc}")
     try:
@@ -735,6 +792,9 @@ def _cmd_curate_approve(args: argparse.Namespace) -> int:
         description=description,
         curated=True,
         kind=kind,
+        sources=[args.source] if args.source else (fields.get("sources") or None),
+        references=fields.get("references"),
+        contributor=args.contributor or fields.get("contributor"),
         pattern=fields.get("pattern"),
         owasp_category=fields.get("owasp_category"),
         tool_name=fields.get("tool_name"),
@@ -748,6 +808,8 @@ def _cmd_curate_approve(args: argparse.Namespace) -> int:
         skill_version=fields.get("skill_version"),
         danger_shape=fields.get("danger_shape"),
     )
+    if not args.no_publish and not _require_mainnet_for_publish(client):
+        return 1
     ka_name = f"threat-{quads.slug(ident)}"
     try:
         client.share_knowledge_asset(cfg.context_graph_id, ka_name, q)
@@ -810,6 +872,11 @@ def _cmd_curate_import(args: argparse.Namespace) -> int:
     publish = not args.no_publish
     dry_run = getattr(args, "dry_run", False)
 
+    # Before spending any TRAC, verify the node is actually on a supported
+    # mainnet (a dry-run or --no-publish/SWM-only run needs no chain check).
+    if publish and not dry_run and not _require_mainnet_for_publish(client):
+        return 1
+
     # Dedup — each mainnet VM publish costs TRAC, so never publish an identifier
     # twice. Skip anything in the curator's seeded ledger (what we've published
     # before), plus — with --check-graph — anything already on-chain. The set
@@ -845,6 +912,8 @@ def _cmd_curate_import(args: argparse.Namespace) -> int:
             client, cfg, entries, publish=publish, already=already,
             dry_run=dry_run, epochs=max(1, int(getattr(args, "epochs", 1) or 1)),
             limit=remaining,
+            contributor=getattr(args, "contributor", None),
+            source=getattr(args, "source", None),
         )
         seeded += s
         dup_skipped += sk
@@ -954,6 +1023,8 @@ def _seed_entries(
     dry_run: bool = False,
     epochs: int = 1,
     limit: Optional[int] = None,
+    contributor: Optional[str] = None,
+    source: Optional[str] = None,
 ) -> tuple:
     """Seed flattened *entries* as curated threats, skipping duplicates.
 
@@ -984,6 +1055,9 @@ def _seed_entries(
             if publish:  # the ledger tracks on-chain publishes only
                 new_ids.append(ident)
             continue
+        # Provenance: entry-level source/contributor win; the --source/--contributor
+        # run defaults fill anything the entry (and its catalog) left blank.
+        prov = _entry_provenance(entry)
         q = quads.build_threat_quads(
             category=category,
             identifier=ident,
@@ -992,6 +1066,9 @@ def _seed_entries(
             description=fields.get("description", ""),
             curated=True,
             kind=fields.get("kind"),
+            sources=prov["sources"] or ([source] if source else None),
+            references=prov["references"],
+            contributor=prov["contributor"] or contributor,
             pattern=fields.get("pattern"),
             owasp_category=fields.get("owasp_category"),
             tool_name=fields.get("tool_name"),
@@ -1000,7 +1077,6 @@ def _seed_entries(
             package_name=fields.get("package_name"),
             package_version=fields.get("package_version"),
             advisory_id=fields.get("advisory_id"),
-            references=fields.get("references"),
             file_category=fields.get("file_category"),
             skill_name=fields.get("skill_name"),
             skill_version=fields.get("skill_version"),
@@ -1441,6 +1517,11 @@ def _flatten_bumblebee(catalog: Dict[str, Any]) -> List[Dict[str, Any]]:
     """
     out: List[Dict[str, Any]] = []
     comment = str(catalog.get("_comment") or "").strip()
+    # Bumblebee data is Socket-derived (Shai-Hulud, GlassWorm, credential
+    # stealers, …), so stamp "Socket" as the named source unless the file says
+    # otherwise. A catalog-level contributor, if present, attributes every entry.
+    default_source = str(catalog.get("source") or "Socket").strip()
+    contributor = str(catalog.get("contributor") or "").strip()
     for entry in catalog.get("entries", []) or []:
         if not isinstance(entry, dict):
             continue
@@ -1482,9 +1563,65 @@ def _flatten_bumblebee(catalog: Dict[str, Any]) -> List[Dict[str, Any]]:
                     "severity": severity,
                     "advisoryId": advisory_id,
                     "references": references,
+                    "source": default_source,
+                    "contributor": contributor,
                 }
             )
     return out
+
+
+def _catalog_provenance_defaults(catalog: Any) -> Dict[str, Any]:
+    """Top-level ``source``/``sources``/``contributor`` defaults for a catalog.
+
+    A catalog file may declare provenance once at the root and have it apply to
+    every entry that doesn't carry its own — convenient for a whole OSV/Socket
+    dump ("this entire file came from OSV.dev, contributed by Umanitek").
+    """
+    if not isinstance(catalog, dict):
+        return {}
+    defaults: Dict[str, Any] = {}
+    src = catalog.get("sources") or catalog.get("source")
+    if src:
+        defaults["source"] = src
+    if catalog.get("contributor"):
+        defaults["contributor"] = catalog.get("contributor")
+    return defaults
+
+
+def _apply_provenance_defaults(entry: Dict[str, Any], defaults: Dict[str, Any]) -> None:
+    """Fill an entry's missing source/contributor from catalog-level *defaults*."""
+    if defaults.get("source") and not (entry.get("source") or entry.get("sources")):
+        entry["source"] = defaults["source"]
+    if defaults.get("contributor") and not entry.get("contributor"):
+        entry["contributor"] = defaults["contributor"]
+
+
+def _entry_provenance(entry: Dict[str, Any]) -> Dict[str, Any]:
+    """Extract provenance from a catalog entry, shown in the dashboard modal.
+
+    ``source``/``sources`` are named feeds or datasets (e.g. "OSV.dev",
+    "Socket", "OWASP LLM Top 10"); ``references`` are clickable source URLs;
+    ``contributor`` is optional attribution. Returns
+    ``{sources: [...], references: [...], contributor: str|None}``. A source
+    given as a URL is also surfaced as a clickable reference.
+    """
+    raw_sources = entry.get("sources")
+    if raw_sources is None:
+        raw_sources = entry.get("source")
+    if isinstance(raw_sources, str):
+        raw_sources = [raw_sources]
+    sources = [str(s).strip() for s in (raw_sources or []) if str(s).strip()]
+
+    raw_refs = entry.get("references")
+    if isinstance(raw_refs, str):
+        raw_refs = [raw_refs]
+    references = [str(r).strip() for r in (raw_refs or []) if str(r).strip()]
+    for s in sources:
+        if s.startswith(("http://", "https://")) and s not in references:
+            references.append(s)
+
+    contributor = str(entry.get("contributor") or "").strip() or None
+    return {"sources": sources, "references": references, "contributor": contributor}
 
 
 def _flatten_catalog(catalog: Any, forced_type: Optional[str]) -> List[Dict[str, Any]]:
@@ -1493,6 +1630,8 @@ def _flatten_catalog(catalog: Any, forced_type: Optional[str]) -> List[Dict[str,
     Accepts the bumblebee ``{entries:[{package, versions:[...]}]}`` format (fanned
     out one dependency threat per package+version), the generic ``{threats:[...]}``
     format, and the ``{dependencies/injection/escalation:[...]}`` split format.
+    A catalog-level ``source``/``contributor`` is stamped onto every entry that
+    doesn't set its own.
     """
     if _is_bumblebee_catalog(catalog):
         return _flatten_bumblebee(catalog)
@@ -1501,22 +1640,24 @@ def _flatten_catalog(catalog: Any, forced_type: Optional[str]) -> List[Dict[str,
         for item in catalog:
             if isinstance(item, dict):
                 out.append({**item, **({"type": forced_type} if forced_type else {})})
-        return out
-    if not isinstance(catalog, dict):
-        return out
-    for item in catalog.get("threats", []) or []:
-        if isinstance(item, dict):
-            out.append({**item, **({"type": forced_type} if forced_type else {})})
-    for key, ctype in (
-        ("dependencies", "dependency"),
-        ("injection", "injection"),
-        ("escalation", "escalation"),
-        ("fileaccess", "fileaccess"),
-        ("skills", "skill"),
-    ):
-        for item in catalog.get(key, []) or []:
+    elif isinstance(catalog, dict):
+        for item in catalog.get("threats", []) or []:
             if isinstance(item, dict):
-                out.append({"type": ctype, **item})
+                out.append({**item, **({"type": forced_type} if forced_type else {})})
+        for key, ctype in (
+            ("dependencies", "dependency"),
+            ("injection", "injection"),
+            ("escalation", "escalation"),
+            ("fileaccess", "fileaccess"),
+            ("skills", "skill"),
+        ):
+            for item in catalog.get(key, []) or []:
+                if isinstance(item, dict):
+                    out.append({"type": ctype, **item})
+    defaults = _catalog_provenance_defaults(catalog)
+    if defaults:
+        for entry in out:
+            _apply_provenance_defaults(entry, defaults)
     return out
 
 

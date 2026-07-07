@@ -585,12 +585,12 @@ next_steps() {
     cat <<EOF
 ${path_note}
   ${BOLD}Start your agent${NC}   — Guardian watches every tool call automatically:
-       hermes
+       hermes guardian chat
 
   ${BOLD}Watch it live${NC}      — findings + threat-graph status in your browser:
        hermes guardian dashboard      →  http://127.0.0.1:${GUARDIAN_DASHBOARD_PORT:-9700}
 
-  ${BOLD}Try it${NC}            - in a hermes chat, ask it to run:
+  ${BOLD}Try it${NC}            - in the Guardian chat, ask it to run:
        rm -rf ~/
        Guardian flags this as an 'rm-rf-system-paths' escalation. $mode_note
 
