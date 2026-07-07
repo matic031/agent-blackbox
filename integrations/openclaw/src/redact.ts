@@ -1,5 +1,5 @@
 /**
- * Secret redaction — mirror of the hermes `audit.py` / guardian.ts sanitizer.
+ * Secret redaction — mirror of the hermes `audit.py` / blackbox.ts sanitizer.
  * Reports NEVER carry raw content; evidence snippets are always run through
  * this first. Pure, zero deps.
  */

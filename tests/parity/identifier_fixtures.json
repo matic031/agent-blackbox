@@ -1,5 +1,5 @@
 {
-  "note": "Ground truth generated from plugins/guardian/quads.py by tests/parity/generate.py. The OpenClaw TypeScript plugin must reproduce these exactly. Guarded by tests/plugins/test_guardian_parity.py (Python) and integrations/openclaw/test/parity.mjs (TypeScript).",
+  "note": "Ground truth generated from plugins/blackbox/quads.py by tests/parity/generate.py. The OpenClaw TypeScript plugin must reproduce these exactly. Guarded by tests/plugins/test_blackbox_parity.py (Python) and integrations/openclaw/test/parity.mjs (TypeScript).",
   "identifiers": [
     {
       "kind": "dependency",

@@ -1,7 +1,7 @@
 /**
- * Guardian config resolution.
+ * Blackbox config resolution.
  *
- * Source order (later wins): built-in defaults → `plugins.entries.guardian.config`
+ * Source order (later wins): built-in defaults → `plugins.entries.blackbox.config`
  * (passed by OpenClaw as `api.pluginConfig`) → environment overrides.
  *
  * Keys mirror the hermes plugin's config table so the two frameworks stay in
@@ -9,7 +9,7 @@
  */
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { GuardianSeverity, SEVERITY_RANK } from "./quads.js";
+import { BlackboxSeverity, SEVERITY_RANK } from "./quads.js";
 import type { ThreatCategory } from "./detection.js";
 
 /**
@@ -27,14 +27,14 @@ export const DETECTION_CATEGORIES = [
 /**
  * Resolved per-category user policy. `enabled=false` drops the whole category;
  * `minSeverity` sets a per-category floor below which findings are dropped.
- * Mirrors Python `config.GuardianConfig.category_setting`.
+ * Mirrors Python `config.BlackboxConfig.category_setting`.
  */
 export interface CategorySetting {
   enabled: boolean;
-  minSeverity: GuardianSeverity;
+  minSeverity: BlackboxSeverity;
 }
 
-export interface GuardianConfig {
+export interface BlackboxConfig {
   mode: "audit" | "block";
   contextGraphId: string;
   dkgUrl: string;
@@ -48,8 +48,8 @@ export interface GuardianConfig {
    * the findings feed and the community graph. Mirrors Python
    * `report_min_severity`.
    */
-  reportMinSeverity: GuardianSeverity;
-  blockSeverity: GuardianSeverity;
+  reportMinSeverity: BlackboxSeverity;
+  blockSeverity: BlackboxSeverity;
   /** Run the built-in discovery nomination layer (candidate threats). */
   discover: boolean;
   /** Run OSV dependency auto-discovery off the blocking path. */
@@ -57,32 +57,32 @@ export interface GuardianConfig {
   /**
    * Per-category user policy: `{category: {enabled, minSeverity}}`. Missing
    * categories default to enabled at `info` (flag everything the graph knows).
-   * Read from `plugins.entries.guardian.detection.<category>.{enabled,min_severity}`
-   * (snake_case + camelCase accepted). Mirrors Python `GuardianConfig.categories`.
+   * Read from `plugins.entries.blackbox.detection.<category>.{enabled,min_severity}`
+   * (snake_case + camelCase accepted). Mirrors Python `BlackboxConfig.categories`.
    */
   categories: Partial<Record<ThreatCategory, Partial<CategorySetting>>>;
   /**
    * User-defined protected path patterns (globs / prefixes). Access to a
    * matching path is flagged locally (source="custom", never shared) and blocks
-   * in block mode. Read from `plugins.entries.guardian.protected_paths`.
-   * Mirrors Python `GuardianConfig.protected_paths`.
+   * in block mode. Read from `plugins.entries.blackbox.protected_paths`.
+   * Mirrors Python `BlackboxConfig.protected_paths`.
    */
   protectedPaths: string[];
   /**
    * Directory where this plugin writes its local findings log
-   * (`findings.openclaw.jsonl`). Set by `hermes guardian attach` to the Hermes
-   * guardian home so the ONE dashboard surfaces OpenClaw detections too. Falls
-   * back to `$OPENCLAW_STATE_DIR/guardian`. Read from
-   * `plugins.entries.guardian.config.guardianHome` / env `GUARDIAN_HOME`.
+   * (`findings.openclaw.jsonl`). Set by `hermes blackbox attach` to the Hermes
+   * blackbox home so the ONE dashboard surfaces OpenClaw detections too. Falls
+   * back to `$OPENCLAW_STATE_DIR/blackbox`. Read from
+   * `plugins.entries.blackbox.config.blackboxHome` / env `BLACKBOX_HOME`.
    */
-  guardianHome: string;
+  blackboxHome: string;
 }
 
-/** Default guardian home when unset — mirrors ruleset.ts `resolveStateDir`. */
-export function defaultGuardianHome(): string {
+/** Default blackbox home when unset — mirrors ruleset.ts `resolveStateDir`. */
+export function defaultBlackboxHome(): string {
   const base =
     process.env.OPENCLAW_STATE_DIR || process.env.OPENCLAW_HOME || join(homedir(), ".openclaw");
-  return join(base, "guardian");
+  return join(base, "blackbox");
 }
 
 /**
@@ -101,7 +101,7 @@ export const DEFAULT_PROTECTED_PATHS: readonly string[] = [
   "~/.aws/credentials", // cloud credential store
 ];
 
-const DEFAULTS: GuardianConfig = {
+const DEFAULTS: BlackboxConfig = {
   mode: "audit",
   // TEMPORARY: default to the STAGING graph while production is still being
   // seeded. TODO(launch): switch back to "umanitek/guardian-threats" (production).
@@ -116,7 +116,7 @@ const DEFAULTS: GuardianConfig = {
   osvLookup: true,
   categories: {},
   protectedPaths: [...DEFAULT_PROTECTED_PATHS],
-  guardianHome: "",
+  blackboxHome: "",
 };
 
 function str(value: unknown): string | undefined {
@@ -147,11 +147,11 @@ function mode(value: unknown): "audit" | "block" | undefined {
   return v === "audit" || v === "block" ? v : undefined;
 }
 
-function severity(value: unknown): GuardianSeverity | undefined {
+function severity(value: unknown): BlackboxSeverity | undefined {
   // Strict ladder check (no "moderate" aliasing) — an invalid value falls
   // through to the key's default, matching Python's config validation.
   const v = str(value)?.toLowerCase();
-  return v && v in SEVERITY_RANK ? (v as GuardianSeverity) : undefined;
+  return v && v in SEVERITY_RANK ? (v as BlackboxSeverity) : undefined;
 }
 
 /**
@@ -199,10 +199,10 @@ function normalizeProtectedPaths(raw: unknown): string[] {
 
 /**
  * Resolved user policy for one category: `{enabled, minSeverity}`. Defaults:
- * enabled at `info` — flag everything Guardian can detect for that category.
- * Mirrors Python `GuardianConfig.category_setting`.
+ * enabled at `info` — flag everything Blackbox can detect for that category.
+ * Mirrors Python `BlackboxConfig.category_setting`.
  */
-export function categorySetting(cfg: GuardianConfig, category: string): CategorySetting {
+export function categorySetting(cfg: BlackboxConfig, category: string): CategorySetting {
   const raw = cfg.categories[category as ThreatCategory];
   const minSeverity =
     raw && raw.minSeverity && raw.minSeverity in SEVERITY_RANK ? raw.minSeverity : "info";
@@ -212,12 +212,12 @@ export function categorySetting(cfg: GuardianConfig, category: string): Category
 
 /**
  * True when the user's policy lets a `category` finding at `severity` flag.
- * Mirrors Python `GuardianConfig.category_allows`.
+ * Mirrors Python `BlackboxConfig.category_allows`.
  */
 export function categoryAllows(
-  cfg: GuardianConfig,
+  cfg: BlackboxConfig,
   category: string,
-  sev: GuardianSeverity,
+  sev: BlackboxSeverity,
 ): boolean {
   const setting = categorySetting(cfg, category);
   if (!setting.enabled) return false;
@@ -226,62 +226,62 @@ export function categoryAllows(
 }
 
 /**
- * Merge plugin config + env into a resolved GuardianConfig. `pluginConfig` is
- * the `plugins.entries.guardian.config` object OpenClaw injects per handler.
+ * Merge plugin config + env into a resolved BlackboxConfig. `pluginConfig` is
+ * the `plugins.entries.blackbox.config` object OpenClaw injects per handler.
  *
  * The per-category detection policy (`detection.<category>.{enabled,min_severity}`)
  * and protected paths (`protected_paths`) mirror the Python plugin's
- * `plugins.entries.guardian.detection` / `.protected_paths` keys and are read
+ * `plugins.entries.blackbox.detection` / `.protected_paths` keys and are read
  * from the same injected config object.
  */
-export function resolveConfig(pluginConfig: Record<string, unknown> = {}): GuardianConfig {
+export function resolveConfig(pluginConfig: Record<string, unknown> = {}): BlackboxConfig {
   const env = process.env;
   return {
-    mode: mode(env.GUARDIAN_MODE) ?? mode(pluginConfig.mode) ?? DEFAULTS.mode,
+    mode: mode(env.BLACKBOX_MODE) ?? mode(pluginConfig.mode) ?? DEFAULTS.mode,
     contextGraphId:
-      str(env.GUARDIAN_CONTEXT_GRAPH_ID) ??
+      str(env.BLACKBOX_CONTEXT_GRAPH_ID) ??
       str(pluginConfig.contextGraphId) ??
       str(pluginConfig.context_graph_id) ??
       DEFAULTS.contextGraphId,
     dkgUrl: str(env.DKG_DAEMON_URL) ?? str(pluginConfig.dkgUrl) ?? str(pluginConfig.dkg_url) ?? DEFAULTS.dkgUrl,
     syncInterval:
-      num(env.GUARDIAN_SYNC_INTERVAL) ??
+      num(env.BLACKBOX_SYNC_INTERVAL) ??
       num(pluginConfig.syncInterval) ??
       num(pluginConfig.sync_interval) ??
       DEFAULTS.syncInterval,
-    report: bool(env.GUARDIAN_REPORT) ?? bool(pluginConfig.report) ?? DEFAULTS.report,
+    report: bool(env.BLACKBOX_REPORT) ?? bool(pluginConfig.report) ?? DEFAULTS.report,
     dailyReportLimit:
-      num(env.GUARDIAN_DAILY_REPORT_LIMIT) ??
+      num(env.BLACKBOX_DAILY_REPORT_LIMIT) ??
       num(pluginConfig.dailyReportLimit) ??
       num(pluginConfig.daily_report_limit) ??
       DEFAULTS.dailyReportLimit,
     reportMinSeverity:
-      severity(env.GUARDIAN_REPORT_MIN_SEVERITY) ??
+      severity(env.BLACKBOX_REPORT_MIN_SEVERITY) ??
       severity(pluginConfig.reportMinSeverity) ??
       severity(pluginConfig.report_min_severity) ??
       DEFAULTS.reportMinSeverity,
     blockSeverity:
-      severity(env.GUARDIAN_BLOCK_SEVERITY) ??
+      severity(env.BLACKBOX_BLOCK_SEVERITY) ??
       severity(pluginConfig.blockSeverity) ??
       severity(pluginConfig.block_severity) ??
       DEFAULTS.blockSeverity,
     discover:
-      bool(env.GUARDIAN_DISCOVER) ??
+      bool(env.BLACKBOX_DISCOVER) ??
       bool(pluginConfig.discover) ??
       DEFAULTS.discover,
     osvLookup:
-      bool(env.GUARDIAN_OSV_LOOKUP) ??
+      bool(env.BLACKBOX_OSV_LOOKUP) ??
       bool(pluginConfig.osvLookup) ??
       bool(pluginConfig.osv_lookup) ??
       DEFAULTS.osvLookup,
     categories: normalizeCategories(pluginConfig.detection),
     protectedPaths: normalizeProtectedPaths(pluginConfig.protected_paths ?? pluginConfig.protectedPaths),
-    guardianHome:
-      str(env.GUARDIAN_HOME) ??
-      str(pluginConfig.guardianHome) ??
-      str(pluginConfig.guardian_home) ??
-      defaultGuardianHome(),
+    blackboxHome:
+      str(env.BLACKBOX_HOME) ??
+      str(pluginConfig.blackboxHome) ??
+      str(pluginConfig.blackbox_home) ??
+      defaultBlackboxHome(),
   };
 }
 
-export { DEFAULTS as GUARDIAN_CONFIG_DEFAULTS };
+export { DEFAULTS as BLACKBOX_CONFIG_DEFAULTS };

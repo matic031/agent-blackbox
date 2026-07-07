@@ -1,7 +1,7 @@
 /**
- * Identifier + quad builders for the Umanitek Guardian threat graph.
+ * Identifier + quad builders for the Blackbox threat graph.
  *
- * This file is a FAITHFUL port of the canonical Python `plugins/guardian/quads.py`
+ * This file is a FAITHFUL port of the canonical Python `plugins/blackbox/quads.py`
  * (the tested, shipped ground truth). A hermes node and an OpenClaw node that see
  * the same threat MUST compute the same subject URI, otherwise the cross-framework
  * threat-graph flywheel breaks (first-writer-wins on SWM root entities depends on
@@ -12,10 +12,10 @@
  */
 import { createHash } from "node:crypto";
 
-export type GuardianSeverity = "info" | "low" | "medium" | "high" | "critical";
+export type BlackboxSeverity = "info" | "low" | "medium" | "high" | "critical";
 
 /** Severity ladder, lowest → highest. Mirrors constants.SEVERITY_ORDER. */
-export const SEVERITY_ORDER: readonly GuardianSeverity[] = [
+export const SEVERITY_ORDER: readonly BlackboxSeverity[] = [
   "info",
   "low",
   "medium",
@@ -23,7 +23,7 @@ export const SEVERITY_ORDER: readonly GuardianSeverity[] = [
   "critical",
 ];
 
-export const SEVERITY_RANK: Record<GuardianSeverity, number> = {
+export const SEVERITY_RANK: Record<BlackboxSeverity, number> = {
   info: 0,
   low: 1,
   medium: 2,
@@ -32,39 +32,41 @@ export const SEVERITY_RANK: Record<GuardianSeverity, number> = {
 };
 
 // --- Ontology IRIs (shared vocabulary; identical to constants.py) ----------
-export const GUARDIAN_ONTOLOGY = "http://umanitek.ai/ontology/guardian/";
-export const GUARDIAN_THREAT_TYPE_IRI = `${GUARDIAN_ONTOLOGY}Threat`;
-export const GUARDIAN_DEP_THREAT_TYPE_IRI = `${GUARDIAN_ONTOLOGY}VulnerabilityAdvisory`;
-export const GUARDIAN_INJECTION_THREAT_TYPE_IRI = `${GUARDIAN_ONTOLOGY}PromptInjectionThreat`;
-export const GUARDIAN_ESCALATION_THREAT_TYPE_IRI = `${GUARDIAN_ONTOLOGY}EscalationThreat`;
-export const GUARDIAN_FILE_ACCESS_THREAT_TYPE_IRI = `${GUARDIAN_ONTOLOGY}FileAccessThreat`;
-export const GUARDIAN_SUSPICIOUS_SKILL_THREAT_TYPE_IRI = `${GUARDIAN_ONTOLOGY}SuspiciousSkillThreat`;
-export const GUARDIAN_REPORT_TYPE_IRI = `${GUARDIAN_ONTOLOGY}ThreatReport`;
-export const GUARDIAN_IDENTIFIER_PRED = `${GUARDIAN_ONTOLOGY}identifier`;
-export const GUARDIAN_CURATED_PRED = `${GUARDIAN_ONTOLOGY}curated`;
-export const GUARDIAN_SEVERITY_PRED = `${GUARDIAN_ONTOLOGY}severity`;
-export const GUARDIAN_PATTERN_PRED = `${GUARDIAN_ONTOLOGY}pattern`;
-export const GUARDIAN_TOOL_NAME_PRED = `${GUARDIAN_ONTOLOGY}toolName`;
-export const GUARDIAN_ARG_SHAPE_PRED = `${GUARDIAN_ONTOLOGY}argShape`;
-export const GUARDIAN_OWASP_CATEGORY_PRED = `${GUARDIAN_ONTOLOGY}owaspCategory`;
-export const GUARDIAN_REPORTS_THREAT_PRED = `${GUARDIAN_ONTOLOGY}reportsThreat`;
-export const GUARDIAN_REPORTER_PRED = `${GUARDIAN_ONTOLOGY}reporter`;
-export const GUARDIAN_FRAMEWORK_PRED = `${GUARDIAN_ONTOLOGY}framework`;
-export const GUARDIAN_PACKAGE_NAME_PRED = `${GUARDIAN_ONTOLOGY}packageName`;
-export const GUARDIAN_PACKAGE_VERSION_PRED = `${GUARDIAN_ONTOLOGY}packageVersion`;
-export const GUARDIAN_PACKAGE_ECOSYSTEM_PRED = `${GUARDIAN_ONTOLOGY}packageEcosystem`;
+// The IRI path and the `urn:guardian:` schemes below stay `guardian` (not
+// `blackbox`) so the already-published corpus stays queryable post-rename.
+export const BLACKBOX_ONTOLOGY = "http://umanitek.ai/ontology/guardian/";
+export const BLACKBOX_THREAT_TYPE_IRI = `${BLACKBOX_ONTOLOGY}Threat`;
+export const BLACKBOX_DEP_THREAT_TYPE_IRI = `${BLACKBOX_ONTOLOGY}VulnerabilityAdvisory`;
+export const BLACKBOX_INJECTION_THREAT_TYPE_IRI = `${BLACKBOX_ONTOLOGY}PromptInjectionThreat`;
+export const BLACKBOX_ESCALATION_THREAT_TYPE_IRI = `${BLACKBOX_ONTOLOGY}EscalationThreat`;
+export const BLACKBOX_FILE_ACCESS_THREAT_TYPE_IRI = `${BLACKBOX_ONTOLOGY}FileAccessThreat`;
+export const BLACKBOX_SUSPICIOUS_SKILL_THREAT_TYPE_IRI = `${BLACKBOX_ONTOLOGY}SuspiciousSkillThreat`;
+export const BLACKBOX_REPORT_TYPE_IRI = `${BLACKBOX_ONTOLOGY}ThreatReport`;
+export const BLACKBOX_IDENTIFIER_PRED = `${BLACKBOX_ONTOLOGY}identifier`;
+export const BLACKBOX_CURATED_PRED = `${BLACKBOX_ONTOLOGY}curated`;
+export const BLACKBOX_SEVERITY_PRED = `${BLACKBOX_ONTOLOGY}severity`;
+export const BLACKBOX_PATTERN_PRED = `${BLACKBOX_ONTOLOGY}pattern`;
+export const BLACKBOX_TOOL_NAME_PRED = `${BLACKBOX_ONTOLOGY}toolName`;
+export const BLACKBOX_ARG_SHAPE_PRED = `${BLACKBOX_ONTOLOGY}argShape`;
+export const BLACKBOX_OWASP_CATEGORY_PRED = `${BLACKBOX_ONTOLOGY}owaspCategory`;
+export const BLACKBOX_REPORTS_THREAT_PRED = `${BLACKBOX_ONTOLOGY}reportsThreat`;
+export const BLACKBOX_REPORTER_PRED = `${BLACKBOX_ONTOLOGY}reporter`;
+export const BLACKBOX_FRAMEWORK_PRED = `${BLACKBOX_ONTOLOGY}framework`;
+export const BLACKBOX_PACKAGE_NAME_PRED = `${BLACKBOX_ONTOLOGY}packageName`;
+export const BLACKBOX_PACKAGE_VERSION_PRED = `${BLACKBOX_ONTOLOGY}packageVersion`;
+export const BLACKBOX_PACKAGE_ECOSYSTEM_PRED = `${BLACKBOX_ONTOLOGY}packageEcosystem`;
 // threat kind: distinguishes active malware from a mere vulnerability. Only
 // `malware` blocks (at/above block_severity); `vulnerability` always flags but
 // never auto-blocks, so a legit-but-vulnerable package isn't stopped.
-export const GUARDIAN_KIND_PRED = `${GUARDIAN_ONTOLOGY}kind`;
+export const BLACKBOX_KIND_PRED = `${BLACKBOX_ONTOLOGY}kind`;
 export const KIND_MALWARE = "malware";
 export const KIND_VULNERABILITY = "vulnerability";
 // file-access predicates (g:toolName reused; category is new) ---------------
-export const GUARDIAN_CATEGORY_PRED = `${GUARDIAN_ONTOLOGY}category`;
+export const BLACKBOX_CATEGORY_PRED = `${BLACKBOX_ONTOLOGY}category`;
 // suspicious-skill predicates -----------------------------------------------
-export const GUARDIAN_SKILL_NAME_PRED = `${GUARDIAN_ONTOLOGY}skillName`;
-export const GUARDIAN_SKILL_VERSION_PRED = `${GUARDIAN_ONTOLOGY}skillVersion`;
-export const GUARDIAN_DANGER_SHAPE_PRED = `${GUARDIAN_ONTOLOGY}dangerShape`;
+export const BLACKBOX_SKILL_NAME_PRED = `${BLACKBOX_ONTOLOGY}skillName`;
+export const BLACKBOX_SKILL_VERSION_PRED = `${BLACKBOX_ONTOLOGY}skillVersion`;
+export const BLACKBOX_DANGER_SHAPE_PRED = `${BLACKBOX_ONTOLOGY}dangerShape`;
 
 const RDF_TYPE = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
 const SCHEMA_NAME = "http://schema.org/name";
@@ -101,10 +103,10 @@ export function slug(value: string): string {
   return trimmed || "unknown";
 }
 
-export function normalizeSeverity(value: unknown, fallback: GuardianSeverity = "info"): GuardianSeverity {
+export function normalizeSeverity(value: unknown, fallback: BlackboxSeverity = "info"): BlackboxSeverity {
   const raw = String(value ?? "").trim().toLowerCase();
   if (raw === "moderate") return "medium";
-  return raw in SEVERITY_RANK ? (raw as GuardianSeverity) : fallback;
+  return raw in SEVERITY_RANK ? (raw as BlackboxSeverity) : fallback;
 }
 
 /** Stable curated-threat subject URI for a threat `identifier`. */
@@ -236,7 +238,7 @@ export function datetimeLiteral(ts?: number): string {
 export interface ReportInput {
   identifier: string;
   category: "injection" | "escalation" | "dependency" | "fileaccess" | "skill";
-  severity: GuardianSeverity;
+  severity: BlackboxSeverity;
   /** Reporter agent address (node default agent). Lowercased for the URI. */
   reporter: string;
   framework: "hermes" | "openclaw";
@@ -276,33 +278,33 @@ export function buildReportQuads(input: ReportInput): Quad[] {
   const subj = reportUri(input.identifier, input.reporter);
   const threat = threatUri(input.identifier);
   const out: Quad[] = [
-    q(subj, RDF_TYPE, iri(GUARDIAN_REPORT_TYPE_IRI)),
-    q(subj, GUARDIAN_REPORTS_THREAT_PRED, iri(threat)),
-    q(subj, GUARDIAN_IDENTIFIER_PRED, literal(input.identifier)),
-    q(subj, GUARDIAN_REPORTER_PRED, literal(reporter)),
-    q(subj, GUARDIAN_FRAMEWORK_PRED, literal(input.framework)),
-    q(subj, GUARDIAN_SEVERITY_PRED, literal(normalizeSeverity(input.severity))),
+    q(subj, RDF_TYPE, iri(BLACKBOX_REPORT_TYPE_IRI)),
+    q(subj, BLACKBOX_REPORTS_THREAT_PRED, iri(threat)),
+    q(subj, BLACKBOX_IDENTIFIER_PRED, literal(input.identifier)),
+    q(subj, BLACKBOX_REPORTER_PRED, literal(reporter)),
+    q(subj, BLACKBOX_FRAMEWORK_PRED, literal(input.framework)),
+    q(subj, BLACKBOX_SEVERITY_PRED, literal(normalizeSeverity(input.severity))),
     q(subj, SCHEMA_DATE_MODIFIED, datetimeLiteral(ts)),
   ];
   const c = input.candidate ?? {};
   if (input.category === "injection" && c.pattern) {
-    out.push(q(subj, GUARDIAN_PATTERN_PRED, literal(c.pattern)));
-    if (c.owaspCategory) out.push(q(subj, GUARDIAN_OWASP_CATEGORY_PRED, literal(c.owaspCategory)));
+    out.push(q(subj, BLACKBOX_PATTERN_PRED, literal(c.pattern)));
+    if (c.owaspCategory) out.push(q(subj, BLACKBOX_OWASP_CATEGORY_PRED, literal(c.owaspCategory)));
   } else if (input.category === "escalation") {
-    if (c.toolName) out.push(q(subj, GUARDIAN_TOOL_NAME_PRED, literal(c.toolName)));
-    if (c.argShape) out.push(q(subj, GUARDIAN_ARG_SHAPE_PRED, literal(c.argShape)));
+    if (c.toolName) out.push(q(subj, BLACKBOX_TOOL_NAME_PRED, literal(c.toolName)));
+    if (c.argShape) out.push(q(subj, BLACKBOX_ARG_SHAPE_PRED, literal(c.argShape)));
   } else if (input.category === "dependency") {
-    if (c.packageName) out.push(q(subj, GUARDIAN_PACKAGE_NAME_PRED, literal(c.packageName)));
-    if (c.packageVersion) out.push(q(subj, GUARDIAN_PACKAGE_VERSION_PRED, literal(c.packageVersion)));
-    if (c.packageEcosystem) out.push(q(subj, GUARDIAN_PACKAGE_ECOSYSTEM_PRED, literal(c.packageEcosystem)));
+    if (c.packageName) out.push(q(subj, BLACKBOX_PACKAGE_NAME_PRED, literal(c.packageName)));
+    if (c.packageVersion) out.push(q(subj, BLACKBOX_PACKAGE_VERSION_PRED, literal(c.packageVersion)));
+    if (c.packageEcosystem) out.push(q(subj, BLACKBOX_PACKAGE_ECOSYSTEM_PRED, literal(c.packageEcosystem)));
     if (c.advisoryId) out.push(q(subj, SCHEMA_IDENTIFIER, literal(c.advisoryId)));
   } else if (input.category === "fileaccess") {
-    if (c.toolName) out.push(q(subj, GUARDIAN_TOOL_NAME_PRED, literal(c.toolName)));
-    if (c.fileCategory) out.push(q(subj, GUARDIAN_CATEGORY_PRED, literal(c.fileCategory)));
+    if (c.toolName) out.push(q(subj, BLACKBOX_TOOL_NAME_PRED, literal(c.toolName)));
+    if (c.fileCategory) out.push(q(subj, BLACKBOX_CATEGORY_PRED, literal(c.fileCategory)));
   } else if (input.category === "skill") {
-    if (c.skillName) out.push(q(subj, GUARDIAN_SKILL_NAME_PRED, literal(c.skillName)));
-    if (c.skillVersion) out.push(q(subj, GUARDIAN_SKILL_VERSION_PRED, literal(c.skillVersion)));
-    if (c.dangerShape) out.push(q(subj, GUARDIAN_DANGER_SHAPE_PRED, literal(c.dangerShape)));
+    if (c.skillName) out.push(q(subj, BLACKBOX_SKILL_NAME_PRED, literal(c.skillName)));
+    if (c.skillVersion) out.push(q(subj, BLACKBOX_SKILL_VERSION_PRED, literal(c.skillVersion)));
+    if (c.dangerShape) out.push(q(subj, BLACKBOX_DANGER_SHAPE_PRED, literal(c.dangerShape)));
   }
   return out;
 }

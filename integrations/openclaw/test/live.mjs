@@ -5,7 +5,7 @@ import { DkgClient } from "../src/dkgClient.ts";
 import { RulesetCache } from "../src/ruleset.ts";
 import { detectEscalation, detectDependency, detectInjection } from "../src/detection.ts";
 
-const CG = "guardian-live-test";
+const CG = "blackbox-live-test";
 const client = new DkgClient({ url: "http://127.0.0.1:9200" }); // token auto-resolved from ~/.dkg/auth.token
 
 const log = (l, v) => console.log(`  ${l.padEnd(22)} ${v}`);
@@ -18,7 +18,7 @@ try {
 } catch (e) { log("error", e.message); }
 
 console.log("\n=== 2. SYNC RULESET FROM THE SAME GRAPH ===");
-const cache = new RulesetCache({ client, contextGraphId: CG, stateDir: os.tmpdir() + "/oc-guardian-live" });
+const cache = new RulesetCache({ client, contextGraphId: CG, stateDir: os.tmpdir() + "/oc-blackbox-live" });
 const rs = await cache.sync();
 log("injection rules", rs.injection.length);
 log("escalation rules", rs.escalation.length);

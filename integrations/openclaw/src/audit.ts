@@ -1,7 +1,7 @@
 /**
  * Local findings log for the OpenClaw plugin.
  *
- * Writes `findings.openclaw.jsonl` into the shared guardian home so the one
+ * Writes `findings.openclaw.jsonl` into the shared blackbox home so the one
  * dashboard surfaces OpenClaw detections alongside Hermes'. Line shape matches
  * the Python `audit.record` line so `audit.read_findings` flattens it unchanged.
  * Fail-open — a logging error must never break the agent loop.
@@ -33,7 +33,7 @@ export interface FindingContext {
   truncated?: boolean;
 }
 
-// Bounds mirror plugins/guardian/audit.py.
+// Bounds mirror plugins/blackbox/audit.py.
 const CTX_MAX_TURNS = 16;
 const CTX_TURN_CHARS = 3000;
 const CTX_FIELD_CHARS = 6000;

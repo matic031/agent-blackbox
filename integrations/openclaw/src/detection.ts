@@ -1,7 +1,7 @@
 /**
  * Ruleset-driven matcher — a faithful port of the canonical Python
- * `plugins/guardian/quads.py` (arg-shape + dependency parsing) and
- * `plugins/guardian/detection.py` (the matchers).
+ * `plugins/blackbox/quads.py` (arg-shape + dependency parsing) and
+ * `plugins/blackbox/detection.py` (the matchers).
  *
  * Detection rules come ONLY from the synced threat graph (see ruleset.ts), in
  * two trust tiers: `source: "public"` (verifiable-memory, the curated source of
@@ -23,7 +23,7 @@
 import os from "node:os";
 import path from "node:path";
 import {
-  GuardianSeverity,
+  BlackboxSeverity,
   escalationIdentifier,
   fileaccessIdentifierFor,
   injectionIdentifier,
@@ -70,7 +70,7 @@ export function ruleSource(rule: { source?: string }): RuleSource {
 export interface InjectionRule {
   identifier: string;
   pattern: string; // regex source
-  severity: GuardianSeverity;
+  severity: BlackboxSeverity;
   name: string;
   owaspCategory?: string;
   /** Trust tier (absent = public, for pre-tier caches). */
@@ -80,13 +80,13 @@ export interface EscalationRule {
   identifier: string;
   toolName: string; // lowercased for comparison
   argShape: string;
-  severity: GuardianSeverity;
+  severity: BlackboxSeverity;
   name: string;
   source?: RuleSource;
 }
 export interface DependencyRule {
   identifier: string;
-  severity: GuardianSeverity;
+  severity: BlackboxSeverity;
   advisoryId?: string;
   /** malware | vulnerability — vulnerabilities flag but never auto-block. */
   kind?: string;
@@ -97,7 +97,7 @@ export interface FileAccessRule {
   identifier: string;
   toolName: string; // lowercased for comparison
   category: string; // lowercased for comparison
-  severity: GuardianSeverity;
+  severity: BlackboxSeverity;
   name: string;
   source?: RuleSource;
 }
@@ -106,7 +106,7 @@ export interface SkillRule {
   skillName: string;
   skillVersion: string;
   dangerShape: string;
-  severity: GuardianSeverity;
+  severity: BlackboxSeverity;
   name: string;
   source?: RuleSource;
 }
@@ -155,7 +155,7 @@ export interface FindingFields {
 export interface Finding {
   identifier: string;
   category: ThreatCategory;
-  severity: GuardianSeverity;
+  severity: BlackboxSeverity;
   title: string;
   toolName: string | null;
   matched: string; // rule name / matched pattern source (not observed content)
@@ -469,7 +469,7 @@ export function normalizeArgShape(toolName: string, args: unknown): string | nul
 // Each entry is [severity, owasp, regex]. The DISCOVERY nomination layer: a
 // prompt matching one NOT already in the graph is auto-submitted as a candidate.
 // Privacy: only the matched substring (truncated) is ever carried off-box.
-const INJECTION_HEURISTICS: ReadonlyArray<readonly [GuardianSeverity, string, RegExp]> = [
+const INJECTION_HEURISTICS: ReadonlyArray<readonly [BlackboxSeverity, string, RegExp]> = [
   // "ignore all previous instructions" and close variants (see quads.py).
   ["high", "LLM01", /(?:ignore|disregard|forget|skip|override)\s+(?:all\s+|any\s+|the\s+|these\s+)?(?:previous|prior|above|earlier|preceding|prior\s+)\s*(?:instruction|message|prompt|rule|context|direction|directive|command|guideline)s?/i],
   // Exfiltrate the system prompt / instructions.
@@ -485,7 +485,7 @@ const MAX_INJECTION_SCAN = 50_000;
 
 export interface InjectionHeuristicHit {
   pattern: string;
-  severity: GuardianSeverity;
+  severity: BlackboxSeverity;
   owasp: string;
 }
 
@@ -555,7 +555,7 @@ export function discoverInjection(text: string, ruleset: Ruleset): Finding[] {
 
 // [category, severity, path-regex]. Matched against the accessed path only; the
 // candidate carries ONLY the category + tool — never the exact path.
-const SENSITIVE_PATH_RULES: ReadonlyArray<readonly [string, GuardianSeverity, RegExp]> = [
+const SENSITIVE_PATH_RULES: ReadonlyArray<readonly [string, BlackboxSeverity, RegExp]> = [
   ["ssh-private-key", "critical", /(?:^|\/)\.ssh(?:\/|$)|(?:^|\/)id_(?:rsa|ed25519|ecdsa|dsa)\b/i],
   ["env-file", "high", /(?:^|\/)\.env(?:\.[\w.-]+)?$/i],
   [
@@ -627,7 +627,7 @@ export function fileAccessArg(toolName: string, args: unknown): FileAccess | nul
 
 export interface SensitiveCategory {
   category: string;
-  severity: GuardianSeverity;
+  severity: BlackboxSeverity;
 }
 
 /**
@@ -664,7 +664,7 @@ export function detectFileaccess(toolName: string, args: unknown, ruleset: Rules
   const tool = access.tool;
   const category = hit.category;
   let identifier = fileaccessIdentifierFor(tool, category);
-  let severity: GuardianSeverity = hit.severity;
+  let severity: BlackboxSeverity = hit.severity;
   let source: FindingSource = "heuristic";
   let name: string | undefined;
   for (const rule of ruleset.fileaccess ?? []) {
@@ -702,7 +702,7 @@ export function detectFileaccess(toolName: string, args: unknown, ruleset: Rules
 // ---------------------------------------------------------------------------
 
 // [dangerShape, severity, regex] over the skill's declared code/content.
-const SKILL_CODE_RULES: ReadonlyArray<readonly [string, GuardianSeverity, RegExp]> = [
+const SKILL_CODE_RULES: ReadonlyArray<readonly [string, BlackboxSeverity, RegExp]> = [
   [
     "shell-exec",
     "high",
@@ -723,7 +723,7 @@ const SKILL_CODE_RULES: ReadonlyArray<readonly [string, GuardianSeverity, RegExp
 
 // [dangerShape, severity, regex] over declared permissions/capabilities.
 // No trailing \b — several of these end in `*` (a non-word char).
-const SKILL_PERMISSION_RULES: ReadonlyArray<readonly [string, GuardianSeverity, RegExp]> = [
+const SKILL_PERMISSION_RULES: ReadonlyArray<readonly [string, BlackboxSeverity, RegExp]> = [
   ["over-broad-filesystem", "high", /\b(?:filesystem[:_-]?\*|fs[:_-]?full|read[_-]?write[_-]?all|allowallpaths)/i],
   ["over-broad-shell", "high", /\b(?:arbitrary[_-]?shell|shell[:_-]?\*|exec[:_-]?any|allowshell)/i],
   ["over-broad-network", "medium", /\b(?:network[:_-]?\*|raw[_-]?socket|allowallhosts|net[:_-]?any)/i],
@@ -807,7 +807,7 @@ export function skillInstallArg(toolName: string, args: unknown): SkillInstall |
 
 export interface SkillDanger {
   dangerShape: string;
-  severity: GuardianSeverity;
+  severity: BlackboxSeverity;
 }
 
 /**
@@ -818,7 +818,7 @@ export interface SkillDanger {
 export function scanSkillDangers(code: string, permissions: string): SkillDanger[] {
   const out: SkillDanger[] = [];
   const seen = new Set<string>();
-  const passes: ReadonlyArray<readonly [string, ReadonlyArray<readonly [string, GuardianSeverity, RegExp]>]> = [
+  const passes: ReadonlyArray<readonly [string, ReadonlyArray<readonly [string, BlackboxSeverity, RegExp]>]> = [
     [code || "", SKILL_CODE_RULES],
     [permissions || "", SKILL_PERMISSION_RULES],
   ];
@@ -1101,7 +1101,7 @@ function sampleAround(text: string, re: RegExp): string {
 /** `{advisoryId, severity}` when OSV knows a package@version vulnerable. */
 export interface OsvHit {
   advisoryId: string;
-  severity: GuardianSeverity;
+  severity: BlackboxSeverity;
 }
 
 /** Async OSV lookup: (ecosystem, name, version) → OsvHit | null. */
@@ -1175,8 +1175,8 @@ export async function discoverDependencyCandidates(
 
 /**
  * Expand a leading `~` / `~/` to the user's home directory, mirroring Python's
- * `os.path.expanduser` for the common cases Guardian sees (`~`, `~/foo`). A
- * bare `~user` form is left untouched (Python would resolve it, but Guardian's
+ * `os.path.expanduser` for the common cases Blackbox sees (`~`, `~/foo`). A
+ * bare `~user` form is left untouched (Python would resolve it, but Blackbox's
  * patterns and paths never use it).
  */
 function expandUser(p: string): string {

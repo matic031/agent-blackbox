@@ -8,10 +8,10 @@ the fix (trim the guide, or raise the pin) stays deliberate, not a silent regres
 from pathlib import Path
 
 from agent import prompt_builder as pb
-from _guardian_loader import load_guardian
+from _blackbox_loader import load_blackbox
 
-cli_mod = load_guardian("cli")
-PIN = cli_mod._GUARDIAN_CONTEXT_FILE_MAX_CHARS
+cli_mod = load_blackbox("cli")
+PIN = cli_mod._BLACKBOX_CONTEXT_FILE_MAX_CHARS
 
 
 def _repo_root() -> Path:
@@ -38,6 +38,6 @@ def test_repo_agents_md_loads_whole_at_pinned_cap(monkeypatch):
     assert "[...truncated AGENTS.md" not in loaded, (
         f"AGENTS.md is {full_len} chars as loaded but the pinned context-file cap "
         f"is {PIN}; it would be head/tail truncated in the system prompt. Trim the "
-        f"guide, or raise the pin (_GUARDIAN_CONTEXT_FILE_MAX_CHARS in "
-        f"plugins/guardian/cli.py + context_file_max_chars in the profile configs)."
+        f"guide, or raise the pin (_BLACKBOX_CONTEXT_FILE_MAX_CHARS in "
+        f"plugins/blackbox/cli.py + context_file_max_chars in the profile configs)."
     )

@@ -1,6 +1,6 @@
-# Umanitek Agent Guardian — OpenClaw plugin
+# Agent Blackbox — OpenClaw plugin
 
-Mirrors the hermes Guardian plugin's detection inside an OpenClaw agent and
+Mirrors the hermes Blackbox plugin's detection inside an OpenClaw agent and
 reports sightings to the **same** local DKG node / threat graph. Same threat
 identifiers, same arg shapes, same severities — a hermes node and an OpenClaw
 node computing the same threat converge on the same subject URI.
@@ -55,7 +55,7 @@ escalate, or downgrade a curated public rule.
 
 ```bash
 openclaw plugins install ./integrations/openclaw
-openclaw plugins enable guardian
+openclaw plugins enable blackbox
 ```
 
 ### Option B — config merge (dkg-adapter pattern)
@@ -67,9 +67,9 @@ Point OpenClaw at the plugin directory and set its config in
 {
   "plugins": {
     "load": { "paths": ["/absolute/path/to/agent-guardian/integrations/openclaw"] },
-    "enabled": ["guardian"],
+    "enabled": ["blackbox"],
     "entries": {
-      "guardian": {
+      "blackbox": {
         "hooks": { "allowConversationAccess": true },
         "config": {
           "mode": "audit",
@@ -96,28 +96,28 @@ Point OpenClaw at the plugin directory and set its config in
 
 > **`allowConversationAccess` is required for `before_agent_run`.** It is a
 > conversation hook; without
-> `plugins.entries.guardian.hooks.allowConversationAccess=true` OpenClaw will
+> `plugins.entries.blackbox.hooks.allowConversationAccess=true` OpenClaw will
 > not deliver the prompt/history to the plugin and the incoming-run
 > prompt-injection scan is silently skipped. Tool-call, message, and session
 > detection still work without it.
 
 ## Configuration
 
-Set under `plugins.entries.guardian.config`; every key has an environment
+Set under `plugins.entries.blackbox.config`; every key has an environment
 override (env wins).
 
 | Key | Default | Env | Meaning |
 |-----|---------|-----|---------|
-| `mode` | `audit` | `GUARDIAN_MODE` | `audit` \| `block` |
-| `contextGraphId` | `umanitek/guardian-threats-staging` | `GUARDIAN_CONTEXT_GRAPH_ID` | staging curated CG id until production is seeded |
+| `mode` | `audit` | `BLACKBOX_MODE` | `audit` \| `block` |
+| `contextGraphId` | `umanitek/guardian-threats-staging` | `BLACKBOX_CONTEXT_GRAPH_ID` | staging curated CG id until production is seeded |
 | `dkgUrl` | `http://127.0.0.1:9200` | `DKG_DAEMON_URL` | local node |
-| `syncInterval` | `300` | `GUARDIAN_SYNC_INTERVAL` | seconds between ruleset refresh |
-| `report` | `true` | `GUARDIAN_REPORT` | share sightings to SWM |
-| `dailyReportLimit` | `9999` | `GUARDIAN_DAILY_REPORT_LIMIT` | anti-bot cap on reports/day |
-| `reportMinSeverity` | `high` | `GUARDIAN_REPORT_MIN_SEVERITY` | min severity for a built-in **heuristic** candidate to flag/report (graph-backed findings always flag) |
-| `blockSeverity` | `critical` | `GUARDIAN_BLOCK_SEVERITY` | min severity blocked in block mode (public-graph findings only) |
-| `discover` | `true` | `GUARDIAN_DISCOVER` | run the built-in discovery nomination layer |
-| `osvLookup` | `true` | `GUARDIAN_OSV_LOOKUP` | OSV dependency auto-discovery off the blocking path |
+| `syncInterval` | `300` | `BLACKBOX_SYNC_INTERVAL` | seconds between ruleset refresh |
+| `report` | `true` | `BLACKBOX_REPORT` | share sightings to SWM |
+| `dailyReportLimit` | `9999` | `BLACKBOX_DAILY_REPORT_LIMIT` | anti-bot cap on reports/day |
+| `reportMinSeverity` | `high` | `BLACKBOX_REPORT_MIN_SEVERITY` | min severity for a built-in **heuristic** candidate to flag/report (graph-backed findings always flag) |
+| `blockSeverity` | `critical` | `BLACKBOX_BLOCK_SEVERITY` | min severity blocked in block mode (public-graph findings only) |
+| `discover` | `true` | `BLACKBOX_DISCOVER` | run the built-in discovery nomination layer |
+| `osvLookup` | `true` | `BLACKBOX_OSV_LOOKUP` | OSV dependency auto-discovery off the blocking path |
 | `detection` | `{}` | — | per-category policy (see below) |
 | `protectedPaths` | `[]` | — | user protected-path patterns (see below) |
 
@@ -150,12 +150,12 @@ top of the trust tiers. Built-in heuristic candidates must *also* clear
 ```
 
 The equivalent YAML (hermes-style `config.yaml`) — the OpenClaw plugin reads the
-**same** `plugins.entries.guardian.detection.*` keys as the Python plugin:
+**same** `plugins.entries.blackbox.detection.*` keys as the Python plugin:
 
 ```yaml
 plugins:
   entries:
-    guardian:
+    blackbox:
       detection:
         dependency:
           min_severity: critical
@@ -170,7 +170,7 @@ plugins:
 ### Protected paths
 
 `protectedPaths` is a list of **your own** path patterns. When a file tool
-(`read_file`, `write_file`, `edit_file`, …) touches a matching path, Guardian
+(`read_file`, `write_file`, `edit_file`, …) touches a matching path, Blackbox
 raises a `critical`, `source: "custom"` finding that:
 
 - **always flags** (it bypasses the per-category policy — you asked for it),
@@ -198,7 +198,7 @@ The DKG bearer token is resolved from `$DKG_API_TOKEN` / `$DKG_AUTH_TOKEN`, then
 `$DKG_HOME/auth.token` (default `~/.dkg/auth.token`).
 
 Ruleset cache is stored under the OpenClaw state dir
-(`$OPENCLAW_STATE_DIR/guardian/ruleset.json`, default `~/.openclaw/guardian/`).
+(`$OPENCLAW_STATE_DIR/blackbox/ruleset.json`, default `~/.openclaw/blackbox/`).
 
 ## Requirements
 
@@ -215,6 +215,6 @@ npm run typecheck   # tsc --noEmit
 ```
 
 Detection semantics and threat identifiers are kept byte-identical to the Python
-`plugins/guardian/` side and the reference `dkg/packages/node-ui/src/guardian.ts`.
+`plugins/blackbox/` side and the reference `dkg/packages/node-ui/src/blackbox.ts`.
 Do not change identifier construction (`quads.ts`) or arg-shape normalization
 (`detection.ts`) on one side without mirroring the other.

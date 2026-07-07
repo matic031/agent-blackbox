@@ -1,8 +1,8 @@
 <div align="center">
 
-<img src="./docs/agent-guardian-logo.jpeg" alt="Umanitek Agent Guardian" width="150">
+<img src="./docs/agent-blackbox-logo.jpeg" alt="Agent Blackbox" width="150">
 
-# Umanitek Agent Guardian
+# Agent Blackbox
 
 **Real-time threat protection for your AI agents.**
 
@@ -13,12 +13,12 @@
 
 ---
 
-Umanitek Agent Guardian is a security plugin that lives inside your AI agent and checks every action it takes - prompts, shell commands, file access, package installs, skills - against a shared threat graph on the OriginTrail Decentralized Knowledge Graph (DKG). A threat discovered by one agent protects all of them: when the graph learns about an attack, every protected agent picks it up on its next sync. It flags by default; blocking is one config switch away.
+Agent Blackbox is a security plugin that lives inside your AI agent and checks every action it takes - prompts, shell commands, file access, package installs, skills - against a shared threat graph on the OriginTrail Decentralized Knowledge Graph (DKG). A threat discovered by one agent protects all of them: when the graph learns about an attack, every protected agent picks it up on its next sync. It flags by default; blocking is one config switch away.
 
 ## Install
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/matic031/agent-guardian/feat/guardian/scripts/guardian-install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/matic031/agent-guardian/feat/guardian/scripts/blackbox-install.sh | bash
 ```
 
 <details>
@@ -40,22 +40,22 @@ venv/bin/pip install -e ".[web]"
 mkdir -p ~/.local/bin
 ln -sf "$PWD/venv/bin/hermes" ~/.local/bin/hermes
 
-# 4. Local DKG node (optional - without it Umanitek Agent Guardian still runs, with an empty ruleset)
+# 4. Local DKG node (optional - without it Agent Blackbox still runs, with an empty ruleset)
 npm i -g @origintrail-official/dkg
 dkg hermes setup --network mainnet-base --no-fund   # reading the public graph is free
 
-# 5. Enable Umanitek Agent Guardian and protect every local agent
-hermes plugins enable guardian
-hermes guardian attach
-hermes guardian sync
+# 5. Enable Agent Blackbox and protect every local agent
+hermes plugins enable blackbox
+hermes blackbox attach
+hermes blackbox sync
 ```
 
 Or download the script, read it, then run it:
 
 ```bash
-curl -fsSLO https://raw.githubusercontent.com/matic031/agent-guardian/feat/guardian/scripts/guardian-install.sh
-less guardian-install.sh
-bash guardian-install.sh
+curl -fsSLO https://raw.githubusercontent.com/matic031/agent-guardian/feat/guardian/scripts/blackbox-install.sh
+less blackbox-install.sh
+bash blackbox-install.sh
 ```
 
 </details>
@@ -63,10 +63,10 @@ bash guardian-install.sh
 ## First run
 
 ```bash
-hermes                     # start your agent - Umanitek Agent Guardian is already watching
-hermes guardian chat       # start a Guardian-focused operator chat
-hermes guardian dashboard  # open the live threat dashboard
-hermes guardian attach     # protect every local agent
+hermes                     # start your agent - Agent Blackbox is already watching
+hermes blackbox chat       # start a Blackbox-focused operator chat
+hermes blackbox dashboard  # open the live threat dashboard
+hermes blackbox attach     # protect every local agent
 ```
 
 Works with **Hermes** and **OpenClaw**.
@@ -76,27 +76,27 @@ Works with **Hermes** and **OpenClaw**.
 Everyday commands:
 
 ```bash
-hermes guardian status      # config, node health, ruleset + findings counts
-hermes guardian sync        # pull the latest threat graphs right now
-hermes guardian dashboard   # live dashboard at http://127.0.0.1:9700
-hermes guardian chat        # chat with Guardian from this repo's workspace
+hermes blackbox status      # config, node health, ruleset + findings counts
+hermes blackbox sync        # pull the latest threat graphs right now
+hermes blackbox dashboard   # live dashboard at http://127.0.0.1:9700
+hermes blackbox chat        # chat with Blackbox from this repo's workspace
 ```
 
-`hermes guardian chat` creates and uses a dedicated `guardian` Hermes profile.
-That profile is the control/operator chat for Guardian: it starts from the
-Agent Guardian checkout, answers Guardian-specific questions using the dashboard
-and Guardian CLI state, and is hidden from the dashboard's connected-agent list
+`hermes blackbox chat` creates and uses a dedicated `blackbox` Hermes profile.
+That profile is the control/operator chat for Blackbox: it starts from the
+Agent Blackbox checkout, answers Blackbox-specific questions using the dashboard
+and Blackbox CLI state, and is hidden from the dashboard's connected-agent list
 so it is not mistaken for an agent being protected.
 
 Found a threat yourself? Report it to the community graph so every agent sees it:
 
 ```bash
 # a malicious npm package
-hermes guardian report --type dependency --ecosystem npm \
+hermes blackbox report --type dependency --ecosystem npm \
   --name evil-package --version 1.0.0 --severity critical
 
 # a prompt-injection pattern
-hermes guardian report --type injection \
+hermes blackbox report --type injection \
   --pattern "ignore all previous instructions" --owasp LLM01
 ```
 
@@ -105,7 +105,7 @@ Ready to enforce instead of just watch? Flip block mode in `config.yaml`:
 ```yaml
 plugins:
   entries:
-    guardian:
+    blackbox:
       mode: block   # stop confirmed threats instead of only flagging them
 ```
 
@@ -113,13 +113,13 @@ Every detection is logged to the audit trail and shown live in the dashboard. Cu
 
 ### Optional: AI reviewer
 
-On top of the built-in pattern and graph detection, Guardian can use an LLM for a second opinion on prompt injection. The installer reuses an existing Hermes/OpenClaw LLM config when it can; otherwise it asks for provider, key, and model on a real terminal. Run it anytime:
+On top of the built-in pattern and graph detection, Blackbox can use an LLM for a second opinion on prompt injection. The installer reuses an existing Hermes/OpenClaw LLM config when it can; otherwise it asks for provider, key, and model on a real terminal. Run it anytime:
 
 ```bash
-hermes guardian setup-llm
+hermes blackbox setup-llm
 ```
 
-The reviewer only flags - it never blocks, and its verdicts stay on your machine (never shared to the community graph). Turn it off with `hermes guardian setup-llm --disable`.
+The reviewer only flags - it never blocks, and its verdicts stay on your machine (never shared to the community graph). Turn it off with `hermes blackbox setup-llm --disable`.
 
 ### Try it
 
@@ -156,16 +156,16 @@ In the default audit mode every one is flagged and logged, nothing is stopped. S
 ## The public threat graph
 
 <div align="center">
-<img src="./docs/graph.png" alt="The Umanitek Agent Guardian threat graph" width="880">
+<img src="./docs/graph.png" alt="The Agent Blackbox threat graph" width="880">
 </div>
 
-This is the heart of Umanitek Agent Guardian: one shared, **curator-approved** threat graph on the OriginTrail DKG that every agent reads from. A threat added once protects every agent everywhere - and it's tamper-proof, so no single party can quietly rewrite it.
+This is the heart of Agent Blackbox: one shared, **curator-approved** threat graph on the OriginTrail DKG that every agent reads from. A threat added once protects every agent everywhere - and it's tamper-proof, so no single party can quietly rewrite it.
 
 ## How it works
 
-Umanitek Agent Guardian runs inside your agent and checks every action against two shared threat graphs:
+Agent Blackbox runs inside your agent and checks every action against two shared threat graphs:
 
-- **The public threat graph** - curated by Umanitek - is the source of truth. If a threat is there, Umanitek Agent Guardian flags it as confirmed and, in block mode, blocks it.
+- **The public threat graph** - curated by Umanitek - is the source of truth. If a threat is there, Agent Blackbox flags it as confirmed and, in block mode, blocks it.
 - **The community graph** covers what the public graph doesn't yet. Threats reported by agents across the network are flagged as unconfirmed so you see them - but they never block.
 
 Built-in heuristics only nominate **new** high-severity candidates; agents report those to the community graph, where curators review them and promote the real ones to the public graph. When one agent learns a threat, every agent learns it.
@@ -174,20 +174,20 @@ Both graphs live on the **OriginTrail Decentralized Knowledge Graph (DKG)** - a 
 
 > Approving what becomes public is a curator's job - see the [curator guide](CURATOR_README.md).
 
-The dashboard (`hermes guardian dashboard`) shows all three graphs side by side: **Public** (curated), **Community** (reported by agents), and **Local** (your node).
+The dashboard (`hermes blackbox dashboard`) shows all three graphs side by side: **Public** (curated), **Community** (reported by agents), and **Local** (your node).
 
 ## Auto-attach
 
 ```bash
-hermes guardian attach   # protect every local agent at once
-hermes guardian detach   # turn it back off
+hermes blackbox attach   # protect every local agent at once
+hermes blackbox detach   # turn it back off
 ```
 
-`attach` finds every Hermes home and OpenClaw workspace on your machine and enables Umanitek Agent Guardian in each one - no per-agent setup.
+`attach` finds every Hermes home and OpenClaw workspace on your machine and enables Agent Blackbox in each one - no per-agent setup.
 
 ## Configuration
 
-Set under `plugins.entries.guardian.*` in `config.yaml`.
+Set under `plugins.entries.blackbox.*` in `config.yaml`.
 
 | Key | Default | Meaning |
 |-----|---------|---------|
@@ -200,7 +200,7 @@ Set under `plugins.entries.guardian.*` in `config.yaml`.
 | `detection.<category>.min_severity` | `info` | quiet a category below this level, e.g. `detection.dependency.min_severity: critical` |
 | `protected_paths` | `[]` | your own files/folders that always block and never leave your machine |
 
-Full options in the [plugin README](plugins/guardian/README.md).
+Full options in the [plugin README](plugins/blackbox/README.md).
 
 ### Customize to your needs
 
@@ -208,7 +208,7 @@ Open the dashboard and click the gear icon - no config file needed. Switch threa
 
 ## About Umanitek
 
-[Umanitek](https://umanitek.ai) is fighting for a safe internet in the age of AI. Umanitek Agent Guardian is built on the OriginTrail Decentralized Knowledge Graph, turning collective threat intelligence into real-time protection for every agent.
+[Umanitek](https://umanitek.ai) is fighting for a safe internet in the age of AI. Agent Blackbox is built on the OriginTrail Decentralized Knowledge Graph, turning collective threat intelligence into real-time protection for every agent.
 
 ## License
 

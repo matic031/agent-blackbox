@@ -2,7 +2,7 @@
  * Cross-language identifier PARITY test.
  *
  * Asserts the TypeScript integration reproduces the canonical Python
- * `plugins/guardian/quads.py` byte-for-byte, using the shared ground-truth
+ * `plugins/blackbox/quads.py` byte-for-byte, using the shared ground-truth
  * fixture `tests/parity/identifier_fixtures.json`. If any group fails the
  * cross-framework threat-graph flywheel would silently break (the same threat
  * seen by Hermes and OpenClaw would get different IDs → no correlation).

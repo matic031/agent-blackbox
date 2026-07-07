@@ -7,7 +7,7 @@
  * graph ruleset, `lookup` asks OSV whether that exact `package@version` is
  * known-vulnerable. If so, the caller auto-submits a candidate dependency threat.
  *
- * Faithful port of `plugins/guardian/osv.py`. Design constraints:
+ * Faithful port of `plugins/blackbox/osv.py`. Design constraints:
  *   - global `fetch` only — no new runtime dependency.
  *   - fail-open — any transport/parse error resolves to null (no finding).
  *   - short timeout — never delays the agent loop meaningfully.
@@ -17,13 +17,13 @@
  *     repeated install in the same process makes at most one network call.
  */
 import type { OsvHit } from "./detection.js";
-import type { GuardianSeverity } from "./quads.js";
+import type { BlackboxSeverity } from "./quads.js";
 
 const OSV_URL = "https://api.osv.dev/v1/query";
 const TIMEOUT_MS = 3000;
 
 /**
- * Guardian ecosystem slug → OSV ecosystem name. `homebrew` has no OSV
+ * Blackbox ecosystem slug → OSV ecosystem name. `homebrew` has no OSV
  * ecosystem, so it is intentionally absent (skipped, never looked up).
  */
 const ECOSYSTEM_MAP: Record<string, string> = {
@@ -36,17 +36,17 @@ const ECOSYSTEM_MAP: Record<string, string> = {
 // In-memory result cache. Value is the OsvHit or null (clean/skip).
 const cache = new Map<string, OsvHit | null>();
 
-/** Map a Guardian ecosystem slug to its OSV name, or null to skip. */
+/** Map a Blackbox ecosystem slug to its OSV name, or null to skip. */
 export function osvEcosystem(ecosystem: string): string | null {
   return ECOSYSTEM_MAP[(ecosystem || "").trim().toLowerCase()] ?? null;
 }
 
 /** Best-effort severity from an OSV vuln record (defaults to `high`). */
-function severityOf(vuln: Record<string, unknown>): GuardianSeverity {
+function severityOf(vuln: Record<string, unknown>): BlackboxSeverity {
   const dbs = vuln.database_specific;
   if (dbs && typeof dbs === "object") {
     const raw = String((dbs as Record<string, unknown>).severity ?? "").trim().toLowerCase();
-    if (raw) return raw as GuardianSeverity;
+    if (raw) return raw as BlackboxSeverity;
   }
   const affected = Array.isArray(vuln.affected) ? vuln.affected : [];
   for (const aff of affected) {
@@ -54,7 +54,7 @@ function severityOf(vuln: Record<string, unknown>): GuardianSeverity {
       const affDbs = (aff as Record<string, unknown>).database_specific;
       if (affDbs && typeof affDbs === "object") {
         const raw = String((affDbs as Record<string, unknown>).severity ?? "").trim().toLowerCase();
-        if (raw) return raw as GuardianSeverity;
+        if (raw) return raw as BlackboxSeverity;
       }
     }
   }

@@ -1,6 +1,6 @@
 {
-  "id": "guardian",
-  "name": "Umanitek Agent Guardian",
+  "id": "blackbox",
+  "name": "Agent Blackbox",
   "description": "Detects prompt-injection, escalation, dependency, file-access, and skill threats from tool calls and prompts, and reports sightings to the local DKG threat graph. Audit-only by default; blocking is opt-in.",
   "activation": {
     "onStartup": true
@@ -14,7 +14,7 @@
       "session_start",
       "session_end"
     ],
-    "notes": "before_agent_run is a conversation hook: OpenClaw requires plugins.entries.guardian.hooks.allowConversationAccess=true for it to receive the prompt and session messages. Without it, tool-call, message, and session detection still work, but the prompt-injection scan on the incoming run is skipped."
+    "notes": "before_agent_run is a conversation hook: OpenClaw requires plugins.entries.blackbox.hooks.allowConversationAccess=true for it to receive the prompt and session messages. Without it, tool-call, message, and session detection still work, but the prompt-injection scan on the incoming run is skipped."
   },
   "configSchema": {
     "type": "object",

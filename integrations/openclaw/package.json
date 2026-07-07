@@ -1,7 +1,7 @@
 {
-  "name": "@umanitek/guardian-openclaw",
+  "name": "@umanitek/blackbox-openclaw",
   "version": "0.1.0",
-  "description": "Umanitek Agent Guardian plugin for OpenClaw — mirrors hermes guardian detection and reports sightings to the local DKG threat graph.",
+  "description": "Agent Blackbox plugin for OpenClaw — mirrors hermes blackbox detection and reports sightings to the local DKG threat graph.",
   "type": "module",
   "license": "Apache-2.0",
   "files": [

@@ -1,9 +1,9 @@
 """Regenerate the cross-language parity fixture from the canonical Python impl.
 
 ``identifier_fixtures.json`` is the ground truth that both the Python plugin
-(``tests/plugins/test_guardian_parity.py``) and the OpenClaw TypeScript plugin
+(``tests/plugins/test_blackbox_parity.py``) and the OpenClaw TypeScript plugin
 (``integrations/openclaw/test/parity.mjs``) assert against. It is generated
-from ``plugins/guardian/quads.py`` — the single source of truth for identifiers,
+from ``plugins/blackbox/quads.py`` — the single source of truth for identifiers,
 URIs, arg shapes, dependency parsing, and report-quad structure.
 
 Run from a checkout with the plugin importable::
@@ -22,9 +22,9 @@ _REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_REPO))
 sys.path.insert(0, str(_REPO / "tests" / "plugins"))
 
-from _guardian_loader import load_guardian  # noqa: E402
+from _blackbox_loader import load_blackbox  # noqa: E402
 
-q = load_guardian("quads")
+q = load_blackbox("quads")
 
 
 def report_struct(**kw):
@@ -175,9 +175,9 @@ report_quads = [{
 
 fixture = {
     "note": (
-        "Ground truth generated from plugins/guardian/quads.py by "
+        "Ground truth generated from plugins/blackbox/quads.py by "
         "tests/parity/generate.py. The OpenClaw TypeScript plugin must reproduce "
-        "these exactly. Guarded by tests/plugins/test_guardian_parity.py (Python) "
+        "these exactly. Guarded by tests/plugins/test_blackbox_parity.py (Python) "
         "and integrations/openclaw/test/parity.mjs (TypeScript)."
     ),
     "identifiers": identifiers,

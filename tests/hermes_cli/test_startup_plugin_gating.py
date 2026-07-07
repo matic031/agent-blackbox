@@ -151,16 +151,16 @@ def test_general_plugin_cli_survives_memory_cli_setup_failure():
     def broken_memory_setup(_parser):
         raise AttributeError("'ArgumentParser' object has no attribute 'group'")
 
-    def setup_guardian(parser):
+    def setup_blackbox(parser):
         parser.set_defaults(func=lambda _args: None)
 
     fake_manager = SimpleNamespace(
         _cli_commands={
-            "guardian": {
-                "name": "guardian",
-                "help": "Guardian",
-                "description": "Guardian",
-                "setup_fn": setup_guardian,
+            "blackbox": {
+                "name": "blackbox",
+                "help": "Blackbox",
+                "description": "Blackbox",
+                "setup_fn": setup_blackbox,
                 "handler_fn": None,
             }
         }
@@ -176,7 +176,7 @@ def test_general_plugin_cli_survives_memory_cli_setup_failure():
     ]
 
     argv_backup = sys.argv[:]
-    sys.argv = ["hermes", "guardian", "--help"]
+    sys.argv = ["hermes", "blackbox", "--help"]
     buf = io.StringIO()
     try:
         with patch.object(memory_mod, "discover_plugin_cli_commands", return_value=memory_commands):
@@ -189,7 +189,7 @@ def test_general_plugin_cli_survives_memory_cli_setup_failure():
         sys.argv = argv_backup
 
     assert exc.value.code == 0
-    assert "usage: hermes guardian" in buf.getvalue()
+    assert "usage: hermes blackbox" in buf.getvalue()
 
 
 # ── _BUILTIN_SUBCOMMANDS ↔ argparse registration parity ────────────────────

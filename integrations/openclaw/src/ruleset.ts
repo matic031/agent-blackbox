@@ -36,20 +36,20 @@ import {
   emptyRuleset,
 } from "./detection.js";
 import {
-  GUARDIAN_ARG_SHAPE_PRED,
-  GUARDIAN_CATEGORY_PRED,
-  GUARDIAN_DANGER_SHAPE_PRED,
-  GUARDIAN_IDENTIFIER_PRED,
-  GUARDIAN_KIND_PRED,
-  GUARDIAN_OWASP_CATEGORY_PRED,
-  GUARDIAN_PACKAGE_ECOSYSTEM_PRED,
-  GUARDIAN_PACKAGE_NAME_PRED,
-  GUARDIAN_PACKAGE_VERSION_PRED,
-  GUARDIAN_PATTERN_PRED,
-  GUARDIAN_SEVERITY_PRED,
-  GUARDIAN_SKILL_NAME_PRED,
-  GUARDIAN_SKILL_VERSION_PRED,
-  GUARDIAN_TOOL_NAME_PRED,
+  BLACKBOX_ARG_SHAPE_PRED,
+  BLACKBOX_CATEGORY_PRED,
+  BLACKBOX_DANGER_SHAPE_PRED,
+  BLACKBOX_IDENTIFIER_PRED,
+  BLACKBOX_KIND_PRED,
+  BLACKBOX_OWASP_CATEGORY_PRED,
+  BLACKBOX_PACKAGE_ECOSYSTEM_PRED,
+  BLACKBOX_PACKAGE_NAME_PRED,
+  BLACKBOX_PACKAGE_VERSION_PRED,
+  BLACKBOX_PATTERN_PRED,
+  BLACKBOX_SEVERITY_PRED,
+  BLACKBOX_SKILL_NAME_PRED,
+  BLACKBOX_SKILL_VERSION_PRED,
+  BLACKBOX_TOOL_NAME_PRED,
   SCHEMA_DESCRIPTION,
   SCHEMA_NAME,
   normalizeSeverity,
@@ -66,7 +66,7 @@ const SCHEMA_ADVISORY = "http://schema.org/identifier";
 function rulesetQuery(): string {
   return `
 SELECT ?s ?p ?o WHERE {
-  ?s <${GUARDIAN_IDENTIFIER_PRED}> ?identifier .
+  ?s <${BLACKBOX_IDENTIFIER_PRED}> ?identifier .
   ?s ?p ?o .
 }`.trim();
 }
@@ -83,7 +83,7 @@ export function resolveStateDir(explicit?: string): string {
     process.env.OPENCLAW_STATE_DIR ||
     process.env.OPENCLAW_HOME ||
     join(homedir(), ".openclaw");
-  return join(base, "guardian");
+  return join(base, "blackbox");
 }
 
 /** Extract SPARQL SELECT bindings from the node's response envelope, tolerantly.
@@ -141,23 +141,23 @@ function collectThreats(resp: unknown): ThreatAccum[] {
     if (!s || !p || o === undefined) continue;
     const acc = bySubject.get(s) ?? {};
     switch (p) {
-      case GUARDIAN_IDENTIFIER_PRED: acc.identifier = o; break;
-      case GUARDIAN_SEVERITY_PRED: acc.severity = o; break;
+      case BLACKBOX_IDENTIFIER_PRED: acc.identifier = o; break;
+      case BLACKBOX_SEVERITY_PRED: acc.severity = o; break;
       case SCHEMA_NAME: acc.name ??= o; break;
       case SCHEMA_DESCRIPTION: acc.name ??= o; break;
-      case GUARDIAN_PATTERN_PRED: acc.pattern = o; break;
-      case GUARDIAN_OWASP_CATEGORY_PRED: acc.owaspCategory = o; break;
-      case GUARDIAN_TOOL_NAME_PRED: acc.toolName = o; break;
-      case GUARDIAN_ARG_SHAPE_PRED: acc.argShape = o; break;
-      case GUARDIAN_PACKAGE_NAME_PRED: acc.packageName = o; break;
-      case GUARDIAN_PACKAGE_VERSION_PRED: acc.packageVersion = o; break;
-      case GUARDIAN_PACKAGE_ECOSYSTEM_PRED: acc.packageEcosystem = o; break;
-      case GUARDIAN_KIND_PRED: acc.kind = o; break;
+      case BLACKBOX_PATTERN_PRED: acc.pattern = o; break;
+      case BLACKBOX_OWASP_CATEGORY_PRED: acc.owaspCategory = o; break;
+      case BLACKBOX_TOOL_NAME_PRED: acc.toolName = o; break;
+      case BLACKBOX_ARG_SHAPE_PRED: acc.argShape = o; break;
+      case BLACKBOX_PACKAGE_NAME_PRED: acc.packageName = o; break;
+      case BLACKBOX_PACKAGE_VERSION_PRED: acc.packageVersion = o; break;
+      case BLACKBOX_PACKAGE_ECOSYSTEM_PRED: acc.packageEcosystem = o; break;
+      case BLACKBOX_KIND_PRED: acc.kind = o; break;
       case SCHEMA_ADVISORY: acc.advisoryId = o; break;
-      case GUARDIAN_CATEGORY_PRED: acc.category = o; break;
-      case GUARDIAN_SKILL_NAME_PRED: acc.skillName = o; break;
-      case GUARDIAN_SKILL_VERSION_PRED: acc.skillVersion = o; break;
-      case GUARDIAN_DANGER_SHAPE_PRED: acc.dangerShape = o; break;
+      case BLACKBOX_CATEGORY_PRED: acc.category = o; break;
+      case BLACKBOX_SKILL_NAME_PRED: acc.skillName = o; break;
+      case BLACKBOX_SKILL_VERSION_PRED: acc.skillVersion = o; break;
+      case BLACKBOX_DANGER_SHAPE_PRED: acc.dangerShape = o; break;
       default: break;
     }
     bySubject.set(s, acc);

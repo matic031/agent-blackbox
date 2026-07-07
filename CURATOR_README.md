@@ -8,11 +8,11 @@ the people who do that approving. If you just want to protect your agents, the
 
 There are two graphs:
 
-- **Community graph (SWM)** — free, shared pool. Every Guardian writes here the
+- **Community graph (SWM)** — free, shared pool. Every Blackbox writes here the
   anonymized *candidate* threats its agent discovered. Anyone can write; nothing
   here is trusted by others automatically, and it only ever flags, never blocks.
 - **Public graph (VM)** — the shared, on-chain curated threat database every
-  Guardian reads. Writing to it is **restricted to the Umanitek curator wallet**,
+  Blackbox reads. Writing to it is **restricted to the Umanitek curator wallet**,
   enforced on-chain (`publishPolicy: curated`). This is what makes a threat
   "official."
 
@@ -32,7 +32,7 @@ agent discovers something suspicious
    curated threat published to the public graph (VM, on-chain)
         │
         ▼
-every Guardian syncs it and starts blocking/flagging it
+every Blackbox syncs it and starts blocking/flagging it
 ```
 
 A candidate that many independent agents report is a strong signal - `curate list`
@@ -51,8 +51,8 @@ You need a curator wallet (the one authorized on-chain) configured on your DKG
 node, then create the public graph:
 
 ```bash
-hermes guardian setup-graph            # create + register the public threat graph (curator wallet only)
-hermes guardian status                 # confirm node health + which graph you're pointed at
+hermes blackbox setup-graph            # create + register the public threat graph (curator wallet only)
+hermes blackbox status                 # confirm node health + which graph you're pointed at
 ```
 
 `context_graph_id` in your `config.yaml` must point at the public graph you
@@ -62,19 +62,19 @@ created (default `umanitek/guardian-threats`).
 
 ```bash
 # See what agents have discovered, grouped by how many distinct reporters saw it
-hermes guardian curate list --pending
+hermes blackbox curate list --pending
 
 # Inspect one candidate and who reported it
-hermes guardian curate show <identifier>
+hermes blackbox curate show <identifier>
 
 # Approve → shares to SWM and publishes to the public on-chain graph (VM)
-hermes guardian curate approve <identifier> --severity high --name "..." --description "..."
+hermes blackbox curate approve <identifier> --severity high --name "..." --description "..."
 
 # Approve locally without the on-chain publish (useful while testing)
-hermes guardian curate approve <identifier> --no-publish
+hermes blackbox curate approve <identifier> --no-publish
 
 # Reject a candidate; optionally publish a false-positive note so others down-rank it
-hermes guardian curate reject <identifier> --dispute
+hermes blackbox curate reject <identifier> --dispute
 ```
 
 ### Malware vs vulnerability (what `approve` carries)
@@ -98,10 +98,10 @@ To load a whole catalog of threats at once (e.g. an advisory dump):
 
 ```bash
 # Share to the free local tier only — review, then approve the ones worth publishing
-hermes guardian curate import --dir ./threats --no-publish
+hermes blackbox curate import --dir ./threats --no-publish
 
 # Enrich dependency entries against OSV before publishing
-hermes guardian curate import --file ./deps.json --osv-enrich
+hermes blackbox curate import --file ./deps.json --osv-enrich
 ```
 
 The full step-by-step runbook — staging rehearsal through the production seed —
@@ -116,11 +116,11 @@ lives in **[seed.md](seed.md)** (the single seeding guide).
 - On-chain publishing needs a storage-ACK quorum from mainnet core nodes. If
   your node cannot reach them the publish will not finalize - use
   `--no-publish` to keep working locally and publish once the node is
-  connected. Guardian is mainnet only; there is no testnet fallback.
+  connected. Blackbox is mainnet only; there is no testnet fallback.
 
 ## Contributing
 
 Curators (and only curators) commit here. Propose changes to detection logic,
 the ontology, or curation policy via PR against this repo. Everything under
-`plugins/guardian/` is fair game; keep the [main README](README.md) accurate for
+`plugins/blackbox/` is fair game; keep the [main README](README.md) accurate for
 end users.

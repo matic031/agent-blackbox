@@ -1,7 +1,7 @@
 /**
- * Umanitek Agent Guardian — OpenClaw plugin.
+ * Agent Blackbox — OpenClaw plugin.
  *
- * Mirrors the hermes guardian plugin's detection and reports sightings to the
+ * Mirrors the hermes blackbox plugin's detection and reports sightings to the
  * same local DKG threat graph. Rules come ONLY from the synced graph
  * (ruleset.ts); on an empty graph nothing is detected — by design.
  *
@@ -39,13 +39,13 @@ import {
 } from "./detection.js";
 import { DkgClient, DkgError } from "./dkgClient.js";
 import { recordFinding, type ConvTurn, type FindingContext } from "./audit.js";
-import { GuardianConfig, categoryAllows, resolveConfig } from "./config.js";
+import { BlackboxConfig, categoryAllows, resolveConfig } from "./config.js";
 import { RulesetCache } from "./ruleset.js";
-import { GuardianSeverity, KIND_VULNERABILITY, SEVERITY_RANK, buildReportQuads, stableHash } from "./quads.js";
+import { BlackboxSeverity, KIND_VULNERABILITY, SEVERITY_RANK, buildReportQuads, stableHash } from "./quads.js";
 import { lookup as osvLookup } from "./osv.js";
 import { sanitizeText } from "./redact.js";
 
-const PLUGIN_ID = "guardian";
+const PLUGIN_ID = "blackbox";
 const FRAMEWORK = "openclaw" as const;
 
 /**
@@ -55,8 +55,8 @@ const FRAMEWORK = "openclaw" as const;
 const registeredApis = new WeakSet<object>();
 let registeredOnce = false;
 
-interface GuardianRuntime {
-  cfg: GuardianConfig;
+interface BlackboxRuntime {
+  cfg: BlackboxConfig;
   client: DkgClient;
   ruleset: RulesetCache;
   /** Cached reporter agent address, resolved lazily from the node (never the token). */
@@ -133,14 +133,14 @@ function turnsFromMessages(messages: unknown, prompt?: unknown): ConvTurn[] {
 }
 
 /** Replace the session transcript with the canonical conversation (bounded). */
-function setTranscript(rt: GuardianRuntime, sessionId: string, turns: ConvTurn[]): void {
+function setTranscript(rt: BlackboxRuntime, sessionId: string, turns: ConvTurn[]): void {
   if (!sessionId || !turns.length) return;
   if (!rt.transcript.has(sessionId) && rt.transcript.size >= MAX_TRACKED_SESSIONS) rt.transcript.clear();
   rt.transcript.set(sessionId, turns.slice(-CONTEXT_TURNS));
 }
 
 /** Append one turn to the session transcript (bounded). */
-function appendTranscript(rt: GuardianRuntime, sessionId: string, turn: ConvTurn): void {
+function appendTranscript(rt: BlackboxRuntime, sessionId: string, turn: ConvTurn): void {
   if (!sessionId || !turn.text) return;
   let buf = rt.transcript.get(sessionId);
   if (!buf) {
@@ -152,7 +152,7 @@ function appendTranscript(rt: GuardianRuntime, sessionId: string, turn: ConvTurn
   if (buf.length > CONTEXT_TURNS) buf.splice(0, buf.length - CONTEXT_TURNS);
 }
 
-function recentTranscript(rt: GuardianRuntime, sessionId: string): ConvTurn[] {
+function recentTranscript(rt: BlackboxRuntime, sessionId: string): ConvTurn[] {
   return sessionId ? (rt.transcript.get(sessionId) ?? []).slice() : [];
 }
 
@@ -161,7 +161,7 @@ function recentTranscript(rt: GuardianRuntime, sessionId: string): ConvTurn[] {
 const REPORT_COOLDOWN_MS = 6 * 3600 * 1000;
 
 /** Drop expired cooldown stamps so the map stays small. */
-function pruneRecentReports(rt: GuardianRuntime, now: number): void {
+function pruneRecentReports(rt: BlackboxRuntime, now: number): void {
   if (rt.recentReports.size <= 2048) return;
   for (const [identifier, ts] of rt.recentReports) {
     if (now - ts >= REPORT_COOLDOWN_MS) rt.recentReports.delete(identifier);
@@ -176,7 +176,7 @@ function pruneRecentReports(rt: GuardianRuntime, now: number): void {
  * Custom rules (`source === "custom"`) bypass the category policy; graph-backed
  * findings skip the heuristic gate. Mirrors Python `hooks._flag_worthy`.
  */
-function flagWorthy(cfg: GuardianConfig, findings: Finding[]): Finding[] {
+function flagWorthy(cfg: BlackboxConfig, findings: Finding[]): Finding[] {
   const out: Finding[] = [];
   for (const f of findings) {
     if (f.source === "custom") {
@@ -197,7 +197,7 @@ function flagWorthy(cfg: GuardianConfig, findings: Finding[]): Finding[] {
  * graph-backed patterns, add built-in discovery candidates when enabled, then
  * apply the user's flag policy. One place so the two hooks can't drift.
  */
-function scanInjection(rt: GuardianRuntime, text: string): Finding[] {
+function scanInjection(rt: BlackboxRuntime, text: string): Finding[] {
   const ruleset = rt.ruleset.get();
   const findings = detectInjection(text, ruleset);
   if (rt.cfg.discover) findings.push(...discoverInjection(text, ruleset));
@@ -209,7 +209,7 @@ function scanInjection(rt: GuardianRuntime, text: string): Finding[] {
  * fails open to "node". NOT derived from the auth token — the node's true agent
  * address namespaces the per-submitter report URI.
  */
-async function resolveReporter(rt: GuardianRuntime): Promise<string> {
+async function resolveReporter(rt: BlackboxRuntime): Promise<string> {
   if (rt.reporterAddress !== undefined) return rt.reporterAddress;
   try {
     rt.reporterAddress = await rt.client.reporterAddress();
@@ -223,7 +223,7 @@ function today(): string {
   return new Date().toISOString().slice(0, 10);
 }
 
-function underDailyCap(rt: GuardianRuntime): boolean {
+function underDailyCap(rt: BlackboxRuntime): boolean {
   const d = today();
   if (rt.dailyReports.date !== d) {
     rt.dailyReports = { date: d, count: 0 };
@@ -236,7 +236,7 @@ function underDailyCap(rt: GuardianRuntime): boolean {
  * fail-open, rate-limited by daily cap + per-identifier cooldown. Reports
  * carry NO observed content.
  */
-async function reportSighting(rt: GuardianRuntime, finding: Finding): Promise<void> {
+async function reportSighting(rt: BlackboxRuntime, finding: Finding): Promise<void> {
   // Custom rules stay local — NEVER shared. Mirrors Python `_report_and_audit`.
   if (finding.source === "custom") return;
   if (!rt.cfg.report) return;
@@ -244,11 +244,11 @@ async function reportSighting(rt: GuardianRuntime, finding: Finding): Promise<vo
   const now = Date.now();
   const last = rt.recentReports.get(finding.identifier);
   if (last !== undefined && now - last < REPORT_COOLDOWN_MS) {
-    rt.log("debug", `guardian: report cooldown active for ${finding.identifier}`);
+    rt.log("debug", `blackbox: report cooldown active for ${finding.identifier}`);
     return;
   }
   if (!underDailyCap(rt)) {
-    rt.log("debug", "guardian: daily report cap reached, dropping sighting");
+    rt.log("debug", "blackbox: daily report cap reached, dropping sighting");
     return;
   }
   // Stamp before the share so a burst of re-fires can't queue N shares in flight.
@@ -274,10 +274,10 @@ async function reportSighting(rt: GuardianRuntime, finding: Finding): Promise<vo
     rt.dailyReports.count += 1;
   } catch (err) {
     if (err instanceof DkgError) {
-      rt.log("debug", `guardian: sighting report failed (node unreachable): ${err.message}`);
+      rt.log("debug", `blackbox: sighting report failed (node unreachable): ${err.message}`);
       return;
     }
-    rt.log("debug", `guardian: sighting report error: ${(err as Error).message}`);
+    rt.log("debug", `blackbox: sighting report error: ${(err as Error).message}`);
   }
 }
 
@@ -287,7 +287,7 @@ async function reportSighting(rt: GuardianRuntime, finding: Finding): Promise<vo
  * alert/report. A `vulnerability`-kind threat NEVER blocks — only active malware
  * is stopped. Mirrors Python's `pre_tool_call` blocking filter.
  */
-function meetsBlock(finding: Finding, cfg: GuardianConfig): boolean {
+function meetsBlock(finding: Finding, cfg: BlackboxConfig): boolean {
   return (
     (finding.confirmed || finding.source === "custom") &&
     finding.kind !== KIND_VULNERABILITY &&
@@ -295,8 +295,8 @@ function meetsBlock(finding: Finding, cfg: GuardianConfig): boolean {
   );
 }
 
-function maxSeverity(findings: Finding[]): GuardianSeverity {
-  return findings.reduce<GuardianSeverity>(
+function maxSeverity(findings: Finding[]): BlackboxSeverity {
+  return findings.reduce<BlackboxSeverity>(
     (best, f) => (SEVERITY_RANK[f.severity] > SEVERITY_RANK[best] ? f.severity : best),
     "info",
   );
@@ -305,7 +305,7 @@ function maxSeverity(findings: Finding[]): GuardianSeverity {
 function blockMessage(findings: Finding[]): string {
   const worst = maxSeverity(findings);
   const titles = [...new Set(findings.map((f) => f.title))].slice(0, 3).join("; ");
-  return `Umanitek Guardian blocked this action (${worst}): ${titles}`;
+  return `Blackbox blocked this action (${worst}): ${titles}`;
 }
 
 /**
@@ -314,14 +314,14 @@ function blockMessage(findings: Finding[]): string {
  * the daily cap / per-identifier cooldown.
  */
 function observe(
-  rt: GuardianRuntime,
+  rt: BlackboxRuntime,
   event: string,
   finding: Finding,
   toolName?: string,
   context?: FindingContext,
 ): void {
   try {
-    recordFinding(rt.cfg.guardianHome, event, finding, toolName, context);
+    recordFinding(rt.cfg.blackboxHome, event, finding, toolName, context);
   } catch {
     /* fail-open — local logging must never break the loop */
   }
@@ -330,7 +330,7 @@ function observe(
 
 // --- Hook handlers ---------------------------------------------------------
 
-function makeBeforeToolCall(rt: GuardianRuntime) {
+function makeBeforeToolCall(rt: BlackboxRuntime) {
   return async (
     event: PluginHookBeforeToolCallEvent,
   ): Promise<PluginHookBeforeToolCallResult | void> => {
@@ -378,18 +378,18 @@ function makeBeforeToolCall(rt: GuardianRuntime) {
       }
       return;
     } catch (err) {
-      rt.log("debug", `guardian: before_tool_call error: ${(err as Error).message}`);
+      rt.log("debug", `blackbox: before_tool_call error: ${(err as Error).message}`);
       return; // fail-open
     }
   };
 }
 
-function makeAfterToolCall(rt: GuardianRuntime) {
+function makeAfterToolCall(rt: BlackboxRuntime) {
   return async (event: PluginHookAfterToolCallEvent): Promise<void> => {
     try {
       // Observation only — record a redacted result summary for local audit.
       if (event.error) {
-        rt.log("debug", `guardian: tool ${event.toolName} errored`, { error: sanitizeText(event.error, 300) });
+        rt.log("debug", `blackbox: tool ${event.toolName} errored`, { error: sanitizeText(event.error, 300) });
       }
     } catch {
       /* fail-open */
@@ -397,7 +397,7 @@ function makeAfterToolCall(rt: GuardianRuntime) {
   };
 }
 
-function makeBeforeAgentRun(rt: GuardianRuntime) {
+function makeBeforeAgentRun(rt: BlackboxRuntime) {
   return async (
     event: PluginHookBeforeAgentRunEvent,
   ): Promise<PluginHookBeforeAgentRunResult> => {
@@ -418,20 +418,20 @@ function makeBeforeAgentRun(rt: GuardianRuntime) {
         if (blocking.length > 0) {
           return {
             outcome: "block",
-            reason: `guardian:prompt-injection:${blocking.map((f) => f.identifier).join(",")}`,
+            reason: `blackbox:prompt-injection:${blocking.map((f) => f.identifier).join(",")}`,
             message: "This request was blocked because it contained prompt-injection content.",
           };
         }
       }
       return { outcome: "pass" };
     } catch (err) {
-      rt.log("debug", `guardian: before_agent_run error: ${(err as Error).message}`);
+      rt.log("debug", `blackbox: before_agent_run error: ${(err as Error).message}`);
       return { outcome: "pass" }; // fail-open
     }
   };
 }
 
-function makeMessageReceived(rt: GuardianRuntime) {
+function makeMessageReceived(rt: BlackboxRuntime) {
   return async (event: PluginHookMessageReceivedEvent): Promise<void> => {
     try {
       const text = event.content ?? "";
@@ -453,9 +453,9 @@ function makeMessageReceived(rt: GuardianRuntime) {
   };
 }
 
-function makeSessionStart(rt: GuardianRuntime) {
+function makeSessionStart(rt: BlackboxRuntime) {
   return async (event: PluginHookSessionStartEvent): Promise<void> => {
-    rt.log("debug", `guardian: session_start ${event.sessionId}`);
+    rt.log("debug", `blackbox: session_start ${event.sessionId}`);
     // Warm the ruleset so the first tool call has fresh rules.
     try {
       await rt.ruleset.sync();
@@ -465,15 +465,15 @@ function makeSessionStart(rt: GuardianRuntime) {
   };
 }
 
-function makeSessionEnd(rt: GuardianRuntime) {
+function makeSessionEnd(rt: BlackboxRuntime) {
   return async (event: PluginHookSessionEndEvent): Promise<void> => {
-    rt.log("debug", `guardian: session_end ${event.sessionId} (${event.reason ?? "unknown"})`);
+    rt.log("debug", `blackbox: session_end ${event.sessionId} (${event.reason ?? "unknown"})`);
   };
 }
 
 // --- Registration ----------------------------------------------------------
 
-function buildRuntime(api: OpenClawPluginApi): GuardianRuntime {
+function buildRuntime(api: OpenClawPluginApi): BlackboxRuntime {
   const cfg = resolveConfig((api.pluginConfig ?? {}) as Record<string, unknown>);
   const client = new DkgClient({ url: cfg.dkgUrl });
   const ruleset = new RulesetCache({
@@ -506,7 +506,7 @@ export function register(api: OpenClawPluginApi): void {
   if (registeredApis.has(api) || registeredOnce) {
     try {
       (api.logger as unknown as { debug?: (m: string) => void })?.debug?.(
-        "guardian: register() called again; skipping duplicate hook wiring",
+        "blackbox: register() called again; skipping duplicate hook wiring",
       );
     } catch {
       /* ignore */
@@ -527,7 +527,7 @@ export function register(api: OpenClawPluginApi): void {
 
   rt.log(
     "debug",
-    `guardian: registered (mode=${rt.cfg.mode}, cg=${rt.cfg.contextGraphId}, dkg=${rt.client.url})`,
+    `blackbox: registered (mode=${rt.cfg.mode}, cg=${rt.cfg.contextGraphId}, dkg=${rt.client.url})`,
   );
 }
 
@@ -538,13 +538,13 @@ export function __resetRegistrationGuardForTests(): void {
 
 export default definePluginEntry({
   id: PLUGIN_ID,
-  name: "Umanitek Agent Guardian",
+  name: "Agent Blackbox",
   description:
-    "Mirrors hermes guardian detection in OpenClaw and reports sightings to the local DKG threat graph.",
+    "Mirrors hermes blackbox detection in OpenClaw and reports sightings to the local DKG threat graph.",
   // No exclusive `kind` — hook-only plugin, must not claim a singleton slot
   // (memory | context-engine).
   register,
 });
 
 export { resolveConfig } from "./config.js";
-export type { GuardianConfig } from "./config.js";
+export type { BlackboxConfig } from "./config.js";

@@ -1,4 +1,4 @@
-"""Make ``tests/plugins`` importable for shared helpers (e.g. ``_guardian_loader``)."""
+"""Make ``tests/plugins`` importable for shared helpers (e.g. ``_blackbox_loader``)."""
 
 import sys
 from pathlib import Path
