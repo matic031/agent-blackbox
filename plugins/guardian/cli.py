@@ -481,11 +481,21 @@ def _print_attached_targets() -> None:
 
 def _cmd_sync(args: argparse.Namespace) -> int:
     cfg = load_guardian_config()
-    rs = ruleset.refresh(cfg)
+    client = DkgClient(url=cfg.dkg_url)
+    # Subscribe before querying — a fresh install never subscribed the daemon, so
+    # the store would be empty. Idempotent when already subscribed.
+    try:
+        client.subscribe_context_graph(cfg.context_graph_id)
+    except DkgError as exc:
+        print(f"warning: could not subscribe to {cfg.context_graph_id}: {exc}")
+    rs = ruleset.refresh(cfg, client)
     counts = rs.counts()
     print(f"Ruleset synced from {cfg.context_graph_id}:")
     print(f"  {counts['injection']} injection, {counts['escalation']} escalation, "
           f"{counts['dependency']} dependency")
+    if sum(counts.values()) == 0:
+        print("  0 rules — if this is a fresh node the shared-memory catch-up may still be")
+        print("  running; re-run `hermes guardian sync` in ~30s (the subscribe kicks it off).")
     return 0
 
 

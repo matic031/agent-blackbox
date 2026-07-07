@@ -272,6 +272,21 @@ class DkgClient:
             timeout=_ONCHAIN_TIMEOUT,
         )
 
+    def subscribe_context_graph(self, cg_id: str, *, include_shared_memory: bool = True) -> Dict[str, Any]:
+        """Subscribe the node to a context graph + catch up its data.
+
+        What a *consumer* node needs: a fresh install that only set
+        ``context_graph_id`` never subscribes the daemon, so its store stays empty.
+        ``include_shared_memory`` (default True) pulls the SWM/community pool.
+        Idempotent — the daemon no-ops when already subscribed.
+        """
+        return self._request(
+            "POST",
+            "/api/context-graph/subscribe",
+            {"contextGraphId": cg_id, "includeSharedMemory": include_shared_memory},
+            timeout=_STORE_TIMEOUT,
+        )
+
     # -- knowledge assets --------------------------------------------------
 
     def share_knowledge_asset(self, cg_id: str, name: str, quads: List[Quad]) -> Dict[str, Any]:

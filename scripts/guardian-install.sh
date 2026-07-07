@@ -359,6 +359,15 @@ install_dkg() {
 sync_ruleset() {
     [ "${DKG_READY:-false}" = true ] || return 0
     heading "Syncing the threat ruleset"
+    # Subscribe the daemon (--save persists it) so it catches up the community
+    # pool — a fresh node never subscribes on its own, so sync would return 0.
+    local guardian_cg="umanitek/guardian-threats-staging"
+    step "Subscribing the node to $guardian_cg (dkg subscribe --save) ..."
+    if dkg subscribe "$guardian_cg" --save >/dev/null 2>&1; then
+        ok "Subscribed — the node will catch up the community pool from peers"
+    else
+        step "  (subscribe will also run automatically on 'hermes guardian sync')"
+    fi
     step "Pulling curated threats from the graph (hermes guardian sync) ..."
     if "$HERMES_BIN" guardian sync >/dev/null 2>&1; then
         ok "Ruleset synced — Guardian is watching with the latest threats"
@@ -495,7 +504,15 @@ configure_guardian_mode() {
     fi
     [ "$current" = "block" ] || current="audit"
 
-    if ! { [ -r /dev/tty ] && [ -w /dev/tty ]; }; then
+    # An explicit GUARDIAN_MODE is a non-interactive choice — honor it, skip the prompt.
+    if [ -n "${GUARDIAN_MODE:-}" ]; then
+        GUARDIAN_SELECTED_MODE="$current"
+        step "Using GUARDIAN_MODE=$current (non-interactive)."
+        return 0
+    fi
+    # Only prompt if /dev/tty actually opens — a perms check isn't enough (setsid /
+    # ssh has no controlling tty, so open() fails with ENXIO).
+    if ! { : > /dev/tty; } 2>/dev/null; then
         GUARDIAN_SELECTED_MODE="$current"
         step "Non-interactive install — keeping Guardian in $current mode."
         return 0

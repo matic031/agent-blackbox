@@ -438,6 +438,32 @@ def _fetch_tier(client: DkgClient, cg_id: str, view: str) -> Optional[List[Dict[
     return rows
 
 
+_last_subscribe_at = 0.0
+_SUBSCRIBE_RETRY_S = 300.0
+
+
+def _maybe_subscribe(client: DkgClient, cg_id: str) -> None:
+    """Throttled, best-effort subscribe when the local store is empty.
+
+    A fresh consumer node never subscribed the daemon, so every tier is empty;
+    subscribing kicks off the SWM catch-up. Fail-open; fires at most once per
+    ``_SUBSCRIBE_RETRY_S``.
+    """
+    global _last_subscribe_at
+    now = time.time()
+    if now - _last_subscribe_at < _SUBSCRIBE_RETRY_S:
+        return
+    _last_subscribe_at = now
+    try:
+        client.subscribe_context_graph(cg_id)
+        logger.info(
+            "guardian: local store empty for %s — subscribed daemon, catching up shared memory",
+            cg_id,
+        )
+    except Exception as exc:  # fail-open: auto-subscribe is a best-effort self-heal
+        logger.debug("guardian: auto-subscribe to %s failed: %s", cg_id, exc)
+
+
 def refresh(config: Optional[GuardianConfig] = None, client: Optional[DkgClient] = None) -> Ruleset:
     """Query the node, rebuild the ruleset, and persist it. Fail-open.
 
@@ -456,6 +482,10 @@ def refresh(config: Optional[GuardianConfig] = None, client: Optional[DkgClient]
         (constants.VIEW_SHARED_WORKING_MEMORY, "community"),
     )
     fetched = {tier: _fetch_tier(client, config.context_graph_id, view) for view, tier in tiers}
+
+    # Empty store usually means the daemon was never subscribed — self-heal.
+    if all(rows == [] for rows in fetched.values()):
+        _maybe_subscribe(client, config.context_graph_id)
 
     if all(rows is None for rows in fetched.values()):
         # Every tier failed — keep the last-good ruleset instead of emptying.

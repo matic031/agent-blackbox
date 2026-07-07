@@ -15,7 +15,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 # ---------------------------------------------------------------------------
 # Ontology
@@ -50,10 +50,8 @@ PACKAGE_VERSION_PRED = f"{GUARDIAN_ONTOLOGY}packageVersion"
 PACKAGE_ECOSYSTEM_PRED = f"{GUARDIAN_ONTOLOGY}packageEcosystem"
 FIXED_VERSION_PRED = f"{GUARDIAN_ONTOLOGY}fixedVersion"
 REFERENCE_PRED = f"{GUARDIAN_ONTOLOGY}reference"
-# Named provenance of the threat intel — the feed/dataset/publication it came
-# from (e.g. "OSV.dev", "Socket", "OWASP LLM Top 10"). Distinct from
-# g:reference (a clickable source URL) and from the tier/graph it lives in.
-# Multi-valued: an entry may cite more than one source.
+# Named provenance (feed/dataset), e.g. "OSV.dev" — distinct from g:reference
+# (a URL). Multi-valued.
 SOURCE_PRED = f"{GUARDIAN_ONTOLOGY}source"
 REPORTS_THREAT_PRED = f"{GUARDIAN_ONTOLOGY}reportsThreat"
 REPORTER_PRED = f"{GUARDIAN_ONTOLOGY}reporter"
@@ -80,8 +78,7 @@ SCHEMA_NAME_PRED = "http://schema.org/name"
 SCHEMA_DESCRIPTION_PRED = "http://schema.org/description"
 SCHEMA_IDENTIFIER_PRED = "http://schema.org/identifier"
 SCHEMA_DATE_MODIFIED_PRED = "http://schema.org/dateModified"
-#: Optional attribution — who contributed this curated asset (an org, handle,
-#: or wallet). schema.org/contributor keeps the attribution interoperable.
+# Optional attribution — who contributed the asset (org, handle, or wallet).
 SCHEMA_CONTRIBUTOR_PRED = "http://schema.org/contributor"
 
 # ---------------------------------------------------------------------------

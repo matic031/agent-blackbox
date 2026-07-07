@@ -848,10 +848,8 @@ def build_threat_quads(
     "skill"}``. The subject URI is :func:`threat_uri` of *identifier*, so
     re-authoring the same threat targets the same KA.
 
-    *sources* (named feeds/datasets), *references* (source URLs) and
-    *contributor* (optional attribution) are provenance and are emitted for
-    every category so the dashboard can show where a threat came from and who
-    contributed it.
+    *sources*, *references* and *contributor* are provenance, emitted for every
+    category so the dashboard can show a threat's origin.
     """
     subj = threat_uri(identifier)
     type_iri = {
@@ -877,6 +875,7 @@ def build_threat_quads(
     if kind:
         out.append(_q(subj, constants.KIND_PRED, literal(kind)))
 
+    # Provenance (every category): source(s), reference URL(s), contributor.
     for src in list(sources or [])[:20]:
         if src:
             out.append(_q(subj, constants.SOURCE_PRED, literal(str(src))))
