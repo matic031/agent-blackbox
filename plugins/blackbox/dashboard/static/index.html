@@ -148,33 +148,33 @@
   .gear-btn:focus-visible { outline: 2px solid var(--mint); outline-offset: 2px; color: var(--text); }
   .chat-btn:hover svg { transform: none; }
 
-  /* ---------- Blackbox chat side sheet ---------- */
+  /* ---------- Blackbox chat sidebar ---------- */
   .chat-scrim {
     position: fixed;
     inset: 0;
     z-index: 1100;
-    background: rgba(5,5,5,0.45);
-    backdrop-filter: blur(4px);
-    -webkit-backdrop-filter: blur(4px);
-    opacity: 0;
+    background: transparent;
     pointer-events: none;
-    transition: opacity .18s ease;
   }
-  .chat-scrim.open { opacity: 1; pointer-events: auto; }
+  .chat-scrim.open { pointer-events: none; }
   .chat-sheet {
     position: fixed;
-    top: 0;
-    right: 0;
+    top: 12px;
+    right: 12px;
+    bottom: 12px;
     z-index: 1101;
-    width: min(460px, 100vw);
-    height: 100vh;
+    width: min(430px, calc(100vw - 24px));
     display: flex;
     flex-direction: column;
-    background: linear-gradient(180deg, var(--elevated), var(--panel));
-    border-left: 1px solid var(--border);
-    box-shadow: -28px 0 70px rgba(0,0,0,0.55);
-    transform: translateX(100%);
+    background:
+      linear-gradient(180deg, rgba(128,202,156,0.045), transparent 34%),
+      var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    box-shadow: -18px 0 48px rgba(0,0,0,0.42);
+    transform: translateX(calc(100% + 18px));
     transition: transform .22s cubic-bezier(.2,.7,.3,1);
+    pointer-events: auto;
   }
   .chat-scrim.open .chat-sheet { transform: translateX(0); }
   .chat-head {
@@ -188,16 +188,17 @@
   .chat-ico {
     width: 42px;
     height: 42px;
-    border-radius: 12px;
+    border-radius: 13px;
     display: flex;
     align-items: center;
     justify-content: center;
-    background: color-mix(in srgb, var(--mint) 13%, transparent);
+    background: #111111;
     border: 1px solid color-mix(in srgb, var(--mint) 34%, transparent);
-    color: var(--mint);
+    box-shadow: 0 0 0 3px rgba(128,202,156,0.05);
     flex: 0 0 auto;
+    overflow: hidden;
   }
-  .chat-ico svg { width: 22px; height: 22px; display: block; }
+  .chat-ico img { width: 100%; height: 100%; display: block; object-fit: cover; }
   .chat-title { font-size: 16px; font-weight: 650; color: var(--text); line-height: 1.3; }
   .chat-sub { font-size: 12px; color: var(--muted); margin-top: 2px; }
   .chat-close {
@@ -244,6 +245,33 @@
     color: var(--text);
     background: rgba(255,255,255,0.035);
   }
+  .chat-prompts {
+    border-top: 1px solid var(--border);
+    padding: 12px 14px;
+    display: grid;
+    gap: 8px;
+  }
+  .chat-prompt {
+    width: 100%;
+    border: 1px solid rgba(128,202,156,0.24);
+    border-radius: 9px;
+    background: rgba(128,202,156,0.055);
+    color: var(--text);
+    font: inherit;
+    font-size: 12px;
+    font-weight: 650;
+    line-height: 1.25;
+    padding: 8px 10px;
+    text-align: left;
+    cursor: pointer;
+    transition: background .15s ease, border-color .15s ease, color .15s ease;
+  }
+  .chat-prompt:hover {
+    background: rgba(128,202,156,0.10);
+    border-color: rgba(128,202,156,0.45);
+    color: var(--mint);
+  }
+  .chat-prompt:focus-visible { outline: 2px solid var(--mint); outline-offset: 2px; }
   .chat-msg.pending {
     color: transparent;
     font-style: italic;
@@ -281,6 +309,7 @@
   }
   .chat-input {
     flex: 1 1 auto;
+    min-width: 0;
     min-height: 42px;
     max-height: 130px;
     resize: vertical;
@@ -296,6 +325,7 @@
   .chat-input:focus-visible { outline: 2px solid var(--mint); outline-offset: 1px; border-color: var(--mint); }
   .chat-send {
     flex: 0 0 auto;
+    min-width: 70px;
     height: 42px;
     border: 1px solid var(--mint);
     border-radius: 10px;
@@ -764,8 +794,9 @@
     .stats { grid-template-columns: 1fr; }
     .brand-sub { display: none; }
     .brand-logo { height: 46px; }
-    .chat-sheet { width: 100vw; }
+    .chat-sheet { top: 0; right: 0; bottom: 0; width: 100vw; border-radius: 0; }
     .chat-msg { max-width: 94%; }
+    .chat-prompts { padding: 10px 12px; }
     .chat-form { padding: 12px; }
   }
 
@@ -1233,7 +1264,7 @@
       <div class="status-pills" aria-live="polite">
         <span class="status-pill offline" id="pill-node" hidden title="The local DKG node is not responding">node offline</span>
         <span class="status-pill mode-audit" id="pill-mode" hidden>audit mode</span>
-        <button type="button" class="gear-btn chat-btn" id="chat-open" aria-label="Chat with Blackbox" title="Chat with Blackbox">
+        <button type="button" class="gear-btn chat-btn" id="chat-open" aria-label="Toggle Blackbox assistant" aria-expanded="false" title="Blackbox assistant">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a4 4 0 0 1-4 4H8l-5 3V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4z"/><path d="M8 9h8M8 13h5"/></svg>
         </button>
         <button type="button" class="gear-btn" id="settings-open" aria-label="Open detection settings" title="Detection settings">
@@ -2906,9 +2937,9 @@
   var activityFilter = "all";  // "all" | "threats"
   var toolCmdById = {};        // tool_call_id → command (pre→post cross-ref)
 
-  // Shared empty-state row (colspan matches audit table width).
-  function emptyRow(strong, msg) {
-    return '<tr><td colspan="4"><div class="empty">' +
+  // Shared empty-state row.
+  function emptyRow(strong, msg, colspan) {
+    return '<tr><td colspan="' + (colspan || 4) + '"><div class="empty">' +
       '<svg class="e-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>' +
       '<strong>' + strong + '</strong>' + msg + '</div></td></tr>';
   }
@@ -3260,7 +3291,7 @@
 
     if (!list.length) {
       findingsRendered = [];
-      body.innerHTML = emptyRow("No findings yet", "Blackbox is watching.");
+      body.innerHTML = emptyRow("No findings yet", "Blackbox is watching.", 5);
       return;
     }
 
@@ -3924,6 +3955,8 @@
     if (!panel) return;
     panel.classList.add("open");
     panel.setAttribute("aria-hidden", "false");
+    var trigger = $("chat-open");
+    if (trigger) trigger.setAttribute("aria-expanded", "true");
     var input = $("chat-input");
     if (input) input.focus();
   }
@@ -3933,7 +3966,24 @@
     panel.classList.remove("open");
     panel.setAttribute("aria-hidden", "true");
     var trigger = $("chat-open");
-    if (trigger) trigger.focus();
+    if (trigger) {
+      trigger.setAttribute("aria-expanded", "false");
+      trigger.focus();
+    }
+  }
+  function toggleChat() {
+    var panel = $("chat-panel");
+    if (panel && panel.classList.contains("open")) closeChat();
+    else openChat();
+  }
+  function prefillChatPrompt(prompt) {
+    var input = $("chat-input");
+    if (!input) return;
+    input.value = prompt;
+    input.focus();
+    try {
+      input.setSelectionRange(input.value.length, input.value.length);
+    } catch (_) {}
   }
   function setChatBusy(busy) {
     chatBusy = !!busy;
@@ -3983,12 +4033,16 @@
     if (!panel || !form || panel.__wired) return;
     panel.__wired = true;
     restoreChat();
-    $("chat-open").addEventListener("click", openChat);
+    $("chat-open").addEventListener("click", toggleChat);
     $("chat-close").addEventListener("click", closeChat);
-    panel.addEventListener("click", function (e) { if (e.target === panel) closeChat(); });
     form.addEventListener("submit", function (e) { e.preventDefault(); submitChat(); });
     $("chat-input").addEventListener("keydown", function (e) {
       if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); submitChat(); }
+    });
+    Array.prototype.forEach.call(document.querySelectorAll(".chat-prompt"), function (btn) {
+      btn.addEventListener("click", function () {
+        prefillChatPrompt(btn.getAttribute("data-prompt") || "");
+      });
     });
     document.addEventListener("keydown", function (e) {
       if (e.key === "Escape" && panel.classList.contains("open")) closeChat();
@@ -4013,22 +4067,27 @@
 </script>
 
 <div class="chat-scrim" id="chat-panel" aria-hidden="true">
-  <aside class="chat-sheet" role="dialog" aria-modal="true" aria-labelledby="chat-title">
+  <aside class="chat-sheet" role="complementary" aria-labelledby="chat-title">
     <div class="chat-head">
       <div class="chat-ico" aria-hidden="true">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="M9 12l2 2 4-5"/></svg>
+        <img src="./assets/umanitek-icon.svg" alt="" />
       </div>
       <div>
-        <div class="chat-title" id="chat-title">Blackbox chat</div>
-        <div class="chat-sub">Ask about protected agents, findings, setup, and enforcement.</div>
+        <div class="chat-title" id="chat-title">Blackbox assistant</div>
+        <div class="chat-sub">Ask about agents, findings, sync, and setup.</div>
       </div>
       <button type="button" class="chat-close" id="chat-close" aria-label="Close Blackbox chat">×</button>
     </div>
     <div class="chat-log" id="chat-log" aria-live="polite">
-      <div class="chat-msg blackbox">I’m here to help you understand what Blackbox sees, what needs attention, and what to do next.</div>
+      <div class="chat-msg blackbox">I can inspect this dashboard and explain what needs attention.</div>
+    </div>
+    <div class="chat-prompts" aria-label="Example prompts">
+      <button type="button" class="chat-prompt" data-prompt="Summarize the current dashboard state. Which protected agents, findings, graph tiers, or sync issues need attention right now?">What needs attention?</button>
+      <button type="button" class="chat-prompt" data-prompt="List the protected local agents exactly as the dashboard sees them. Include framework, path, status, and any recent reports.">Show protected agents</button>
+      <button type="button" class="chat-prompt" data-prompt="Explain the public, community, and local graph counts on this dashboard. If a tier is zero, tell me whether it looks empty or unreachable and what to check next.">Explain graph counts</button>
     </div>
     <form class="chat-form" id="chat-form">
-      <textarea class="chat-input" id="chat-input" rows="2" maxlength="4000" placeholder="Ask Blackbox about this dashboard…"></textarea>
+      <textarea class="chat-input" id="chat-input" rows="2" maxlength="4000" placeholder="Ask about agents, findings, or graph sync…"></textarea>
       <button class="chat-send" id="chat-send" type="submit">Send</button>
     </form>
   </aside>

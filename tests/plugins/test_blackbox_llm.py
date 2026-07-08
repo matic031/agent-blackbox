@@ -93,7 +93,7 @@ def test_load_config_env_overrides_llm(monkeypatch):
 
 
 def test_default_model():
-    assert llm.default_model("openai") == "gpt-4o-mini"
+    assert llm.default_model("openai") == "gpt-4.1-mini"
     assert llm.default_model("anthropic").startswith("claude-")
     assert llm.default_model("nope") == ""
 
@@ -126,6 +126,7 @@ def test_review_openai_positive(monkeypatch):
 
     def fake_post(url, headers, body):
         seen["url"], seen["headers"] = url, headers
+        seen["body"] = body
         return {"choices": [{"message": {"content": '{"is_injection": true, "severity": "critical", "reason": "jailbreak"}'}}]}
 
     monkeypatch.setattr(llm, "_post", fake_post)
@@ -133,6 +134,8 @@ def test_review_openai_positive(monkeypatch):
     assert verdict == {"severity": "critical", "reason": "jailbreak"}
     assert "openai.com" in seen["url"]
     assert seen["headers"]["Authorization"] == "Bearer sk-oa"
+    assert seen["body"]["max_completion_tokens"] == 120
+    assert "max_tokens" not in seen["body"]
 
 
 def test_review_anthropic_positive(monkeypatch):
@@ -273,7 +276,7 @@ def test_setup_llm_auto_persists_reused_config(monkeypatch):
     monkeypatch.setattr(cli_mod, "settings", settings)
 
     rc = cli_mod._cmd_setup_llm(
-        SimpleNamespace(disable=False, provider=None, model=None, key_source=None, api_key=None, auto=True)
+        SimpleNamespace(disable=False, provider=None, model=None, key_source=None, api_key=None, auto=True, configure=False)
     )
 
     assert rc == 0
@@ -284,6 +287,48 @@ def test_setup_llm_auto_persists_reused_config(monkeypatch):
                 "provider": "openai",
                 "model": "gpt-4o-mini",
                 "api_key": "sk-hermes",
+            }
+        }
+    ]
+
+
+def test_setup_llm_configure_prompts_even_with_reusable_config(monkeypatch):
+    saved = []
+    asked = []
+
+    def fail_auto():
+        raise AssertionError("configure mode must skip automatic reuse")
+
+    def fake_ask(prompt, tty):
+        asked.append(prompt)
+        if "AI provider" in prompt:
+            return ""
+        if "API key" in prompt:
+            return "3"
+        if "Model id" in prompt:
+            return "gpt-4.1-mini"
+        return ""
+
+    monkeypatch.setattr(cli_mod, "_auto_llm_candidate", fail_auto)
+    monkeypatch.setattr(cli_mod, "_tty", lambda: SimpleNamespace(close=lambda: None))
+    monkeypatch.setattr(cli_mod, "_ask", fake_ask)
+    monkeypatch.setattr(cli_mod, "_ask_secret", lambda prompt, tty: "sk-new")
+    monkeypatch.setattr(settings, "write_settings", lambda payload: saved.append(payload) or {"ok": True})
+    monkeypatch.setattr(cli_mod, "settings", settings)
+
+    rc = cli_mod._cmd_setup_llm(
+        SimpleNamespace(disable=False, provider=None, model=None, key_source=None, api_key=None, auto=False, configure=True)
+    )
+
+    assert rc == 0
+    assert any("Model id" in prompt for prompt in asked)
+    assert saved == [
+        {
+            "llm": {
+                "enabled": True,
+                "provider": "openai",
+                "model": "gpt-4.1-mini",
+                "api_key": "sk-new",
             }
         }
     ]

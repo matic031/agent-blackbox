@@ -128,6 +128,11 @@ def setup_cli(parser: argparse.ArgumentParser) -> None:
         default=180,
         help="Seconds to wait for catch-up with --wait (default: 180)",
     )
+    sync.add_argument(
+        "--require-rules",
+        action="store_true",
+        help="Return non-zero if the refreshed ruleset is empty (used by installers)",
+    )
     sync.set_defaults(func=_cmd_sync)
 
     attach_p = sub.add_parser(
@@ -247,6 +252,11 @@ def setup_cli(parser: argparse.ArgumentParser) -> None:
         "--auto",
         action="store_true",
         help="Reuse existing Blackbox, Hermes, or OpenClaw model credentials without prompting",
+    )
+    setup_llm.add_argument(
+        "--configure",
+        action="store_true",
+        help="Prompt for provider, API key, and model even when reusable config exists",
     )
     setup_llm.add_argument("--disable", action="store_true", help="Turn the LLM reviewer off and exit")
     setup_llm.set_defaults(func=_cmd_setup_llm)
@@ -532,6 +542,9 @@ def _cmd_sync(args: argparse.Namespace) -> int:
     if sum(counts.values()) == 0:
         print("  0 rules — no local public/SWM threat rows are available yet.")
         print("  Blackbox will retry automatically; force it with `hermes blackbox sync --wait`.")
+        if getattr(args, "require_rules", False):
+            print("  Required ruleset sync failed; install is incomplete until threat rows load from DKG.")
+            return 2
     return 0
 
 
@@ -1568,7 +1581,7 @@ def _cmd_setup_llm(args: argparse.Namespace) -> int:
         getattr(args, name, None)
         for name in ("provider", "model", "key_source", "api_key")
     )
-    if not explicit:
+    if not explicit and not getattr(args, "configure", False):
         source, candidate = _auto_llm_candidate()
         if candidate:
             if source == "Blackbox":

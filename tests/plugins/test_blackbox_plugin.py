@@ -57,10 +57,43 @@ def test_blackbox_chat_parser_accepts_query_flags():
 def test_blackbox_sync_parser_accepts_wait_timeout():
     parser = argparse.ArgumentParser()
     cli_mod.setup_cli(parser)
-    args = parser.parse_args(["sync", "--wait", "--timeout", "45"])
+    args = parser.parse_args(["sync", "--wait", "--timeout", "45", "--require-rules"])
     assert args.func is cli_mod._cmd_sync
     assert args.wait is True
     assert args.timeout == 45
+    assert args.require_rules is True
+
+
+def test_blackbox_sync_require_rules_fails_empty_ruleset(monkeypatch, capsys):
+    class FakeClient:
+        def __init__(self, url):
+            self.url = url
+
+        def subscribe_context_graph(self, cg_id):
+            return {}
+
+    class FakeRuleset:
+        def counts(self):
+            return {
+                "injection": 0,
+                "escalation": 0,
+                "dependency": 0,
+                "fileaccess": 0,
+                "skill": 0,
+            }
+
+    monkeypatch.setattr(cli_mod, "_request_join", lambda *args, **kwargs: None)
+    monkeypatch.setattr(cli_mod, "DkgClient", FakeClient)
+    monkeypatch.setattr(
+        cli_mod,
+        "load_blackbox_config",
+        lambda: config_mod.BlackboxConfig(context_graph_id="cg", dkg_url="http://127.0.0.1:9200"),
+    )
+    monkeypatch.setattr(cli_mod.ruleset, "refresh", lambda cfg, client: FakeRuleset())
+
+    args = argparse.Namespace(wait=False, timeout=180, require_rules=True)
+    assert cli_mod._cmd_sync(args) == 2
+    assert "Required ruleset sync failed" in capsys.readouterr().out
 
 
 def test_parse_catchup_status_fields():

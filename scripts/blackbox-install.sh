@@ -12,9 +12,9 @@
 #   # or, from a clone:
 #   ./scripts/blackbox-install.sh [--help]
 #
-# Idempotent: safe to re-run. Optional steps (DKG node) never hard-fail the
-# install — if they can't complete, you get clear manual next-steps and the
-# rest of the install proceeds.
+# Idempotent: safe to re-run. If the DKG node or initial threat-graph sync
+# cannot complete, the installer exits non-zero and prints clear next steps
+# instead of claiming Blackbox is fully ready with an empty ruleset.
 # ============================================================================
 
 set -euo pipefail
@@ -27,6 +27,11 @@ DKG_NETWORK="${BLACKBOX_DKG_NETWORK:-mainnet-base}"   # a valid dkg mainnet (mai
 NODE_MAJOR="${BLACKBOX_NODE_MAJOR:-22}"
 BLACKBOX_CONTEXT_GRAPH_ID="${BLACKBOX_CONTEXT_GRAPH_ID:-umanitek/guardian-threats-staging}"
 BLACKBOX_DKG_CATCHUP_TIMEOUT="${BLACKBOX_DKG_CATCHUP_TIMEOUT:-180}"
+BLACKBOX_LLM_PROVIDER="${BLACKBOX_LLM_PROVIDER:-}"
+BLACKBOX_LLM_MODEL="${BLACKBOX_LLM_MODEL:-}"
+BLACKBOX_LLM_KEY_SOURCE="${BLACKBOX_LLM_KEY_SOURCE:-}"
+BLACKBOX_LLM_API_KEY="${BLACKBOX_LLM_API_KEY:-}"
+BLACKBOX_INSTALL_INCOMPLETE=false
 
 # ── Colors / echo helpers (DRY) ─────────────────────────────────────────────
 # ANSI-C ($'...') quoting stores REAL escape bytes, so the codes render both
@@ -58,15 +63,17 @@ Agent Blackbox installer
 Usage: blackbox-install.sh [OPTIONS]
 
 Options:
-  --skip-dkg     Skip local DKG node setup
+  --skip-dkg     Skip local DKG node setup; exits incomplete
   -h, --help     Show this help
 
 Environment overrides:
   BLACKBOX_REPO_URL, BLACKBOX_REPO_BRANCH, HERMES_HOME,
-  BLACKBOX_NODE_MAJOR, BLACKBOX_INSTALL_DIR, BLACKBOX_CONTEXT_GRAPH_ID
+  BLACKBOX_NODE_MAJOR, BLACKBOX_INSTALL_DIR, BLACKBOX_CONTEXT_GRAPH_ID,
+  BLACKBOX_DKG_CATCHUP_TIMEOUT, BLACKBOX_LLM_PROVIDER,
+  BLACKBOX_LLM_MODEL, BLACKBOX_LLM_KEY_SOURCE, BLACKBOX_LLM_API_KEY
 
-Installs Blackbox in audit mode, reuses existing Hermes/OpenClaw LLM config
-when present, and prompts only for missing LLM credentials on a real terminal.
+Installs Blackbox in audit mode. The LLM reviewer can reuse existing config,
+use BLACKBOX_LLM_* env values, or prompt on a real terminal.
 EOF
 }
 
@@ -308,16 +315,18 @@ link_hermes() {
     export PATH="$VENV_DIR/bin:$link_dir:$PATH"
 }
 
-# ── DKG node CLI + bootstrap (optional, non-fatal) ──────────────────────────
+# ── DKG node CLI + bootstrap ────────────────────────────────────────────────
 install_dkg() {
     heading "Setting up the OriginTrail DKG node"
     if [ "$SKIP_DKG" = true ]; then
+        BLACKBOX_INSTALL_INCOMPLETE=true
         warn "Skipping DKG node setup (--skip-dkg)."
         dkg_manual_hint
         return 0
     fi
     if [ "${HAS_NODE:-false}" != true ]; then
-        warn "Node.js $NODE_MAJOR+ not available — skipping DKG node setup."
+        BLACKBOX_INSTALL_INCOMPLETE=true
+        warn "Node.js $NODE_MAJOR+ not available — cannot set up the DKG node or sync the threat graph."
         dkg_manual_hint
         return 0
     fi
@@ -329,7 +338,8 @@ install_dkg() {
         if npm i -g @origintrail-official/dkg >/dev/null 2>&1; then
             ok "dkg CLI installed"
         else
-            warn "Global npm install failed (permissions?). The plugin is installed; you can add the node later."
+            BLACKBOX_INSTALL_INCOMPLETE=true
+            warn "Global npm install failed (permissions?). The plugin is installed, but threat-graph sync is not active."
             dkg_manual_hint
             return 0
         fi
@@ -341,7 +351,8 @@ install_dkg() {
         ok "DKG node bootstrapped on $DKG_NETWORK"
         DKG_READY=true
     else
-        warn "DKG node bootstrap did not complete. Blackbox works offline (empty ruleset) until the node is up."
+        BLACKBOX_INSTALL_INCOMPLETE=true
+        warn "DKG node bootstrap did not complete. Threat-graph sync is not active yet."
         dkg_manual_hint
     fi
 }
@@ -362,11 +373,16 @@ sync_ruleset() {
         step "  (subscribe also runs automatically on 'hermes blackbox sync --wait')"
     fi
     step "Refreshing the Blackbox cache ..."
-    if "$HERMES_BIN" blackbox sync --wait --timeout "$BLACKBOX_DKG_CATCHUP_TIMEOUT" >/dev/null 2>&1; then
+    local sync_out
+    if sync_out="$("$HERMES_BIN" blackbox sync --wait --timeout "$BLACKBOX_DKG_CATCHUP_TIMEOUT" --require-rules 2>&1)"; then
+        printf '%s\n' "$sync_out"
         ok "Ruleset synced — Blackbox is watching with the latest threats"
     else
-        warn "Initial sync skipped (the graph may be empty or the node still warming up)."
-        step "It retries automatically; force it anytime with: hermes blackbox sync --wait"
+        BLACKBOX_INSTALL_INCOMPLETE=true
+        printf '%s\n' "$sync_out"
+        err "Initial threat-graph sync did not load any rules."
+        step "Blackbox is installed, but setup is incomplete until DKG returns a non-empty ruleset."
+        step "Retry after fixing DKG/catch-up with: hermes blackbox sync --wait --require-rules"
     fi
 }
 
@@ -409,7 +425,7 @@ dkg_manual_hint() {
     step "To set up the DKG node later:"
     echo "      npm i -g @origintrail-official/dkg"
     echo "      dkg hermes setup --network $DKG_NETWORK   # mainnet — the real public threat graph"
-    echo "      # then re-run:  hermes blackbox sync"
+    echo "      # then re-run:  hermes blackbox sync --wait --require-rules"
 }
 
 # ── Enable plugin + seed config defaults (idempotent) ───────────────────────
@@ -552,21 +568,41 @@ attach_all_agents() {
 }
 
 # ── Optional: configure the LLM prompt-injection reviewer ───────────────────
-# Interactive-only. Under `curl | bash` the script's stdin is the pipe, so we
-# talk to the user through /dev/tty directly and skip cleanly when there isn't
-# one (CI, non-interactive installs). Never fatal.
+# Under `curl | bash` the script's stdin is the pipe, so prompts use /dev/tty.
+# In CI/non-interactive installs, reuse existing LLM config or skip cleanly.
 setup_llm() {
     heading "LLM reviewer"
-    if "$HERMES_BIN" blackbox setup-llm --auto; then
-        ok "LLM reviewer ready"
+    local args=()
+    [ -n "$BLACKBOX_LLM_PROVIDER" ] && args+=(--provider "$BLACKBOX_LLM_PROVIDER")
+    [ -n "$BLACKBOX_LLM_MODEL" ] && args+=(--model "$BLACKBOX_LLM_MODEL")
+    if [ -n "$BLACKBOX_LLM_API_KEY" ]; then
+        args+=(--api-key "$BLACKBOX_LLM_API_KEY")
+        args+=(--key-source new)
+    elif [ -n "$BLACKBOX_LLM_KEY_SOURCE" ]; then
+        args+=(--key-source "$BLACKBOX_LLM_KEY_SOURCE")
+    fi
+
+    if [ "${#args[@]}" -gt 0 ]; then
+        step "Using BLACKBOX_LLM_* settings."
+        if "$HERMES_BIN" blackbox setup-llm "${args[@]}"; then
+            ok "LLM reviewer configured"
+        else
+            warn "LLM setup skipped. Check BLACKBOX_LLM_* values or run: hermes blackbox setup-llm"
+        fi
         return 0
     fi
+
     if ! { [ -r /dev/tty ] && [ -w /dev/tty ]; }; then
-        step "No reusable config found. Set up later: hermes blackbox setup-llm"
+        if "$HERMES_BIN" blackbox setup-llm --auto; then
+            ok "LLM reviewer ready"
+        else
+            step "Set up later: hermes blackbox setup-llm"
+        fi
         return 0
     fi
-    step "No Hermes/OpenClaw LLM config found. Configure provider, key, and model."
-    if "$HERMES_BIN" blackbox setup-llm; then
+
+    step "Choose provider, key, and model."
+    if "$HERMES_BIN" blackbox setup-llm --configure; then
         ok "LLM reviewer configured"
     else
         warn "LLM setup skipped. Re-run: hermes blackbox setup-llm"
@@ -582,10 +618,25 @@ next_steps() {
         *":$HOME/.local/bin:"*) : ;;
         *) path_note=$'\n  First reload your shell so `hermes` is on PATH:  exec $SHELL -l' ;;
     esac
+    if [ "$BLACKBOX_INSTALL_INCOMPLETE" = true ]; then
+        heading "Blackbox installed, but threat-graph sync is incomplete."
+        cat <<EOF
+${path_note}
+  The local DKG node did not provide a non-empty ruleset yet, so first-run
+  setup is not complete. Do not treat this install as protected until this
+  command succeeds:
+
+      hermes blackbox sync --wait --require-rules
+
+  Dashboard:  hermes blackbox dashboard  →  http://127.0.0.1:${BLACKBOX_DASHBOARD_PORT:-9700}
+  Docs:        $docs_url
+EOF
+        echo ""
+        return 0
+    fi
     heading "Blackbox is ready ($mode mode)."
     cat <<EOF
 ${path_note}
-  Chat:       hermes blackbox chat
   Dashboard:  hermes blackbox dashboard  →  http://127.0.0.1:${BLACKBOX_DASHBOARD_PORT:-9700}
   Sync now:    hermes blackbox sync --wait
   Docs:        $docs_url
@@ -612,6 +663,9 @@ main() {
     sync_ruleset
     setup_llm
     next_steps
+    if [ "$BLACKBOX_INSTALL_INCOMPLETE" = true ]; then
+        exit 1
+    fi
 }
 
 main "$@"

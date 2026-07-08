@@ -26,6 +26,8 @@ import urllib.error
 import urllib.request
 from typing import Any, Dict, Optional
 
+from utils import model_forces_max_completion_tokens
+
 from . import constants
 
 logger = logging.getLogger(__name__)
@@ -37,7 +39,7 @@ _MAX_REVIEW_CHARS = 6000
 
 #: Sensible cheap+fast defaults per provider (classification, not generation).
 DEFAULT_MODELS = {
-    "openai": "gpt-4o-mini",
+    "openai": "gpt-4.1-mini",
     "anthropic": "claude-haiku-4-5-20251001",
 }
 
@@ -136,19 +138,21 @@ def _post(url: str, headers: Dict[str, str], body: Dict[str, Any]) -> Optional[D
 
 
 def _call_openai(cfg: Any, text: str) -> Optional[str]:
+    body: Dict[str, Any] = {
+        "model": cfg.llm_model,
+        "temperature": 0,
+        "response_format": {"type": "json_object"},
+        "messages": [
+            {"role": "system", "content": _SYSTEM_PROMPT},
+            {"role": "user", "content": text},
+        ],
+    }
+    token_limit_key = "max_completion_tokens" if model_forces_max_completion_tokens(cfg.llm_model) else "max_tokens"
+    body[token_limit_key] = 120
     result = _post(
         "https://api.openai.com/v1/chat/completions",
         {"Authorization": f"Bearer {cfg.llm_api_key}"},
-        {
-            "model": cfg.llm_model,
-            "temperature": 0,
-            "max_tokens": 120,
-            "response_format": {"type": "json_object"},
-            "messages": [
-                {"role": "system", "content": _SYSTEM_PROMPT},
-                {"role": "user", "content": text},
-            ],
-        },
+        body,
     )
     try:
         return result["choices"][0]["message"]["content"] if result else None

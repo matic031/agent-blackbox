@@ -180,9 +180,10 @@ The reviewer is a tiny stdlib `urllib` client (`llm.py`) for OpenAI
 (`/v1/chat/completions`) and Anthropic (`/v1/messages`); every path fails open
 to `None`, and reviewed text is capped and secret-redacted before it leaves the
 machine. Configure it with `hermes blackbox setup-llm`; it reuses Blackbox,
-Hermes, or OpenClaw model credentials first, then asks for provider/key/model
-only when nothing reusable is found. Disable with
-`hermes blackbox setup-llm --disable`.
+Hermes, or OpenClaw model credentials by default. Use
+`hermes blackbox setup-llm --configure` to choose provider/key/model again, or
+`BLACKBOX_LLM_PROVIDER`, `BLACKBOX_LLM_MODEL`, and `BLACKBOX_LLM_API_KEY` for
+non-interactive installs. Disable with `hermes blackbox setup-llm --disable`.
 
 > Enabling this sends the reviewed message text to the chosen provider, and the
 > key is stored in plaintext under `plugins.entries.blackbox.llm.api_key`. Both
@@ -207,7 +208,7 @@ the rest of the dashboard):
 
 ```
 hermes blackbox status                 # config, node reachability, ruleset + findings counts
-hermes blackbox sync                   # force a ruleset refresh
+hermes blackbox sync --wait            # force a ruleset refresh after DKG catch-up
 hermes blackbox chat                   # dedicated Blackbox operator chat
 hermes blackbox report --type ...      # submit a NEW candidate threat to SWM
                                        #   (injection|escalation|dependency|fileaccess|skill)
@@ -220,6 +221,7 @@ hermes blackbox curate reject <id>     # reject locally (+ optional SWM false-po
 hermes blackbox curate import --file … # bulk import a catalog (OSV enrichment for deps)
 hermes blackbox dashboard [--port]     # start the loopback dashboard
 hermes blackbox setup-llm              # configure the optional LLM injection reviewer
+hermes blackbox setup-llm --configure  # choose provider/key/model again
 hermes blackbox setup-llm --disable    # turn the LLM reviewer off
 ```
 

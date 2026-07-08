@@ -40,14 +40,14 @@ venv/bin/pip install -e ".[web]"
 mkdir -p ~/.local/bin
 ln -sf "$PWD/venv/bin/hermes" ~/.local/bin/hermes
 
-# 4. Local DKG node (optional - without it Agent Blackbox still runs, with an empty ruleset)
+# 4. Local DKG node (required for first-run protection)
 npm i -g @origintrail-official/dkg
 dkg hermes setup --network mainnet-base --no-fund   # reading the public graph is free
 
 # 5. Enable Agent Blackbox and protect every local agent
 hermes plugins enable blackbox
 hermes blackbox attach
-hermes blackbox sync
+hermes blackbox sync --wait --require-rules
 ```
 
 Or download the script, read it, then run it:
@@ -77,7 +77,7 @@ Everyday commands:
 
 ```bash
 hermes blackbox status      # config, node health, ruleset + findings counts
-hermes blackbox sync        # pull the latest threat graphs right now
+hermes blackbox sync --wait # pull the latest threat graphs right now
 hermes blackbox dashboard   # live dashboard at http://127.0.0.1:9700
 hermes blackbox chat        # chat with Blackbox from this repo's workspace
 ```
