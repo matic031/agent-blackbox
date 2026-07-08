@@ -96,9 +96,43 @@ def test_blackbox_sync_require_rules_fails_empty_ruleset(monkeypatch, capsys):
     assert "Required ruleset sync failed" in capsys.readouterr().out
 
 
+def test_blackbox_sync_require_rules_fails_subscribe_error(monkeypatch, capsys):
+    class FakeClient:
+        def __init__(self, url):
+            self.url = url
+
+        def subscribe_context_graph(self, cg_id):
+            raise cli_mod.DkgError("403: not on the allowlist")
+
+    class FakeRuleset:
+        def counts(self):
+            return {
+                "injection": 0,
+                "escalation": 0,
+                "dependency": 1,
+                "fileaccess": 0,
+                "skill": 0,
+            }
+
+    monkeypatch.setattr(cli_mod, "_request_join", lambda *args, **kwargs: None)
+    monkeypatch.setattr(cli_mod, "DkgClient", FakeClient)
+    monkeypatch.setattr(
+        cli_mod,
+        "load_blackbox_config",
+        lambda: config_mod.BlackboxConfig(context_graph_id="cg", dkg_url="http://127.0.0.1:9200"),
+    )
+    monkeypatch.setattr(cli_mod.ruleset, "refresh", lambda cfg, client: FakeRuleset())
+
+    args = argparse.Namespace(wait=False, timeout=180, require_rules=True)
+    assert cli_mod._cmd_sync(args) == 3
+    out = capsys.readouterr().out
+    assert "could not subscribe to cg" in out
+    assert "Required community subscription failed" in out
+
+
 def test_parse_catchup_status_fields():
     output = """
-Context Graph: umanitek/guardian-threats-staging
+Context Graph: umanitek/blackbox-threats-staging
 Status:        done
 Result:        peers 21/21, data 2, shared memory 3
 """

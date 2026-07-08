@@ -25,13 +25,18 @@ REPO_BRANCH="${BLACKBOX_REPO_BRANCH:-feat/guardian}"
 HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
 DKG_NETWORK="${BLACKBOX_DKG_NETWORK:-mainnet-base}"   # a valid dkg mainnet (mainnet-base | mainnet-gnosis). Base uses ETH for gas. No testnet.
 NODE_MAJOR="${BLACKBOX_NODE_MAJOR:-22}"
-BLACKBOX_CONTEXT_GRAPH_ID="${BLACKBOX_CONTEXT_GRAPH_ID:-umanitek/guardian-threats-staging}"
+BLACKBOX_CONTEXT_GRAPH_ID="${BLACKBOX_CONTEXT_GRAPH_ID:-umanitek/blackbox-threats-staging}"
 BLACKBOX_DKG_CATCHUP_TIMEOUT="${BLACKBOX_DKG_CATCHUP_TIMEOUT:-180}"
 BLACKBOX_LLM_PROVIDER="${BLACKBOX_LLM_PROVIDER:-}"
 BLACKBOX_LLM_MODEL="${BLACKBOX_LLM_MODEL:-}"
 BLACKBOX_LLM_KEY_SOURCE="${BLACKBOX_LLM_KEY_SOURCE:-}"
 BLACKBOX_LLM_API_KEY="${BLACKBOX_LLM_API_KEY:-}"
+BLACKBOX_HERMES_SETUP="${BLACKBOX_HERMES_SETUP:-auto}" # auto | always | never
+BLACKBOX_AUTO_DASHBOARD="${BLACKBOX_AUTO_DASHBOARD:-1}"
+BLACKBOX_SYNC_MODE="${BLACKBOX_SYNC_MODE:-background}" # background | wait
 BLACKBOX_INSTALL_INCOMPLETE=false
+BLACKBOX_SYNC_PENDING=false
+BLACKBOX_SYNC_LOG=""
 
 # ── Colors / echo helpers (DRY) ─────────────────────────────────────────────
 # ANSI-C ($'...') quoting stores REAL escape bytes, so the codes render both
@@ -48,6 +53,16 @@ ok()      { echo "${GREEN}✓${NC} $1"; }
 warn()    { echo "${YELLOW}⚠${NC} $1"; }
 err()     { echo "${RED}✗${NC} $1"; }
 heading() { echo ""; echo "${MINT}${BOLD}$1${NC}"; }
+
+run_detached() {
+    local log_file="$1"
+    shift
+    if command -v setsid >/dev/null 2>&1; then
+        setsid -f "$@" >"$log_file" 2>&1
+        return 0
+    fi
+    nohup "$@" >"$log_file" 2>&1 &
+}
 
 banner() {
     echo ""
@@ -70,7 +85,9 @@ Environment overrides:
   BLACKBOX_REPO_URL, BLACKBOX_REPO_BRANCH, HERMES_HOME,
   BLACKBOX_NODE_MAJOR, BLACKBOX_INSTALL_DIR, BLACKBOX_CONTEXT_GRAPH_ID,
   BLACKBOX_DKG_CATCHUP_TIMEOUT, BLACKBOX_LLM_PROVIDER,
-  BLACKBOX_LLM_MODEL, BLACKBOX_LLM_KEY_SOURCE, BLACKBOX_LLM_API_KEY
+  BLACKBOX_LLM_MODEL, BLACKBOX_LLM_KEY_SOURCE, BLACKBOX_LLM_API_KEY,
+  BLACKBOX_HERMES_SETUP=auto|always|never, BLACKBOX_AUTO_DASHBOARD=0|1,
+  BLACKBOX_SYNC_MODE=background|wait
 
 Installs Blackbox in audit mode. The LLM reviewer can reuse existing config,
 use BLACKBOX_LLM_* env values, or prompt on a real terminal.
@@ -234,9 +251,10 @@ install_python_env() {
     fi
     if [ -x "$REPO_DIR/setup-hermes.sh" ] || [ -f "$REPO_DIR/setup-hermes.sh" ]; then
         step "Reusing $REPO_DIR/setup-hermes.sh for the base environment..."
-        # setup-hermes.sh is interactive at the end; feed 'n' to skip the wizard
-        # so the one-command path stays non-blocking. It creates ./venv.
-        if printf 'n\nn\n' | bash "$REPO_DIR/setup-hermes.sh"; then
+        # The base installer normally prints standalone Hermes next steps and
+        # asks about the setup wizard. Blackbox owns that flow below, so run it
+        # in embedded mode and launch `hermes setup` ourselves only if needed.
+        if HERMES_EMBEDDED_INSTALL=1 bash "$REPO_DIR/setup-hermes.sh"; then
             ok "Base environment ready via setup-hermes.sh"
         else
             warn "setup-hermes.sh did not complete cleanly — falling back to a minimal venv install."
@@ -315,6 +333,106 @@ link_hermes() {
     export PATH="$VENV_DIR/bin:$link_dir:$PATH"
 }
 
+refresh_blackbox_plugin_copy() {
+    heading "Installing Blackbox plugin copy"
+    step "Refreshing $HERMES_HOME/plugins/blackbox from this checkout..."
+    if "$VENV_DIR/bin/python" - "$REPO_DIR" "$HERMES_HOME" <<'PYEOF'
+import os
+import shutil
+import sys
+from pathlib import Path
+
+repo = Path(sys.argv[1]).resolve()
+home = Path(sys.argv[2]).expanduser()
+src = repo / "plugins" / "blackbox"
+dest = home / "plugins" / "blackbox"
+openclaw_src = repo / "integrations" / "openclaw"
+openclaw_dest = dest / "_openclaw"
+
+if not src.is_dir():
+    raise SystemExit(f"missing Blackbox plugin source: {src}")
+
+def ignore_runtime(_dir, names):
+    skip_dirs = {"__pycache__", "tests", ".pytest_cache", "node_modules"}
+    return [n for n in names if n in skip_dirs or n.endswith((".pyc", ".pyo"))]
+
+def ignore_openclaw(_dir, names):
+    skip_dirs = {"node_modules", "dist", ".turbo", "test", "tests", "__pycache__"}
+    return [n for n in names if n in skip_dirs or n.endswith((".pyc", ".log", ".tsbuildinfo"))]
+
+home.joinpath("plugins").mkdir(parents=True, exist_ok=True)
+if dest.exists():
+    shutil.rmtree(dest)
+shutil.copytree(src, dest, ignore=ignore_runtime)
+if openclaw_src.is_dir():
+    if openclaw_dest.exists():
+        shutil.rmtree(openclaw_dest)
+    shutil.copytree(openclaw_src, openclaw_dest, ignore=ignore_openclaw)
+(dest / ".blackbox-source-root").write_text(str(repo), encoding="utf-8")
+PYEOF
+    then
+        ok "Blackbox plugin copy refreshed"
+    else
+        BLACKBOX_INSTALL_INCOMPLETE=true
+        warn "Could not refresh the Blackbox plugin copy. Commands may use stale plugin files."
+    fi
+}
+
+hermes_setup_needed() {
+    local key
+    for key in \
+        OPENAI_API_KEY ANTHROPIC_API_KEY OPENROUTER_API_KEY NOUS_API_KEY \
+        ZAI_API_KEY KIMI_API_KEY KIMI_CN_API_KEY MINIMAX_API_KEY \
+        MINIMAX_CN_API_KEY GOOGLE_API_KEY GEMINI_API_KEY MISTRAL_API_KEY \
+        GROQ_API_KEY TOGETHER_API_KEY XAI_API_KEY; do
+        if [ -n "${!key:-}" ]; then
+            return 1
+        fi
+    done
+    if [ -f "$HERMES_HOME/.env" ] && grep -Eq '^[[:space:]]*(OPENAI_API_KEY|ANTHROPIC_API_KEY|OPENROUTER_API_KEY|NOUS_API_KEY|ZAI_API_KEY|KIMI_API_KEY|KIMI_CN_API_KEY|MINIMAX_API_KEY|MINIMAX_CN_API_KEY|GOOGLE_API_KEY|GEMINI_API_KEY|MISTRAL_API_KEY|GROQ_API_KEY|TOGETHER_API_KEY|XAI_API_KEY)[[:space:]]*=[[:space:]]*[^[:space:]#]+' "$HERMES_HOME/.env"; then
+        return 1
+    fi
+    return 0
+}
+
+run_hermes_setup() {
+    heading "Hermes API setup"
+    case "$BLACKBOX_HERMES_SETUP" in
+        never|false|0)
+            step "Skipping Hermes setup wizard (BLACKBOX_HERMES_SETUP=$BLACKBOX_HERMES_SETUP)."
+            return 0
+            ;;
+        always|true|1)
+            ;;
+        auto|"")
+            if ! hermes_setup_needed; then
+                ok "Hermes API configuration already present"
+                return 0
+            fi
+            ;;
+        *)
+            warn "Unknown BLACKBOX_HERMES_SETUP=$BLACKBOX_HERMES_SETUP; using auto."
+            if ! hermes_setup_needed; then
+                ok "Hermes API configuration already present"
+                return 0
+            fi
+            ;;
+    esac
+
+    if ! { [ -r /dev/tty ] && [ -w /dev/tty ]; }; then
+        warn "No interactive terminal is available for Hermes API setup."
+        step "Run later if needed: hermes setup"
+        return 0
+    fi
+
+    step "Launching Hermes setup wizard now so API keys are configured before first use."
+    if "$HERMES_BIN" setup </dev/tty; then
+        ok "Hermes setup wizard completed"
+    else
+        warn "Hermes setup wizard did not complete. Run later if needed: hermes setup"
+    fi
+}
+
 # ── DKG node CLI + bootstrap ────────────────────────────────────────────────
 install_dkg() {
     heading "Setting up the OriginTrail DKG node"
@@ -362,6 +480,17 @@ install_dkg() {
 sync_ruleset() {
     [ "${DKG_READY:-false}" = true ] || return 0
     heading "Syncing the threat ruleset"
+    mkdir -p "$HERMES_HOME/logs"
+    BLACKBOX_SYNC_LOG="$HERMES_HOME/logs/blackbox-sync-install.log"
+    if [ "$BLACKBOX_SYNC_MODE" = "background" ]; then
+        step "Starting DKG catch-up in the background; the dashboard stays usable while it syncs."
+        run_detached "$BLACKBOX_SYNC_LOG" "$HERMES_BIN" blackbox sync --wait --timeout "$BLACKBOX_DKG_CATCHUP_TIMEOUT" --require-rules
+        BLACKBOX_SYNC_PENDING=true
+        ok "Threat graph sync running in background"
+        step "Log: $BLACKBOX_SYNC_LOG"
+        return 0
+    fi
+
     # Subscribe the daemon (--save persists it) so it catches up the community
     # pool — a fresh node never subscribes on its own, so sync would return 0.
     local blackbox_cg="$BLACKBOX_CONTEXT_GRAPH_ID"
@@ -609,6 +738,39 @@ setup_llm() {
     fi
 }
 
+start_dashboard() {
+    case "$BLACKBOX_AUTO_DASHBOARD" in
+        0|false|never|no)
+            step "Dashboard auto-start disabled (BLACKBOX_AUTO_DASHBOARD=$BLACKBOX_AUTO_DASHBOARD)."
+            return 0
+            ;;
+    esac
+
+    heading "Starting Blackbox dashboard"
+    local port="${BLACKBOX_DASHBOARD_PORT:-9700}"
+    local url="http://127.0.0.1:$port"
+    local log_dir="$HERMES_HOME/logs"
+    local log_file="$log_dir/blackbox-dashboard-install.log"
+    mkdir -p "$log_dir"
+
+    if command -v curl >/dev/null 2>&1 && curl -fsS "$url/" >/dev/null 2>&1; then
+        ok "Dashboard already running at $url"
+        return 0
+    fi
+
+    step "Launching: hermes blackbox dashboard"
+    run_detached "$log_file" "$HERMES_BIN" blackbox dashboard
+    sleep 2
+
+    if command -v curl >/dev/null 2>&1 && ! curl -fsS "$url/" >/dev/null 2>&1; then
+        warn "Dashboard process started, but $url did not respond yet."
+        step "Log: $log_file"
+        return 0
+    fi
+    ok "Dashboard running at $url"
+    step "Log: $log_file"
+}
+
 # ── Guided next steps (short — everything above already ran) ─────────────────
 next_steps() {
     local docs_url="${REPO_URL%.git}"
@@ -618,6 +780,25 @@ next_steps() {
         *":$HOME/.local/bin:"*) : ;;
         *) path_note=$'\n  First reload your shell so `hermes` is on PATH:  exec $SHELL -l' ;;
     esac
+    if [ "$BLACKBOX_SYNC_PENDING" = true ]; then
+        heading "Blackbox dashboard is running; threat-graph sync is catching up."
+        cat <<EOF
+${path_note}
+  Dashboard:  http://127.0.0.1:${BLACKBOX_DASHBOARD_PORT:-9700}
+
+  The DKG catch-up/ruleset sync is running in the background. Do not treat this
+  install as fully protected until this command succeeds:
+
+      hermes blackbox sync --wait --require-rules
+
+  Background log:
+      ${BLACKBOX_SYNC_LOG:-$HERMES_HOME/logs/blackbox-sync-install.log}
+
+  Docs:        $docs_url
+EOF
+        echo ""
+        return 0
+    fi
     if [ "$BLACKBOX_INSTALL_INCOMPLETE" = true ]; then
         heading "Blackbox installed, but threat-graph sync is incomplete."
         cat <<EOF
@@ -628,7 +809,7 @@ ${path_note}
 
       hermes blackbox sync --wait --require-rules
 
-  Dashboard:  hermes blackbox dashboard  →  http://127.0.0.1:${BLACKBOX_DASHBOARD_PORT:-9700}
+  Dashboard:  http://127.0.0.1:${BLACKBOX_DASHBOARD_PORT:-9700}
   Docs:        $docs_url
 EOF
         echo ""
@@ -637,7 +818,7 @@ EOF
     heading "Blackbox is ready ($mode mode)."
     cat <<EOF
 ${path_note}
-  Dashboard:  hermes blackbox dashboard  →  http://127.0.0.1:${BLACKBOX_DASHBOARD_PORT:-9700}
+  Dashboard:  http://127.0.0.1:${BLACKBOX_DASHBOARD_PORT:-9700}
   Sync now:    hermes blackbox sync --wait
   Docs:        $docs_url
 EOF
@@ -656,12 +837,15 @@ main() {
     resolve_repo
     install_python_env
     link_hermes
+    refresh_blackbox_plugin_copy
+    run_hermes_setup
     install_dkg
     enable_and_seed
     configure_blackbox_mode
     attach_all_agents
-    sync_ruleset
     setup_llm
+    start_dashboard
+    sync_ruleset
     next_steps
     if [ "$BLACKBOX_INSTALL_INCOMPLETE" = true ]; then
         exit 1

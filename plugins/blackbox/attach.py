@@ -51,8 +51,24 @@ _BUNDLED_OPENCLAW_DIRNAME = "_openclaw"
 
 
 def _plugin_source_dir() -> Path:
-    """Absolute path to this plugin's own directory (the copy source)."""
-    return Path(__file__).resolve().parent
+    """Absolute path to this plugin's copy source.
+
+    Installed copies carry ``.blackbox-source-root`` pointing back to the
+    checkout that produced them. Prefer that checkout when it still exists so a
+    re-run of ``hermes blackbox attach`` refreshes stale user-plugin files from
+    the repo instead of copying the installed copy onto itself.
+    """
+    own = Path(__file__).resolve().parent
+    marker = own / _SOURCE_ROOT_MARKER
+    try:
+        if marker.exists():
+            root = Path(marker.read_text(encoding="utf-8").strip()).expanduser()
+            candidate = (root / "plugins" / "blackbox").resolve()
+            if candidate.is_dir() and candidate != own:
+                return candidate
+    except Exception:
+        pass
+    return own
 
 
 def _repo_root() -> Path:
@@ -241,7 +257,7 @@ def _needs_copy(dest: Path) -> bool:
     if _installed_plugin_version(dest) != constants.__version__:
         return True
     try:
-        src_dir = Path(__file__).resolve().parent
+        src_dir = _plugin_source_dir()
         installed_at = init.stat().st_mtime
         newest_src = max(
             p.stat().st_mtime for p in src_dir.rglob("*.py") if "__pycache__" not in p.parts

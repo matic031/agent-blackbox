@@ -418,6 +418,13 @@ fi
 # Done
 # ============================================================================
 
+if [ "${HERMES_EMBEDDED_INSTALL:-}" = "1" ]; then
+    echo ""
+    echo -e "${GREEN}✓ Base Hermes setup complete${NC}"
+    echo ""
+    exit 0
+fi
+
 echo ""
 echo -e "${GREEN}✓ Setup complete!${NC}"
 echo ""

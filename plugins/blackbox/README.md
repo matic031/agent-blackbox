@@ -68,7 +68,7 @@ evidence stays in the node's private WM audit KA.
 | key | default | env |
 |-----|---------|-----|
 | `mode` | `audit` | `BLACKBOX_MODE` |
-| `context_graph_id` | `umanitek/guardian-threats-staging` | `BLACKBOX_CONTEXT_GRAPH_ID` |
+| `context_graph_id` | `umanitek/blackbox-threats-staging` | `BLACKBOX_CONTEXT_GRAPH_ID` |
 | `dkg_url` | `http://127.0.0.1:9200` | `DKG_DAEMON_URL` |
 | `sync_interval` | `300` | `BLACKBOX_SYNC_INTERVAL` |
 | `report` | `true` | `BLACKBOX_REPORT` |

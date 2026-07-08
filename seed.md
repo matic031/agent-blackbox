@@ -286,7 +286,7 @@ reserved production name.
 
 > ### ⚠️ Set two things before any seeding command
 > ```bash
-> export GUARDIAN_CONTEXT_GRAPH_ID="umanitek/guardian-threats-staging"   # NOT the production name
+> export GUARDIAN_CONTEXT_GRAPH_ID="umanitek/blackbox-threats-staging"   # NOT the production name
 > export GUARDIAN_HOME="$HOME/.guardian-staging"                         # isolate the dedup ledger
 > ```
 > Verify — `hermes guardian status | grep "context graph"` **must** end in

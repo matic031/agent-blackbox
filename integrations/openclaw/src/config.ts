@@ -105,7 +105,7 @@ const DEFAULTS: BlackboxConfig = {
   mode: "audit",
   // TEMPORARY: default to the STAGING graph while production is still being
   // seeded. TODO(launch): switch back to "umanitek/guardian-threats" (production).
-  contextGraphId: "umanitek/guardian-threats-staging",
+  contextGraphId: "umanitek/blackbox-threats-staging",
   dkgUrl: "http://127.0.0.1:9200",
   syncInterval: 300,
   report: true,

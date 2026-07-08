@@ -73,7 +73,7 @@ Point OpenClaw at the plugin directory and set its config in
         "hooks": { "allowConversationAccess": true },
         "config": {
           "mode": "audit",
-          "contextGraphId": "umanitek/guardian-threats-staging",
+          "contextGraphId": "umanitek/blackbox-threats-staging",
           "dkgUrl": "http://127.0.0.1:9200",
           "syncInterval": 300,
           "report": true,
@@ -109,7 +109,7 @@ override (env wins).
 | Key | Default | Env | Meaning |
 |-----|---------|-----|---------|
 | `mode` | `audit` | `BLACKBOX_MODE` | `audit` \| `block` |
-| `contextGraphId` | `umanitek/guardian-threats-staging` | `BLACKBOX_CONTEXT_GRAPH_ID` | staging curated CG id until production is seeded |
+| `contextGraphId` | `umanitek/blackbox-threats-staging` | `BLACKBOX_CONTEXT_GRAPH_ID` | staging curated CG id until production is seeded |
 | `dkgUrl` | `http://127.0.0.1:9200` | `DKG_DAEMON_URL` | local node |
 | `syncInterval` | `300` | `BLACKBOX_SYNC_INTERVAL` | seconds between ruleset refresh |
 | `report` | `true` | `BLACKBOX_REPORT` | share sightings to SWM |

@@ -519,13 +519,17 @@ def _cmd_sync(args: argparse.Namespace) -> int:
     client = DkgClient(url=cfg.dkg_url)
     # Private community CG: ask the curator to admit this node before subscribing,
     # so a fresh install auto-joins with zero manual steps. Best-effort + idempotent.
-    _request_join(client, cfg.context_graph_id, cfg.curator_peer_id)
+    join_status = _request_join(client, cfg.context_graph_id, cfg.curator_peer_id)
+    if join_status:
+        print(join_status)
     # Subscribe before querying — a fresh install never subscribed the daemon, so
     # the store would be empty. Idempotent when already subscribed.
+    subscribe_error = ""
     try:
         client.subscribe_context_graph(cfg.context_graph_id)
     except DkgError as exc:
-        print(f"warning: could not subscribe to {cfg.context_graph_id}: {exc}")
+        subscribe_error = str(exc)
+        print(f"warning: could not subscribe to {cfg.context_graph_id}: {subscribe_error}")
     if getattr(args, "wait", False):
         result = _wait_for_context_graph_catchup(cfg.context_graph_id, timeout_s=getattr(args, "timeout", 180))
         if result["status"]:
@@ -545,21 +549,44 @@ def _cmd_sync(args: argparse.Namespace) -> int:
         if getattr(args, "require_rules", False):
             print("  Required ruleset sync failed; install is incomplete until threat rows load from DKG.")
             return 2
+    if subscribe_error and getattr(args, "require_rules", False):
+        print(
+            "  Required community subscription failed; install is incomplete until "
+            "this node is accepted into the configured threat graph."
+        )
+        return 3
     return 0
 
 
-def _request_join(client: DkgClient, cg_id: str, curator_peer_id: str) -> None:
+def _request_join(client: DkgClient, cg_id: str, curator_peer_id: str) -> Optional[str]:
     """Best-effort: ask the community curator to admit this node into the private
     CG, via the node's own HTTP API (sign-join → request-join) — no ``dkg`` CLI
     dependency, so it fires reliably on any fresh install. Idempotent: a repeat
     request or an already-member is a no-op. The curator's auto-accept approves it,
     after which subscribe + catch-up work. No-op if no curator peer id is set."""
     if not curator_peer_id:
-        return
+        return None
     try:
-        client.request_join(cg_id, curator_peer_id)
-    except DkgError:  # onboarding join is best-effort — never block sync
-        pass
+        result = client.request_join(cg_id, curator_peer_id)
+    except DkgError as exc:  # onboarding join is best-effort — never block sync
+        return f"warning: could not request join for {cg_id}: {exc}"
+    if not isinstance(result, dict):
+        return f"Join request submitted for {cg_id}."
+    if result.get("alreadyMember") or result.get("already_member"):
+        return f"Join request: this node is already a member of {cg_id}."
+    delivered = result.get("delivered")
+    if isinstance(delivered, list):
+        delivered_count = len(delivered)
+    elif isinstance(delivered, bool):
+        delivered_count = 1 if delivered else 0
+    else:
+        try:
+            delivered_count = int(delivered or result.get("deliveredCount") or 0)
+        except (TypeError, ValueError):
+            delivered_count = 0
+    if delivered_count:
+        return f"Join request sent for {cg_id}: delivered to {delivered_count} curator(s)."
+    return f"Join request submitted for {cg_id}."
 
 
 def _wait_for_context_graph_catchup(
