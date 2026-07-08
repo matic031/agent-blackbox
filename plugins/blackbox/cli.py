@@ -1547,26 +1547,79 @@ def _candidate_from_mapping(
     return {"source": source, "provider": provider, "model": model, "api_key": api_key}
 
 
-def _hermes_llm_candidate() -> Optional[Dict[str, str]]:
-    try:
-        from hermes_cli import config as hconfig
+def _parse_env_value(value: str) -> str:
+    value = (value or "").strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+        return value[1:-1]
+    return value
 
-        cfg = hconfig.load_config()
-        env = hconfig.load_env()
+
+def _load_env_file(path: Path) -> Dict[str, str]:
+    env: Dict[str, str] = {}
+    try:
+        lines = path.read_text(encoding="utf-8-sig", errors="replace").splitlines()
     except Exception:
-        cfg, env = {}, {}
+        return env
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        if line.startswith("export "):
+            line = line[7:]
+        key, _, value = line.partition("=")
+        key = key.strip()
+        if key:
+            env[key] = _parse_env_value(value)
+    return env
+
+
+def _candidate_from_hermes_config(
+    cfg: Dict[str, Any],
+    env: Optional[Dict[str, str]],
+    source: str,
+) -> Optional[Dict[str, str]]:
     if not isinstance(cfg, dict):
         return None
-
     model_cfg = cfg.get("model") if isinstance(cfg.get("model"), dict) else {}
     candidates = [model_cfg, cfg]
     custom = cfg.get("custom_providers") or cfg.get("providers")
     if isinstance(custom, dict):
         candidates.extend(v for v in custom.values() if isinstance(v, dict))
     for candidate in candidates:
-        resolved = _candidate_from_mapping(candidate, "Hermes", env)
+        resolved = _candidate_from_mapping(candidate, source, env)
         if resolved:
             return resolved
+    return None
+
+
+def _hermes_llm_candidate() -> Optional[Dict[str, str]]:
+    try:
+        from hermes_cli import config as hconfig
+
+        cfg = hconfig.load_config()
+        env = {**os.environ, **hconfig.load_env()}
+    except Exception:
+        cfg, env = {}, {}
+
+    current = _candidate_from_hermes_config(cfg, env, "Hermes")
+    if current:
+        return current
+
+    seen: set[Path] = set()
+    for home in attach.discover_hermes_homes():
+        try:
+            resolved_home = home.expanduser().resolve()
+        except Exception:
+            continue
+        if resolved_home in seen:
+            continue
+        seen.add(resolved_home)
+        home_cfg = attach._load_yaml(resolved_home / "config.yaml")
+        home_env = {**os.environ, **_load_env_file(resolved_home / ".env")}
+        source = f"Hermes ({resolved_home})"
+        candidate = _candidate_from_hermes_config(home_cfg, home_env, source)
+        if candidate:
+            return candidate
     return None
 
 

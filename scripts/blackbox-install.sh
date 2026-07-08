@@ -31,12 +31,15 @@ BLACKBOX_LLM_PROVIDER="${BLACKBOX_LLM_PROVIDER:-}"
 BLACKBOX_LLM_MODEL="${BLACKBOX_LLM_MODEL:-}"
 BLACKBOX_LLM_KEY_SOURCE="${BLACKBOX_LLM_KEY_SOURCE:-}"
 BLACKBOX_LLM_API_KEY="${BLACKBOX_LLM_API_KEY:-}"
-BLACKBOX_HERMES_SETUP="${BLACKBOX_HERMES_SETUP:-auto}" # auto | always | never
+BLACKBOX_HERMES_SETUP="${BLACKBOX_HERMES_SETUP:-reuse}" # reuse | always | never
 BLACKBOX_AUTO_DASHBOARD="${BLACKBOX_AUTO_DASHBOARD:-1}"
 BLACKBOX_SYNC_MODE="${BLACKBOX_SYNC_MODE:-background}" # background | wait
 BLACKBOX_INSTALL_INCOMPLETE=false
+BLACKBOX_THREAT_GRAPH_INCOMPLETE=false
 BLACKBOX_SYNC_PENDING=false
 BLACKBOX_SYNC_LOG=""
+HERMES_API_KEY_VARS='OPENAI_API_KEY|ANTHROPIC_API_KEY|OPENROUTER_API_KEY|NOUS_API_KEY|ZAI_API_KEY|KIMI_API_KEY|KIMI_CN_API_KEY|MINIMAX_API_KEY|MINIMAX_CN_API_KEY|GOOGLE_API_KEY|GEMINI_API_KEY|MISTRAL_API_KEY|GROQ_API_KEY|TOGETHER_API_KEY|XAI_API_KEY'
+HERMES_API_KEY_RE="^[[:space:]]*(${HERMES_API_KEY_VARS})[[:space:]]*=[[:space:]]*[^[:space:]#]+"
 
 # ── Colors / echo helpers (DRY) ─────────────────────────────────────────────
 # ANSI-C ($'...') quoting stores REAL escape bytes, so the codes render both
@@ -86,11 +89,14 @@ Environment overrides:
   BLACKBOX_NODE_MAJOR, BLACKBOX_INSTALL_DIR, BLACKBOX_CONTEXT_GRAPH_ID,
   BLACKBOX_DKG_CATCHUP_TIMEOUT, BLACKBOX_LLM_PROVIDER,
   BLACKBOX_LLM_MODEL, BLACKBOX_LLM_KEY_SOURCE, BLACKBOX_LLM_API_KEY,
-  BLACKBOX_HERMES_SETUP=auto|always|never, BLACKBOX_AUTO_DASHBOARD=0|1,
+  BLACKBOX_HERMES_SETUP=reuse|always|never, BLACKBOX_AUTO_DASHBOARD=0|1,
   BLACKBOX_SYNC_MODE=background|wait
 
-Installs Blackbox in audit mode. The LLM reviewer can reuse existing config,
-use BLACKBOX_LLM_* env values, or prompt on a real terminal.
+Installs Blackbox in audit mode. Hermes model/API setup reuses existing keys by
+default and never opens the setup wizard unless BLACKBOX_HERMES_SETUP=always.
+Threat-graph sync does not require a Nous subscription or model key. The LLM
+reviewer can reuse existing config, use BLACKBOX_LLM_* env values, or prompt on
+a real terminal.
 EOF
 }
 
@@ -378,6 +384,11 @@ PYEOF
     fi
 }
 
+hermes_env_has_api_key() {
+    local path="$1"
+    [ -f "$path" ] && grep -Eq "$HERMES_API_KEY_RE" "$path"
+}
+
 hermes_setup_needed() {
     local key
     for key in \
@@ -389,10 +400,39 @@ hermes_setup_needed() {
             return 1
         fi
     done
-    if [ -f "$HERMES_HOME/.env" ] && grep -Eq '^[[:space:]]*(OPENAI_API_KEY|ANTHROPIC_API_KEY|OPENROUTER_API_KEY|NOUS_API_KEY|ZAI_API_KEY|KIMI_API_KEY|KIMI_CN_API_KEY|MINIMAX_API_KEY|MINIMAX_CN_API_KEY|GOOGLE_API_KEY|GEMINI_API_KEY|MISTRAL_API_KEY|GROQ_API_KEY|TOGETHER_API_KEY|XAI_API_KEY)[[:space:]]*=[[:space:]]*[^[:space:]#]+' "$HERMES_HOME/.env"; then
+    if hermes_env_has_api_key "$HERMES_HOME/.env"; then
         return 1
     fi
     return 0
+}
+
+reuse_existing_hermes_api_keys() {
+    local dest="$HERMES_HOME/.env"
+    mkdir -p "$HERMES_HOME"
+    if [ ! -f "$dest" ]; then
+        : >"$dest"
+    fi
+    chmod 600 "$dest" 2>/dev/null || true
+
+    if hermes_env_has_api_key "$dest"; then
+        ok "Hermes API configuration already present"
+        return 0
+    fi
+
+    local src
+    for src in "$REPO_DIR/.env" "$HOME/.hermes/.env"; do
+        [ "$src" = "$dest" ] && continue
+        if hermes_env_has_api_key "$src"; then
+            {
+                printf '\n# Reused by Agent Blackbox installer from %s\n' "$src"
+                grep -E "$HERMES_API_KEY_RE" "$src"
+            } >>"$dest"
+            chmod 600 "$dest" 2>/dev/null || true
+            ok "Reused existing Hermes API key configuration"
+            return 0
+        fi
+    done
+    return 1
 }
 
 run_hermes_setup() {
@@ -404,18 +444,28 @@ run_hermes_setup() {
             ;;
         always|true|1)
             ;;
-        auto|"")
-            if ! hermes_setup_needed; then
-                ok "Hermes API configuration already present"
-                return 0
+        reuse|auto|"")
+            if reuse_existing_hermes_api_keys; then
+                :
+            elif ! hermes_setup_needed; then
+                ok "Hermes API configuration already present in environment"
+            else
+                step "No existing Hermes API key found; skipping Hermes setup wizard."
+                step "Threat-graph sync does not require a Nous subscription or model key."
             fi
+            return 0
             ;;
         *)
-            warn "Unknown BLACKBOX_HERMES_SETUP=$BLACKBOX_HERMES_SETUP; using auto."
-            if ! hermes_setup_needed; then
-                ok "Hermes API configuration already present"
-                return 0
+            warn "Unknown BLACKBOX_HERMES_SETUP=$BLACKBOX_HERMES_SETUP; using reuse."
+            if reuse_existing_hermes_api_keys; then
+                :
+            elif ! hermes_setup_needed; then
+                ok "Hermes API configuration already present in environment"
+            else
+                step "No existing Hermes API key found; skipping Hermes setup wizard."
+                step "Threat-graph sync does not require a Nous subscription or model key."
             fi
+            return 0
             ;;
     esac
 
@@ -438,12 +488,14 @@ install_dkg() {
     heading "Setting up the OriginTrail DKG node"
     if [ "$SKIP_DKG" = true ]; then
         BLACKBOX_INSTALL_INCOMPLETE=true
+        BLACKBOX_THREAT_GRAPH_INCOMPLETE=true
         warn "Skipping DKG node setup (--skip-dkg)."
         dkg_manual_hint
         return 0
     fi
     if [ "${HAS_NODE:-false}" != true ]; then
         BLACKBOX_INSTALL_INCOMPLETE=true
+        BLACKBOX_THREAT_GRAPH_INCOMPLETE=true
         warn "Node.js $NODE_MAJOR+ not available — cannot set up the DKG node or sync the threat graph."
         dkg_manual_hint
         return 0
@@ -457,6 +509,7 @@ install_dkg() {
             ok "dkg CLI installed"
         else
             BLACKBOX_INSTALL_INCOMPLETE=true
+            BLACKBOX_THREAT_GRAPH_INCOMPLETE=true
             warn "Global npm install failed (permissions?). The plugin is installed, but threat-graph sync is not active."
             dkg_manual_hint
             return 0
@@ -470,6 +523,7 @@ install_dkg() {
         DKG_READY=true
     else
         BLACKBOX_INSTALL_INCOMPLETE=true
+        BLACKBOX_THREAT_GRAPH_INCOMPLETE=true
         warn "DKG node bootstrap did not complete. Threat-graph sync is not active yet."
         dkg_manual_hint
     fi
@@ -508,6 +562,7 @@ sync_ruleset() {
         ok "Ruleset synced — Blackbox is watching with the latest threats"
     else
         BLACKBOX_INSTALL_INCOMPLETE=true
+        BLACKBOX_THREAT_GRAPH_INCOMPLETE=true
         printf '%s\n' "$sync_out"
         err "Initial threat-graph sync did not load any rules."
         step "Blackbox is installed, but setup is incomplete until DKG returns a non-empty ruleset."
@@ -698,7 +753,9 @@ attach_all_agents() {
 
 # ── Optional: configure the LLM prompt-injection reviewer ───────────────────
 # Under `curl | bash` the script's stdin is the pipe, so prompts use /dev/tty.
-# In CI/non-interactive installs, reuse existing LLM config or skip cleanly.
+# Reuse existing LLM config when present. If none exists, skip cleanly: the
+# threat-graph ruleset is the protection baseline, and the LLM reviewer is an
+# optional local-only extra that can be configured later.
 setup_llm() {
     heading "LLM reviewer"
     local args=()
@@ -716,25 +773,18 @@ setup_llm() {
         if "$HERMES_BIN" blackbox setup-llm "${args[@]}"; then
             ok "LLM reviewer configured"
         else
-            warn "LLM setup skipped. Check BLACKBOX_LLM_* values or run: hermes blackbox setup-llm"
+            warn "LLM reviewer setup failed from BLACKBOX_LLM_* values."
+            step "Check BLACKBOX_LLM_PROVIDER, BLACKBOX_LLM_MODEL, and BLACKBOX_LLM_API_KEY, then re-run."
         fi
         return 0
     fi
 
-    if ! { [ -r /dev/tty ] && [ -w /dev/tty ]; }; then
-        if "$HERMES_BIN" blackbox setup-llm --auto; then
-            ok "LLM reviewer ready"
-        else
-            step "Set up later: hermes blackbox setup-llm"
-        fi
-        return 0
-    fi
-
-    step "Choose provider, key, and model."
-    if "$HERMES_BIN" blackbox setup-llm --configure; then
-        ok "LLM reviewer configured"
+    step "Trying existing Blackbox, Hermes, or OpenClaw LLM config."
+    if "$HERMES_BIN" blackbox setup-llm --auto; then
+        ok "LLM reviewer ready"
     else
-        warn "LLM setup skipped. Re-run: hermes blackbox setup-llm"
+        step "LLM reviewer not configured; this is optional and can be set up later:"
+        step "  hermes blackbox setup-llm"
     fi
 }
 
@@ -800,15 +850,20 @@ EOF
         return 0
     fi
     if [ "$BLACKBOX_INSTALL_INCOMPLETE" = true ]; then
-        heading "Blackbox installed, but threat-graph sync is incomplete."
+        heading "Blackbox installed, but setup is incomplete."
         cat <<EOF
 ${path_note}
-  The local DKG node did not provide a non-empty ruleset yet, so first-run
-  setup is not complete. Do not treat this install as protected until this
-  command succeeds:
+EOF
+        if [ "$BLACKBOX_THREAT_GRAPH_INCOMPLETE" = true ]; then
+            cat <<EOF
+  The local DKG node did not provide a non-empty ruleset yet. Do not treat this
+  install as protected until this command succeeds:
 
       hermes blackbox sync --wait --require-rules
 
+EOF
+        fi
+        cat <<EOF
   Dashboard:  http://127.0.0.1:${BLACKBOX_DASHBOARD_PORT:-9700}
   Docs:        $docs_url
 EOF

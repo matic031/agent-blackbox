@@ -229,6 +229,33 @@ def test_setup_llm_reuses_hermes_model_config(monkeypatch):
     }
 
 
+def test_setup_llm_reuses_discovered_hermes_home_config(tmp_path, monkeypatch):
+    from hermes_cli import config as hconfig
+
+    home = tmp_path / "hermes-profile"
+    home.mkdir()
+    (home / "config.yaml").write_text(
+        """
+        model:
+          provider: anthropic
+          default: claude-haiku-4-5-20251001
+        """,
+        encoding="utf-8",
+    )
+    (home / ".env").write_text("ANTHROPIC_API_KEY=sk-ant-profile\n", encoding="utf-8")
+    monkeypatch.setattr(hconfig, "load_config", lambda: {})
+    monkeypatch.setattr(hconfig, "load_env", lambda: {})
+    monkeypatch.setattr(cli_mod.attach, "discover_hermes_homes", lambda: [home])
+
+    candidate = cli_mod._hermes_llm_candidate()
+    assert candidate == {
+        "source": f"Hermes ({home.resolve()})",
+        "provider": "anthropic",
+        "model": "claude-haiku-4-5-20251001",
+        "api_key": "sk-ant-profile",
+    }
+
+
 def test_setup_llm_reuses_openclaw_json_config(tmp_path, monkeypatch):
     ws = tmp_path / ".openclaw"
     ws.mkdir()
