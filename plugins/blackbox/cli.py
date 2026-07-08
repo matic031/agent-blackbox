@@ -509,7 +509,7 @@ def _cmd_sync(args: argparse.Namespace) -> int:
     client = DkgClient(url=cfg.dkg_url)
     # Private community CG: ask the curator to admit this node before subscribing,
     # so a fresh install auto-joins with zero manual steps. Best-effort + idempotent.
-    _request_join(cfg.context_graph_id, cfg.curator_peer_id)
+    _request_join(client, cfg.context_graph_id, cfg.curator_peer_id)
     # Subscribe before querying — a fresh install never subscribed the daemon, so
     # the store would be empty. Idempotent when already subscribed.
     try:
@@ -535,19 +535,17 @@ def _cmd_sync(args: argparse.Namespace) -> int:
     return 0
 
 
-def _request_join(cg_id: str, curator_peer_id: str) -> None:
+def _request_join(client: DkgClient, cg_id: str, curator_peer_id: str) -> None:
     """Best-effort: ask the community curator to admit this node into the private
-    CG. Idempotent — a repeat request or an already-member is a no-op. The curator
-    (running ``blackbox curate auto-accept``) approves it, after which subscribe +
-    catch-up work. No-op when the ``dkg`` CLI or a curator peer id is missing."""
-    if not curator_peer_id or not shutil.which("dkg"):
+    CG, via the node's own HTTP API (sign-join → request-join) — no ``dkg`` CLI
+    dependency, so it fires reliably on any fresh install. Idempotent: a repeat
+    request or an already-member is a no-op. The curator's auto-accept approves it,
+    after which subscribe + catch-up work. No-op if no curator peer id is set."""
+    if not curator_peer_id:
         return
     try:
-        subprocess.run(
-            ["dkg", "context-graph", "request-join", cg_id, curator_peer_id],
-            text=True, capture_output=True, timeout=20,
-        )
-    except Exception:  # noqa: BLE001 - onboarding join is best-effort
+        client.request_join(cg_id, curator_peer_id)
+    except DkgError:  # onboarding join is best-effort — never block sync
         pass
 
 

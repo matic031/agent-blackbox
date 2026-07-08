@@ -307,6 +307,24 @@ class DkgClient:
         return self._request("POST", f"/api/context-graph/{enc}/approve-join",
                              {"agentAddress": agent_address}, timeout=_STORE_TIMEOUT)
 
+    def request_join(self, cg_id: str, curator_peer_id: str,
+                     agent_name: str = "agent-blackbox") -> Dict[str, Any]:
+        """Consumer-side: sign a join request and forward it to the curator.
+
+        Two local HTTP calls (``sign-join`` → ``request-join``) — no ``dkg`` CLI
+        dependency, so a fresh install auto-joins reliably. Idempotent: a repeat
+        request or an already-member is a no-op. Returns the request-join result
+        (``delivered`` count / ``alreadyMember``).
+        """
+        enc = urllib.parse.quote(cg_id, safe="")
+        signed = self._request("POST", f"/api/context-graph/{enc}/sign-join", {}, timeout=_STORE_TIMEOUT)
+        delegation = signed.get("delegation") if isinstance(signed, dict) else None
+        if not delegation:
+            raise DkgError("sign-join returned no delegation")
+        return self._request("POST", f"/api/context-graph/{enc}/request-join",
+                             {"delegation": delegation, "curatorPeerId": curator_peer_id,
+                              "agentName": agent_name}, timeout=_STORE_TIMEOUT)
+
     # -- knowledge assets --------------------------------------------------
 
     def share_knowledge_asset(self, cg_id: str, name: str, quads: List[Quad]) -> Dict[str, Any]:

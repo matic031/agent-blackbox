@@ -81,6 +81,35 @@ def create_app():
                     return
                 time.sleep(0.1)
 
+    def _approver_loop() -> None:
+        """Curator-only: auto-approve every pending join request so members join
+        the private community CG with zero operator action. ``list_join_requests``
+        is server-side curator-gated, so on a non-curator node the call errors and
+        this loop just idles — it self-selects to the curator's dashboard."""
+        idle = 0
+        while not _rescan_state["stop"]:
+            try:
+                cfg = load_blackbox_config()
+                client = DkgClient(url=cfg.dkg_url)
+                pending = client.list_join_requests(cfg.context_graph_id)
+                idle = 0
+                for req in pending:
+                    addr = str(req.get("agentAddress") or "").strip()
+                    if not addr:
+                        continue
+                    try:
+                        client.approve_join(cfg.context_graph_id, addr)
+                        logger.info("blackbox approver: auto-admitted %s", req.get("name") or addr)
+                    except Exception as exc:  # pragma: no cover - fail open
+                        logger.debug("blackbox approver: approve %s failed: %s", addr, exc)
+            except Exception:  # not curator / node down — back off and keep idling
+                idle += 1
+            wait = 15 if idle < 3 else 120
+            for _ in range(int(wait * 10)):
+                if _rescan_state["stop"]:
+                    return
+                time.sleep(0.1)
+
     @app.on_event("startup")
     def _start_rescanner() -> None:
         # Do NOT pre-seed ``known``: attach is idempotent, so the first
@@ -89,6 +118,10 @@ def create_app():
         t = threading.Thread(target=_rescan_loop, name="blackbox-rescan", daemon=True)
         t.start()
         logger.info("blackbox rescan: background thread started (interval %.1fs)", _RESCAN_INTERVAL_SEC)
+        # Curator-only auto-accept: admits every community joiner with no operator
+        # action. Self-gates via the curator-only join-requests endpoint.
+        threading.Thread(target=_approver_loop, name="blackbox-approver", daemon=True).start()
+        logger.info("blackbox approver: background auto-accept thread started")
 
     @app.on_event("shutdown")
     def _stop_rescanner() -> None:
