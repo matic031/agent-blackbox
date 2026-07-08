@@ -209,16 +209,27 @@ def load_blackbox_config() -> BlackboxConfig:
     llm_enabled = _as_bool(
         _env_or(llm_entry, env="BLACKBOX_LLM_ENABLED", key="enabled", default=False), False
     )
+    context_graph_id = str(
+        _env_or(
+            entry,
+            env="BLACKBOX_CONTEXT_GRAPH_ID",
+            key="context_graph_id",
+            default=constants.DEFAULT_CONTEXT_GRAPH_ID,
+        )
+    )
+    # Auto-switch an install still pointed at a legacy (pre-Blackbox) graph to the
+    # current default, so an existing DKG user syncs the correct CG with no manual
+    # step. A genuinely custom graph id is not in the legacy set and is untouched.
+    if context_graph_id in constants.LEGACY_CONTEXT_GRAPH_IDS:
+        logger.info(
+            "blackbox: switching legacy context_graph_id %s -> %s",
+            context_graph_id,
+            constants.DEFAULT_CONTEXT_GRAPH_ID,
+        )
+        context_graph_id = constants.DEFAULT_CONTEXT_GRAPH_ID
     return BlackboxConfig(
         mode=mode,
-        context_graph_id=str(
-            _env_or(
-                entry,
-                env="BLACKBOX_CONTEXT_GRAPH_ID",
-                key="context_graph_id",
-                default=constants.DEFAULT_CONTEXT_GRAPH_ID,
-            )
-        ),
+        context_graph_id=context_graph_id,
         curator_peer_id=str(
             _env_or(
                 entry,

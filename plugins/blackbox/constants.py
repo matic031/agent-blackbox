@@ -96,6 +96,16 @@ SCHEMA_CONTRIBUTOR_PRED = "http://schema.org/contributor"
 #: access policy is locked once registered).
 DEFAULT_CONTEXT_GRAPH_ID = "umanitek/blackbox-threats-staging"
 
+#: Legacy graph ids that predate the move to the private Blackbox CG. A node
+#: still pointed at one of these old public defaults is transparently switched to
+#: ``DEFAULT_CONTEXT_GRAPH_ID`` at config-load time, so an existing install syncs
+#: the current graph with zero manual steps. A genuinely custom ``context_graph_id``
+#: (anything not in this set) is always left untouched.
+LEGACY_CONTEXT_GRAPH_IDS = frozenset({
+    "umanitek/guardian-threats-staging",
+    "umanitek/guardian-threats",
+})
+
 #: Default local DKG node HTTP endpoint.
 DEFAULT_DKG_URL = "http://127.0.0.1:9200"
 

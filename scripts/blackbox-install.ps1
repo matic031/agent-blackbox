@@ -311,8 +311,8 @@ entries = plugins.setdefault("entries", {})
 blackbox = entries.setdefault("blackbox", {})
 defaults = {
     "mode": "audit",
-    # TEMPORARY: default to the STAGING graph while production is still being
-    # seeded. TODO(launch): switch back to "umanitek/guardian-threats" (production).
+    # TEMPORARY: default to the private STAGING graph while production is still
+    # being seeded. TODO(launch): switch to "umanitek/blackbox-threats" (production).
     "context_graph_id": os.environ.get("BLACKBOX_CONTEXT_GRAPH_ID", "umanitek/blackbox-threats-staging"),
     "dkg_url": "http://127.0.0.1:9200",
     "sync_interval": 300,

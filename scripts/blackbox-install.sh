@@ -591,8 +591,8 @@ blackbox = entries.setdefault("blackbox", {})
 # Idempotent: only fill keys that are missing — never clobber user edits.
 defaults = {
     "mode": "audit",
-    # TEMPORARY: default to the STAGING graph while production is still being
-    # seeded. TODO(launch): switch back to "umanitek/guardian-threats" (production).
+    # TEMPORARY: default to the private STAGING graph while production is still
+    # being seeded. TODO(launch): switch to "umanitek/blackbox-threats" (production).
     "context_graph_id": context_graph_id,
     "dkg_url": "http://127.0.0.1:9200",
     "sync_interval": 300,

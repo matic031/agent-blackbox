@@ -103,8 +103,8 @@ export const DEFAULT_PROTECTED_PATHS: readonly string[] = [
 
 const DEFAULTS: BlackboxConfig = {
   mode: "audit",
-  // TEMPORARY: default to the STAGING graph while production is still being
-  // seeded. TODO(launch): switch back to "umanitek/guardian-threats" (production).
+  // TEMPORARY: default to the private STAGING graph while production is still
+  // being seeded. TODO(launch): switch to "umanitek/blackbox-threats" (production).
   contextGraphId: "umanitek/blackbox-threats-staging",
   dkgUrl: "http://127.0.0.1:9200",
   syncInterval: 300,

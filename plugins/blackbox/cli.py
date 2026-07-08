@@ -213,7 +213,7 @@ def setup_cli(parser: argparse.ArgumentParser) -> None:
 
     cauto = csub.add_parser("auto-accept", help="Curator: approve every agent that joins the private community CG")
     cauto.add_argument("--once", action="store_true", help="Approve current pending requests and exit (no loop)")
-    cauto.add_argument("--interval", type=int, default=30, help="Seconds between polls when looping (default 30)")
+    cauto.add_argument("--interval", type=int, default=5, help="Seconds between polls when looping (default 5)")
     cauto.set_defaults(func=_cmd_curate_auto_accept)
 
     cimport = csub.add_parser("import", help="Bulk import candidate threats from a catalog file or directory")
@@ -530,6 +530,16 @@ def _cmd_sync(args: argparse.Namespace) -> int:
     except DkgError as exc:
         subscribe_error = str(exc)
         print(f"warning: could not subscribe to {cfg.context_graph_id}: {subscribe_error}")
+    # Curator node auto-admits every pending joiner on each sync, so members are
+    # approved with zero manual steps (open community by design). Fully fail-open:
+    # a member node's calls hit the curator-only endpoint and are skipped, and any
+    # unexpected client error is swallowed so admission never breaks sync.
+    try:
+        admitted = _auto_approve_joins(client, cfg.context_graph_id)
+        if admitted:
+            print(f"  curator: auto-approved {len(admitted)} pending join request(s)")
+    except Exception:
+        pass
     if getattr(args, "wait", False):
         result = _wait_for_context_graph_catchup(cfg.context_graph_id, timeout_s=getattr(args, "timeout", 180))
         if result["status"]:
@@ -804,41 +814,53 @@ def _cmd_setup_graph(args: argparse.Namespace) -> int:
     return 0
 
 
+def _auto_approve_joins(client: DkgClient, cg_id: str) -> List[Dict[str, Any]]:
+    """Curator-side: approve every pending join request on *cg_id*.
+
+    Best-effort and fail-open — only the curator's approvals take effect (the
+    node's approve endpoint is curator-only), so on a member node the calls are
+    rejected and skipped. Returns the requests approved on this pass.
+    """
+    try:
+        pending = client.list_join_requests(cg_id)
+    except DkgError:
+        return []
+    approved: List[Dict[str, Any]] = []
+    for req in pending:
+        addr = str(req.get("agentAddress") or "").strip()
+        if not addr:
+            continue
+        try:
+            client.approve_join(cg_id, addr)
+            approved.append(req)
+        except DkgError:
+            continue
+    return approved
+
+
 def _cmd_curate_auto_accept(args: argparse.Namespace) -> int:
     """Approve every pending join request on the private community CG, so any
-    agent that joins auto-becomes a member and can read/sync the community pool.
-    Loops until stopped; ``--once`` approves the current backlog and exits."""
+    agent that joins instantly becomes a member and can read/sync the community
+    pool. Loops on a tight poll until stopped; ``--once`` drains the current
+    backlog and exits."""
     cfg = load_blackbox_config()
     client = DkgClient(url=cfg.dkg_url)
     cg = cfg.context_graph_id
-    interval = max(5, int(getattr(args, "interval", 30) or 30))
+    interval = max(2, int(getattr(args, "interval", 5) or 5))
     once = bool(getattr(args, "once", False))
     seen = set()
     if not once:
-        print(f"Auto-accepting joiners on {cg} every {interval}s (Ctrl+C to stop)...")
+        print(f"Auto-accepting every joiner on {cg} every {interval}s (Ctrl+C to stop)...")
     try:
         while True:
-            try:
-                pending = client.list_join_requests(cg)
-            except DkgError as exc:
-                print(f"note: could not list join requests: {exc}")
-                pending = []
-            approved = 0
-            for req in pending:
-                addr = str(req.get("agentAddress") or "").strip()
-                if not addr:
-                    continue
-                try:
-                    client.approve_join(cg, addr)
-                    approved += 1
-                    key = addr.lower()
-                    if key not in seen:
-                        seen.add(key)
-                        print(f"  accepted {req.get('name') or addr}")
-                except DkgError as exc:
-                    print(f"  ! approve {addr} failed: {exc}")
+            approved = _auto_approve_joins(client, cg)
+            for req in approved:
+                key = str(req.get("agentAddress") or "").lower()
+                if key and key not in seen:
+                    seen.add(key)
+                    print(f"  accepted {req.get('name') or req.get('agentAddress')}")
             if once:
-                print(f"Done: {approved} approved ({len(pending)} pending checked).")
+                print(f"Done: {len(approved)} approved.")
                 return 0
             time.sleep(interval)
     except KeyboardInterrupt:
