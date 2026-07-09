@@ -40,6 +40,16 @@ class DkgError(RuntimeError):
     """Raised for any non-2xx daemon response or transport failure."""
 
 
+def _validate_quads_literal_sizes(quads: List[Quad]) -> None:
+    """Mirror DKG's writable-literal preflight before sending seed/write payloads."""
+    try:
+        from . import quads as quad_terms
+
+        quad_terms.assert_quads_literal_size(quads, label="quads")
+    except ValueError as exc:
+        raise DkgError(str(exc)) from exc
+
+
 def _is_already_finalized(exc: DkgError) -> bool:
     """True when a share failed only because the KA already exists sealed.
 
@@ -344,6 +354,7 @@ class DkgClient:
         rejects re-finalizing an existing sealed assertion; we treat that as
         success — the content is already on the graph.
         """
+        _validate_quads_literal_sizes(quads)
         try:
             return self._request(
                 "POST",
@@ -358,6 +369,7 @@ class DkgClient:
 
     def write_private_knowledge_asset(self, cg_id: str, name: str, quads: List[Quad]) -> Dict[str, Any]:
         """Create+write+seal a KA in WM WITHOUT sharing to SWM (private audit)."""
+        _validate_quads_literal_sizes(quads)
         return self._request(
             "POST",
             "/api/knowledge-assets",

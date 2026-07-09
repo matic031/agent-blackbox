@@ -21,6 +21,9 @@ import {
   threatUri,
   reportUri,
   buildReportQuads,
+  literal,
+  javaModifiedUtf8ByteLength,
+  MAX_LITERAL_BYTES,
 } from "../src/quads.ts";
 import { normalizeArgShape, parseDependencyInstalls } from "../src/detection.ts";
 
@@ -192,6 +195,21 @@ function eq(a, b) {
     }
   }
   report("reportQuads", ok, mismatches.join("\n"));
+}
+
+// --- literal caps -----------------------------------------------------------
+{
+  const value = literal("x".repeat(MAX_LITERAL_BYTES + 1000)).slice(1, -1);
+  const escaped = literal("\n".repeat(MAX_LITERAL_BYTES));
+  const emoji = literal("😀".repeat(MAX_LITERAL_BYTES));
+  report(
+    "literal cap",
+    javaModifiedUtf8ByteLength(`"${value}"`) <= MAX_LITERAL_BYTES &&
+      javaModifiedUtf8ByteLength(escaped) <= MAX_LITERAL_BYTES &&
+      javaModifiedUtf8ByteLength(emoji) <= MAX_LITERAL_BYTES &&
+      value.endsWith("...[truncated]"),
+    `literal MUTF-8 byteLength=${javaModifiedUtf8ByteLength(`"${value}"`)}`,
+  );
 }
 
 console.log("");

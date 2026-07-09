@@ -1302,36 +1302,41 @@ def _seed_entries(
             skipped += 1
             continue
         already.add(ident)  # never publish the same identifier twice in one run
+        try:
+            q = quads.build_threat_quads(
+                category=category,
+                identifier=ident,
+                severity=fields.get("severity", "high"),
+                name=fields.get("name", ident),
+                description=fields.get("description", ""),
+                curated=True,
+                kind=fields.get("kind"),
+                sources=sources,
+                references=references,
+                contributor=contributor_value,
+                pattern=fields.get("pattern"),
+                owasp_category=fields.get("owasp_category"),
+                tool_name=fields.get("tool_name"),
+                arg_shape=fields.get("arg_shape"),
+                ecosystem=fields.get("ecosystem"),
+                package_name=fields.get("package_name"),
+                package_version=fields.get("package_version"),
+                advisory_id=fields.get("advisory_id"),
+                file_category=fields.get("file_category"),
+                skill_name=fields.get("skill_name"),
+                skill_version=fields.get("skill_version"),
+                danger_shape=fields.get("danger_shape"),
+                ioc_type=fields.get("ioc_type"),
+            )
+            quads.assert_quads_literal_size(q, label=f"threat:{ident}")
+        except ValueError:
+            errors += 1
+            continue
         if dry_run:
             seeded += 1
             if publish:  # the ledger tracks on-chain publishes only
                 new_ids.append(ident)
             continue
-        q = quads.build_threat_quads(
-            category=category,
-            identifier=ident,
-            severity=fields.get("severity", "high"),
-            name=fields.get("name", ident),
-            description=fields.get("description", ""),
-            curated=True,
-            kind=fields.get("kind"),
-            sources=sources,
-            references=references,
-            contributor=contributor_value,
-            pattern=fields.get("pattern"),
-            owasp_category=fields.get("owasp_category"),
-            tool_name=fields.get("tool_name"),
-            arg_shape=fields.get("arg_shape"),
-            ecosystem=fields.get("ecosystem"),
-            package_name=fields.get("package_name"),
-            package_version=fields.get("package_version"),
-            advisory_id=fields.get("advisory_id"),
-            file_category=fields.get("file_category"),
-            skill_name=fields.get("skill_name"),
-            skill_version=fields.get("skill_version"),
-            danger_shape=fields.get("danger_shape"),
-            ioc_type=fields.get("ioc_type"),
-        )
         ka_name = f"threat-{quads.slug(ident)}"
         try:
             client.share_knowledge_asset(cfg.context_graph_id, ka_name, q)

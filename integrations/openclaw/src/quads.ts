@@ -8,7 +8,7 @@
  * byte-identical identifiers). The contract is pinned by
  * `tests/parity/identifier_fixtures.json` and asserted by `test/parity.mjs`.
  *
- * Zero runtime deps: `node:crypto` for sha256, everything else pure.
+ * Zero runtime deps: Node built-ins for sha256 and Java MUTF-8 byte accounting.
  */
 import { createHash } from "node:crypto";
 
@@ -80,6 +80,13 @@ export interface Quad {
   predicate: string;
   object: string;
 }
+
+// DKG validates writable RDF literal terms with a 60,000 Java Modified UTF-8
+// safe limit across Oxigraph/Blazegraph-compatible paths. Keep OpenClaw's final
+// quoted term under the stricter Blackbox cap.
+export const DKG_RDF_LITERAL_SAFE_MUTF8_BYTES = 60000;
+export const MAX_LITERAL_BYTES = 50000;
+const TRUNCATION_MARKER = " ...[truncated]";
 
 // ---------------------------------------------------------------------------
 // Hashing / slugs / URIs
@@ -220,13 +227,55 @@ export function iri(value: string): string {
  * Matches Python `literal`: escapes backslash, doublequote, \n, \r, \t (all five).
  */
 export function literal(value: string): string {
-  const escaped = String(value)
+  return literalTermForValue(capLiteralValue(String(value)));
+}
+
+export function javaModifiedUtf8ByteLength(value: string): number {
+  let bytes = 0;
+  for (let i = 0; i < value.length; i += 1) {
+    const code = value.charCodeAt(i);
+    if (code === 0) bytes += 2;
+    else if (code <= 0x7f) bytes += 1;
+    else if (code <= 0x07ff) bytes += 2;
+    else bytes += 3;
+  }
+  return bytes;
+}
+
+function escapeLiteralText(value: string): string {
+  return value
     .replace(/\\/g, "\\\\")
     .replace(/"/g, '\\"')
     .replace(/\n/g, "\\n")
     .replace(/\r/g, "\\r")
     .replace(/\t/g, "\\t");
-  return `"${escaped}"`;
+}
+
+function literalTermForValue(value: string): string {
+  return `"${escapeLiteralText(value)}"`;
+}
+
+function literalValueTermMutf8Bytes(value: string): number {
+  return javaModifiedUtf8ByteLength(literalTermForValue(value));
+}
+
+function capLiteralValue(value: string): string {
+  if (literalValueTermMutf8Bytes(value) <= MAX_LITERAL_BYTES) return value;
+  const chars = Array.from(value);
+  let lo = 0;
+  let hi = chars.length;
+  let best = TRUNCATION_MARKER;
+  while (lo <= hi) {
+    const mid = Math.floor((lo + hi) / 2);
+    const candidate = `${chars.slice(0, mid).join("")}${TRUNCATION_MARKER}`;
+    if (literalValueTermMutf8Bytes(candidate) <= MAX_LITERAL_BYTES) {
+      best = candidate;
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
+  }
+  return best;
 }
 
 /** Render an `xsd:dateTime` typed literal (UTC ISO-8601 with `Z`). */

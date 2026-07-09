@@ -50,6 +50,25 @@ def test_literal_escaping():
     assert quads.literal("line\nbreak") == '"line\\nbreak"'
 
 
+def test_literal_caps_final_value_bytes():
+    lit = quads.literal("x" * (quads._MAX_LITERAL_BYTES + 1000))
+    assert quads.literal_term_mutf8_byte_length(lit) <= quads._MAX_LITERAL_BYTES
+    assert lit.endswith('...[truncated]"')
+
+
+def test_literal_caps_after_nt_escape_overhead():
+    lit = quads.literal("\n" * quads._MAX_LITERAL_BYTES)
+    assert quads.literal_term_mutf8_byte_length(lit) <= quads._MAX_LITERAL_BYTES
+    assert lit.endswith('...[truncated]"')
+
+
+def test_literal_caps_on_java_mutf8_boundary():
+    # Emoji are 4 bytes in UTF-8 but 6 bytes as Java MUTF-8 surrogate pairs.
+    lit = quads.literal("😀" * quads._MAX_LITERAL_BYTES)
+    assert quads.literal_term_mutf8_byte_length(lit) <= quads._MAX_LITERAL_BYTES
+    assert lit.endswith('...[truncated]"')
+
+
 def test_datetime_literal_is_typed():
     lit = quads.datetime_literal()
     assert lit.endswith(constants.XSD_DATETIME)
@@ -157,3 +176,43 @@ def test_build_report_quads_no_command_text_and_links_threat():
     assert all(t["subject"] == subj for t in q)
     assert any(t["predicate"] == constants.REPORTS_THREAT_PRED and t["object"] == threat for t in q)
     assert any(t["predicate"] == constants.REPORTER_PRED and t["object"] == '"0xabc"' for t in q)
+
+
+def test_threat_and_report_literal_fields_respect_graph_limit():
+    oversized = "x" * (quads._MAX_LITERAL_BYTES + 1234)
+    rows = quads.build_threat_quads(
+        category="injection",
+        identifier="injection:large",
+        severity="high",
+        name=oversized,
+        description=oversized,
+        pattern=oversized,
+        sources=[oversized],
+        references=[oversized],
+        contributor=oversized,
+    ) + quads.build_report_quads(
+        identifier="injection:large",
+        category="injection",
+        severity="high",
+        reporter_address=oversized,
+        framework=oversized,
+        pattern=oversized,
+        owasp_category=oversized,
+    )
+    literal_objects = [r["object"] for r in rows if r["object"].startswith('"') and "^^" not in r["object"]]
+    assert literal_objects
+    assert all(quads.literal_term_mutf8_byte_length(obj) <= quads._MAX_LITERAL_BYTES for obj in literal_objects)
+
+
+def test_assert_quads_literal_size_rejects_manual_oversized_literal():
+    rows = [{
+        "subject": "urn:test:s",
+        "predicate": "urn:test:p",
+        "object": '"' + ("x" * (quads._MAX_LITERAL_BYTES + 1)) + '"',
+    }]
+    try:
+        quads.assert_quads_literal_size(rows)
+    except ValueError as exc:
+        assert "exceeds Blackbox cap" in str(exc)
+    else:
+        raise AssertionError("expected oversized literal rejection")

@@ -97,6 +97,21 @@ def test_share_knowledge_asset_payload(monkeypatch):
     assert cap["timeout"] == dkg_client._STORE_TIMEOUT
 
 
+def test_share_rejects_oversized_literal_before_http(monkeypatch):
+    def fail_urlopen(req, timeout=None):
+        raise AssertionError("urlopen should not be called")
+
+    monkeypatch.setattr(dkg_client.urllib.request, "urlopen", fail_urlopen)
+    client = dkg_client.DkgClient(url="http://node", token="tok")
+    rows = [{
+        "subject": "urn:test:s",
+        "predicate": "urn:test:p",
+        "object": '"' + ("x" * 50001) + '"',
+    }]
+    with pytest.raises(dkg_client.DkgError, match="exceeds Blackbox cap"):
+        client.share_knowledge_asset("cg", "notes", rows)
+
+
 def test_register_context_graph_sends_policies(monkeypatch):
     cap = _capture(monkeypatch)
     client = dkg_client.DkgClient(url="http://node", token=None)
