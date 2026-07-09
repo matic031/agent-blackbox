@@ -55,3 +55,62 @@ def test_blackbox_dashboard_chat_resumes_session(monkeypatch):
             "sid-1",
         ]
     ]
+
+
+def test_attach_targets_include_unavailable_supported_agents(monkeypatch):
+    def fake_attach_all(*, hermes=True, openclaw=True, dry_run=False):
+        if hermes and not openclaw:
+            return {
+                "hermes": [
+                    {
+                        "kind": "hermes",
+                        "target": "/tmp/home/.hermes",
+                        "already": True,
+                    }
+                ]
+            }
+        if openclaw and not hermes:
+            return {"openclaw": []}
+        return {}
+
+    monkeypatch.setattr(attach, "attach_all", fake_attach_all)
+
+    client = TestClient(server.create_app())
+    res = client.get("/api/attach-targets")
+
+    assert res.status_code == 200
+    targets = res.json()["targets"]
+    hermes = next(t for t in targets if t["kind"] == "hermes")
+    openclaw = next(t for t in targets if t["kind"] == "openclaw")
+    assert hermes["available"] is True
+    assert hermes["protected"] is True
+    assert openclaw["available"] is False
+    assert "OpenClaw was not detected" in openclaw["disabled_reason"]
+
+
+def test_attach_targets_do_not_duplicate_errored_supported_agents(monkeypatch):
+    def fake_attach_all(*, hermes=True, openclaw=True, dry_run=False):
+        if hermes and not openclaw:
+            return {"hermes": []}
+        if openclaw and not hermes:
+            return {
+                "openclaw": [
+                    {
+                        "kind": "openclaw",
+                        "target": "/tmp/.openclaw",
+                        "error": "cannot read openclaw.json",
+                    }
+                ]
+            }
+        return {}
+
+    monkeypatch.setattr(attach, "attach_all", fake_attach_all)
+
+    client = TestClient(server.create_app())
+    res = client.get("/api/attach-targets")
+
+    assert res.status_code == 200
+    openclaw_rows = [t for t in res.json()["targets"] if t["kind"] == "openclaw"]
+    assert len(openclaw_rows) == 1
+    assert openclaw_rows[0]["available"] is False
+    assert openclaw_rows[0]["disabled_reason"] == "cannot read openclaw.json"

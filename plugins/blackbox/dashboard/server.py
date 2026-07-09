@@ -559,15 +559,42 @@ def create_app():
     def attach_targets() -> Any:
         """Discover local agent configs the dashboard can attach Blackbox to."""
         targets: List[Dict[str, Any]] = []
+        returned: Set[str] = set()
+        supported = {
+            "hermes": "Hermes was not detected on this machine.",
+            "openclaw": "OpenClaw was not detected on this machine. Start OpenClaw once so its openclaw.json workspace can be discovered.",
+        }
+
+        def _add_rows(kind: str, rows: Any) -> None:
+            if not isinstance(rows, list):
+                return
+            saw_row = False
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                saw_row = True
+                row["protected"] = bool(row.get("already"))
+                row["available"] = bool(row.get("target")) and not row.get("error")
+                if not row["available"]:
+                    row["disabled_reason"] = str(row.get("error") or supported[kind])
+                targets.append(row)
+            if saw_row:
+                returned.add(kind)
+
         try:
-            for row in attach.attach_all(openclaw=False, dry_run=True).get("hermes", []):
-                row["protected"] = bool(row.get("already"))
-                targets.append(row)
-            for row in attach.attach_all(hermes=False, dry_run=True).get("openclaw", []):
-                row["protected"] = bool(row.get("already"))
-                targets.append(row)
+            _add_rows("hermes", attach.attach_all(openclaw=False, dry_run=True).get("hermes", []))
+            _add_rows("openclaw", attach.attach_all(hermes=False, dry_run=True).get("openclaw", []))
         except Exception as exc:  # pragma: no cover - fail open
             logger.debug("blackbox dashboard: attach target discovery failed: %s", exc)
+        for kind, reason in supported.items():
+            if kind not in returned:
+                targets.append({
+                    "kind": kind,
+                    "target": "",
+                    "protected": False,
+                    "available": False,
+                    "disabled_reason": reason,
+                })
         return {"targets": targets}
 
     @app.post("/api/attach")
