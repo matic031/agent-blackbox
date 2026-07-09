@@ -142,6 +142,54 @@ def skill_shape_identifier(name: str, danger_shape: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# IOC identifiers (network + crypto indicators)
+# ---------------------------------------------------------------------------
+
+#: The indicator types a published ``ioc:`` threat can carry. ``domain``/``url``/
+#: ``ip`` are network indicators; ``hash`` is a file digest; ``wallet``/
+#: ``contract`` are crypto addresses. All match against agent tool-call text.
+IOC_TYPES = ("domain", "url", "ip", "hash", "wallet", "contract")
+
+_EVM_ADDR_RE = re.compile(r"0x[a-fA-F0-9]{40}")
+
+
+def normalize_ioc_value(ioc_type: str, value: str) -> str:
+    """Canonicalize an IOC value so a seeded id and a live match are identical.
+
+    Domains/URLs/IPs/EVM-addresses/hashes lower-case (the network + EVM name
+    spaces are case-insensitive); base58 crypto addresses (BTC/Solana) are
+    case-*sensitive* and kept verbatim. URLs drop a trailing slash and lower
+    only scheme+host so the path stays exact; IPs drop any ``:port``.
+    """
+    t = (ioc_type or "").strip().lower()
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    if t == "domain":
+        return raw.rstrip(".").lower()
+    if t == "url":
+        parts = raw.split("://", 1)
+        if len(parts) == 2:
+            host_path = parts[1].split("/", 1)
+            host = host_path[0].lower()
+            rest = ("/" + host_path[1]) if len(host_path) == 2 else ""
+            raw = f"{parts[0].lower()}://{host}{rest}"
+        return raw.rstrip("/")
+    if t == "ip":
+        return raw.split(":", 1)[0]
+    if t == "hash":
+        return raw.lower()
+    if t in ("wallet", "contract"):
+        return raw.lower() if _EVM_ADDR_RE.fullmatch(raw) else raw
+    return raw
+
+
+def ioc_identifier(ioc_type: str, value: str) -> str:
+    """``ioc:{type}:{normalized-value}`` — the shared IOC id (see :func:`normalize_ioc_value`)."""
+    return f"ioc:{(ioc_type or '').strip().lower()}:{normalize_ioc_value(ioc_type, value)}"
+
+
+# ---------------------------------------------------------------------------
 # Arg-shape normalization (shared by detection + curator)
 # ---------------------------------------------------------------------------
 
@@ -721,6 +769,88 @@ def parse_downloads(command: str) -> List[str]:
     return list(dict.fromkeys(re.findall(r"https?://[^\s;'\"|&>]+", command)))
 
 
+# IOC extraction — pull indicators out of arbitrary tool-call text so a match
+# against a synced ``ioc:`` rule can fire. Only KNOWN-BAD values (already in the
+# ruleset) ever match, so broad extraction is safe: a token that isn't a seeded
+# threat is a cheap dict miss, not a false positive.
+_URL_RE = re.compile(r"https?://[^\s'\"<>|\\)}\]]+", re.IGNORECASE)
+_IPV4_RE = re.compile(r"\b(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)\b")
+_DOMAIN_RE = re.compile(r"\b(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,24}\b", re.IGNORECASE)
+_SHA256_RE = re.compile(r"\b[a-fA-F0-9]{64}\b")
+_SHA1_RE = re.compile(r"\b[a-fA-F0-9]{40}\b")
+_MD5_RE = re.compile(r"\b[a-fA-F0-9]{32}\b")
+_BTC_RE = re.compile(r"\b(?:bc1[023-9ac-hj-np-z]{11,71}|[13][a-km-zA-HJ-NP-Z1-9]{25,39})\b")
+_SOL_RE = re.compile(r"\b[1-9A-HJ-NP-Za-km-z]{32,44}\b")
+_MAX_IOC_TEXT = 50_000
+_MAX_IOC_CANDIDATES = 4000
+
+
+def _host_suffixes(host: str) -> List[str]:
+    """A host plus the parent domains a ``domain:`` rule might be seeded as.
+
+    ``login.evil.co.uk`` yields ``login.evil.co.uk``, ``evil.co.uk``, ``co.uk``
+    and a ``www.``-stripped variant, so a rule seeded on the registrable domain
+    still fires on a subdomain. No public-suffix list (kept dependency-free):
+    the parent walk stops at two labels and every candidate is an O(1) lookup.
+    """
+    host = host.strip(".").lower()
+    if not host:
+        return []
+    out = [host]
+    if host.startswith("www."):
+        out.append(host[4:])
+    labels = host.split(".")
+    for i in range(1, len(labels) - 1):
+        out.append(".".join(labels[i:]))
+    return list(dict.fromkeys(out))
+
+
+def iter_ioc_candidates(text: str) -> List[str]:
+    """Candidate ``ioc:`` identifiers to look up for *text* (deduped, capped).
+
+    Extracts URLs (+ their hosts), bare domains, IPv4s, sha256/md5 hashes, and
+    EVM/BTC/Solana crypto addresses. An EVM/base58 address is emitted as BOTH a
+    ``wallet:`` and a ``contract:`` candidate (the address alone doesn't say
+    which), so whichever the curator seeded matches.
+    """
+    if not text:
+        return []
+    if len(text) > _MAX_IOC_TEXT:
+        text = text[:_MAX_IOC_TEXT]
+    out: List[str] = []
+    seen: set = set()
+
+    def add(ioc_type: str, value: str) -> None:
+        if len(out) >= _MAX_IOC_CANDIDATES:
+            return
+        ident = ioc_identifier(ioc_type, value)
+        if ident not in seen:
+            seen.add(ident)
+            out.append(ident)
+
+    for url in _URL_RE.findall(text):
+        clean = url.rstrip(".,);'\"")
+        add("url", clean)
+        host = clean.split("://", 1)[-1].split("/", 1)[0].split("@")[-1].split(":", 1)[0]
+        for suffix in _host_suffixes(host):
+            add("domain", suffix)
+    for host in _DOMAIN_RE.findall(text):
+        for suffix in _host_suffixes(host):
+            add("domain", suffix)
+    for ip in _IPV4_RE.findall(text):
+        add("ip", ip)
+    for h in _SHA256_RE.findall(text):
+        add("hash", f"sha256:{h}")
+    for h in _SHA1_RE.findall(text):
+        add("hash", f"sha1:{h}")
+    for h in _MD5_RE.findall(text):
+        add("hash", f"md5:{h}")
+    for addr in _EVM_ADDR_RE.findall(text) + _BTC_RE.findall(text) + _SOL_RE.findall(text):
+        add("wallet", addr)
+        add("contract", addr)
+    return out
+
+
 def parse_dependency_installs(command: str) -> List[Dict[str, str]]:
     """Parse install commands into ``[{ecosystem, name, version}, ...]``.
 
@@ -933,6 +1063,8 @@ def build_threat_quads(
     skill_name: Optional[str] = None,
     skill_version: Optional[str] = None,
     danger_shape: Optional[str] = None,
+    # ioc — the concrete indicator type (domain|url|ip|hash|wallet|contract)
+    ioc_type: Optional[str] = None,
 ) -> List[Quad]:
     """Build curated Threat quads for one of the threat categories.
 
@@ -950,6 +1082,7 @@ def build_threat_quads(
         "dependency": constants.DEP_THREAT_TYPE_IRI,
         "fileaccess": constants.FILE_ACCESS_THREAT_TYPE_IRI,
         "skill": constants.SUSPICIOUS_SKILL_THREAT_TYPE_IRI,
+        "ioc": constants.IOC_THREAT_TYPE_IRI,
     }.get(category)
     if type_iri is None:
         raise ValueError(f"unknown threat category: {category!r}")
@@ -1010,6 +1143,10 @@ def build_threat_quads(
             out.append(_q(subj, constants.SKILL_VERSION_PRED, literal(skill_version)))
         if danger_shape:
             out.append(_q(subj, constants.DANGER_SHAPE_PRED, literal(danger_shape)))
+    elif category == "ioc":
+        # The indicator value lives in the identifier; g:category carries its type.
+        if ioc_type:
+            out.append(_q(subj, constants.CATEGORY_PRED, literal(ioc_type)))
 
     return out
 

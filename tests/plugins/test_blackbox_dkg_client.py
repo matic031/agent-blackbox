@@ -121,6 +121,19 @@ def test_register_context_graph_sends_policies(monkeypatch):
     assert cap["url"].endswith("/api/context-graph/register")
 
 
+def test_redeliver_join_approval_payload(monkeypatch):
+    cap = _capture(monkeypatch, body='{"ok":true,"delivered":true}')
+    client = dkg_client.DkgClient(url="http://node", token="tok")
+    out = client.redeliver_join_approval("umanitek/blackbox-threats-staging", "0xabc")
+    assert out["delivered"] is True
+    assert cap["method"] == "POST"
+    assert cap["url"].endswith(
+        "/api/context-graph/umanitek%2Fblackbox-threats-staging/redeliver-approval"
+    )
+    assert json.loads(cap["body"]) == {"agentAddress": "0xabc"}
+    assert cap["timeout"] == dkg_client._STORE_TIMEOUT
+
+
 def test_publish_payload(monkeypatch):
     cap = _capture(monkeypatch, body='{"ual":"did:dkg:1/2/3","txHash":"0xabc"}')
     client = dkg_client.DkgClient(url="http://node", token="t")

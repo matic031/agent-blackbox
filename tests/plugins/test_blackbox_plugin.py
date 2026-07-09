@@ -65,6 +65,14 @@ def test_blackbox_sync_parser_accepts_wait_timeout():
     assert args.require_rules is True
 
 
+def test_blackbox_redeliver_approval_parser():
+    parser = argparse.ArgumentParser()
+    cli_mod.setup_cli(parser)
+    args = parser.parse_args(["curate", "redeliver-approval", "--agent", "0xabc"])
+    assert args.func is cli_mod._cmd_curate_redeliver_approval
+    assert args.agent == "0xabc"
+
+
 def test_blackbox_sync_require_rules_fails_empty_ruleset(monkeypatch, capsys):
     class FakeClient:
         def __init__(self, url, **_kwargs):
@@ -129,6 +137,77 @@ def test_blackbox_sync_require_rules_fails_subscribe_error(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "could not subscribe to cg" in out
     assert "Required community subscription failed" in out
+
+
+def test_blackbox_sync_empty_zero_data_prints_repair_hint(monkeypatch, capsys):
+    class FakeClient:
+        def __init__(self, url, **_kwargs):
+            self.url = url
+
+        def subscribe_context_graph(self, cg_id):
+            return {}
+
+        def agent_identity(self):
+            return {"agentAddress": "0xabc"}
+
+    class FakeRuleset:
+        def counts(self):
+            return {
+                "injection": 0,
+                "escalation": 0,
+                "dependency": 0,
+                "fileaccess": 0,
+                "skill": 0,
+            }
+
+    monkeypatch.setattr(cli_mod, "_request_join", lambda *args, **kwargs: None)
+    monkeypatch.setattr(cli_mod, "DkgClient", FakeClient)
+    monkeypatch.setattr(
+        cli_mod,
+        "load_blackbox_config",
+        lambda: config_mod.BlackboxConfig(context_graph_id="cg", dkg_url=constants.DEFAULT_DKG_URL),
+    )
+    monkeypatch.setattr(
+        cli_mod,
+        "_wait_for_context_graph_catchup",
+        lambda *a, **k: {
+            "ok": True,
+            "status": "done",
+            "detail": "peers 4/4, data 0, shared memory 0",
+        },
+    )
+    monkeypatch.setattr(cli_mod.ruleset, "refresh", lambda cfg, client: FakeRuleset())
+
+    args = argparse.Namespace(wait=True, timeout=180, require_rules=False)
+    assert cli_mod._cmd_sync(args) == 0
+    out = capsys.readouterr().out
+    assert "redeliver-approval --agent 0xabc" in out
+
+
+def test_blackbox_curate_redeliver_approval(monkeypatch, capsys):
+    calls = []
+
+    class FakeClient:
+        def __init__(self, url, **_kwargs):
+            self.url = url
+
+        def redeliver_join_approval(self, cg_id, agent):
+            calls.append((cg_id, agent))
+            return {"delivered": True, "peerId": "peer-1"}
+
+    monkeypatch.setattr(cli_mod, "DkgClient", FakeClient)
+    monkeypatch.setattr(
+        cli_mod,
+        "load_blackbox_config",
+        lambda: config_mod.BlackboxConfig(context_graph_id="cg", dkg_url=constants.DEFAULT_DKG_URL),
+    )
+
+    args = argparse.Namespace(agent="0xabc")
+    assert cli_mod._cmd_curate_redeliver_approval(args) == 0
+    assert calls == [("cg", "0xabc")]
+    out = capsys.readouterr().out
+    assert "Join approval re-delivered" in out
+    assert "peer-1" in out
 
 
 def test_parse_catchup_status_fields():

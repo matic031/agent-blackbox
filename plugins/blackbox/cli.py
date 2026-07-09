@@ -16,7 +16,6 @@ import shutil
 import subprocess
 import sys
 import time
-import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
@@ -216,6 +215,13 @@ def setup_cli(parser: argparse.ArgumentParser) -> None:
     cauto.add_argument("--once", action="store_true", help="Approve current pending requests and exit (no loop)")
     cauto.add_argument("--interval", type=int, default=5, help="Seconds between polls when looping (default 5)")
     cauto.set_defaults(func=_cmd_curate_auto_accept)
+
+    credeliver = csub.add_parser(
+        "redeliver-approval",
+        help="Curator: re-send join approval to an already-approved agent",
+    )
+    credeliver.add_argument("--agent", required=True, help="Agent wallet address to re-notify")
+    credeliver.set_defaults(func=_cmd_curate_redeliver_approval)
 
     cimport = csub.add_parser("import", help="Bulk import candidate threats from a catalog file or directory")
     csrc = cimport.add_mutually_exclusive_group(required=True)
@@ -447,6 +453,18 @@ def _blackbox_chat_argv(chat_args: Optional[List[str]], profile: str = _BLACKBOX
     return argv
 
 
+def _resolve_dkg_bin(dkg_bin: Optional[str]) -> Optional[str]:
+    """Resolve the configured Blackbox DKG CLI path without falling back silently."""
+    if not dkg_bin:
+        return None
+    expanded = str(Path(dkg_bin).expanduser())
+    if Path(expanded).is_file():
+        return expanded
+    if os.path.sep not in expanded and (os.path.altsep is None or os.path.altsep not in expanded):
+        return shutil.which(expanded)
+    return None
+
+
 def _cmd_status(args: argparse.Namespace) -> int:
     cfg = load_blackbox_config()
     client = DkgClient(url=cfg.dkg_url, dkg_home=cfg.dkg_home)
@@ -459,6 +477,9 @@ def _cmd_status(args: argparse.Namespace) -> int:
     print(f"  context graph:     {cfg.context_graph_id}")
     print(f"  DKG node:          {cfg.dkg_url}  [{'reachable' if reachable else 'unreachable'}]")
     print(f"  DKG home:          {cfg.dkg_home}")
+    print(f"  DKG CLI:           {cfg.dkg_bin}")
+    if Path(cfg.dkg_home).expanduser() == Path.home() / ".dkg":
+        print("  warning:           DKG home is the shared ~/.dkg; Blackbox should use its own DKG home")
     if reachable:
         info = client.chain_info()
         cid = info.get("chain_id")
@@ -519,6 +540,7 @@ def _print_attached_targets() -> None:
 def _cmd_sync(args: argparse.Namespace) -> int:
     cfg = load_blackbox_config()
     client = DkgClient(url=cfg.dkg_url, dkg_home=cfg.dkg_home)
+    catchup_detail = ""
     # Private community CG: ask the curator to admit this node before subscribing,
     # so a fresh install auto-joins with zero manual steps. Best-effort + idempotent.
     join_status = _request_join(client, cfg.context_graph_id, cfg.curator_peer_id)
@@ -547,10 +569,12 @@ def _cmd_sync(args: argparse.Namespace) -> int:
             cfg.context_graph_id,
             timeout_s=getattr(args, "timeout", 180),
             dkg_home=cfg.dkg_home,
+            dkg_bin=cfg.dkg_bin,
         )
         if result["status"]:
             print(f"DKG catch-up: {result['status']}")
         if result["detail"]:
+            catchup_detail = str(result["detail"])
             print(f"  {result['detail']}")
         if not result["ok"]:
             print("  continuing with best-effort Blackbox cache refresh")
@@ -562,6 +586,7 @@ def _cmd_sync(args: argparse.Namespace) -> int:
     if sum(counts.values()) == 0:
         print("  0 rules — no local public/SWM threat rows are available yet.")
         print("  Blackbox will retry automatically; force it with `hermes blackbox sync --wait`.")
+        _print_empty_sync_repair_hint(cfg, client, catchup_detail=catchup_detail)
         if getattr(args, "require_rules", False):
             print("  Required ruleset sync failed; install is incomplete until threat rows load from DKG.")
             return 2
@@ -572,6 +597,33 @@ def _cmd_sync(args: argparse.Namespace) -> int:
         )
         return 3
     return 0
+
+
+def _print_empty_sync_repair_hint(
+    cfg: BlackboxConfig,
+    client: DkgClient,
+    *,
+    catchup_detail: str = "",
+) -> None:
+    detail = (catchup_detail or "").lower()
+    if "data 0" not in detail and "shared memory 0" not in detail:
+        return
+    agent_address = ""
+    try:
+        identity = client.agent_identity()
+        agent_address = str(
+            identity.get("agentAddress") or identity.get("address") or ""
+        ).strip()
+    except Exception:
+        agent_address = ""
+    print("  DKG reported zero graph rows after catch-up. If this node also says")
+    print("  already-member, it may be stuck before curator _meta/SWM authorization.")
+    if agent_address:
+        print(f"  local agent: {agent_address}")
+    print("  On the curator node, repair with:")
+    print("    hermes blackbox curate auto-accept --once")
+    redeliver_agent = agent_address or "<agent-address>"
+    print(f"    hermes blackbox curate redeliver-approval --agent {redeliver_agent}")
 
 
 def _request_join(client: DkgClient, cg_id: str, curator_peer_id: str) -> Optional[str]:
@@ -611,6 +663,7 @@ def _wait_for_context_graph_catchup(
     timeout_s: int = 180,
     interval_s: float = 3.0,
     dkg_home: Optional[str] = None,
+    dkg_bin: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Poll ``dkg sync catchup-status`` until the graph catch-up finishes.
 
@@ -619,8 +672,10 @@ def _wait_for_context_graph_catchup(
     missing CLI, unsupported status, or timeout never blocks Blackbox from
     doing a normal fail-open cache refresh.
     """
-    if not shutil.which("dkg"):
-        return {"ok": False, "status": "unavailable", "detail": "dkg CLI not found"}
+    resolved_dkg = _resolve_dkg_bin(dkg_bin or str(constants.blackbox_dkg_bin()))
+    if not resolved_dkg:
+        detail = f"DKG CLI not found at {dkg_bin or constants.blackbox_dkg_bin()}"
+        return {"ok": False, "status": "unavailable", "detail": detail}
     deadline = time.monotonic() + max(1, int(timeout_s or 1))
     last_status = ""
     last_detail = ""
@@ -630,7 +685,7 @@ def _wait_for_context_graph_catchup(
     while time.monotonic() < deadline:
         try:
             proc = subprocess.run(
-                ["dkg", "sync", "catchup-status", cg_id],
+                [resolved_dkg, "sync", "catchup-status", cg_id],
                 text=True,
                 capture_output=True,
                 timeout=15,
@@ -784,11 +839,10 @@ def _require_mainnet_for_publish(client: DkgClient) -> bool:
         print(f"error: DKG node is on a TESTNET ({net}, chainId={cid}). Blackbox is mainnet-only — refusing to publish.")
         dkg_home = getattr(client, "dkg_home", str(constants.blackbox_dkg_home()))
         dkg_url = getattr(client, "url", constants.DEFAULT_DKG_URL)
-        dkg_port = urllib.parse.urlparse(dkg_url).port or constants.DEFAULT_DKG_PORT
+        dkg_bin = str(constants.blackbox_dkg_bin())
         print(
             "       Re-bootstrap the Blackbox node on mainnet:  "
-            f'DKG_HOME="{dkg_home}" dkg hermes setup --network mainnet-base '
-            f"--port {dkg_port} --daemon-url {dkg_url} --no-fund"
+            f'DKG_HOME="{dkg_home}" "{dkg_bin}" start  # configured for {dkg_url}'
         )
         return False
     if cid is not None and not info.get("is_mainnet"):
@@ -884,6 +938,32 @@ def _cmd_curate_auto_accept(args: argparse.Namespace) -> int:
     except KeyboardInterrupt:
         print("\nStopped.")
         return 0
+
+
+def _cmd_curate_redeliver_approval(args: argparse.Namespace) -> int:
+    """Curator-side repair: re-send join approval to an already-approved agent."""
+    agent = str(getattr(args, "agent", "") or "").strip()
+    if not agent:
+        print("error: --agent is required")
+        return 2
+    cfg = load_blackbox_config()
+    client = DkgClient(url=cfg.dkg_url, dkg_home=cfg.dkg_home)
+    try:
+        result = client.redeliver_join_approval(cfg.context_graph_id, agent)
+    except DkgError as exc:
+        print(f"error: failed to redeliver join approval: {exc}")
+        return 1
+    delivered = result.get("delivered")
+    peer = result.get("peerId") or result.get("peer")
+    error = result.get("error")
+    print(f"Join approval re-delivered for {cfg.context_graph_id}:")
+    print(f"  agent:     {agent}")
+    print(f"  delivered: {delivered}")
+    if peer:
+        print(f"  peer:      {peer}")
+    if error:
+        print(f"  queued/error: {error}")
+    return 0
 
 
 def _cmd_curate_list(args: argparse.Namespace) -> int:

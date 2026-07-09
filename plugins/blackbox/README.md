@@ -44,8 +44,9 @@ at the repo root.
 `$BLACKBOX_HOME` defaults to `$HERMES_HOME/blackbox` and holds `ruleset.json`,
 `ruleset.lock`, `audit.jsonl`, `findings.jsonl`, and rate/reject state files.
 The installer also creates a Blackbox-owned DKG home at
-`$HERMES_HOME/blackbox/dkg` and serves it on `http://127.0.0.1:9320`, separate
-from the DKG CLI's default `~/.dkg` / `9200` node.
+`$HERMES_HOME/blackbox/dkg`, installs a Blackbox-owned DKG CLI package under
+`$HERMES_HOME/blackbox/dkg-cli`, and serves it on `http://127.0.0.1:9320`,
+separate from the DKG CLI's default `~/.dkg` / `9200` node.
 
 ## Threat model & identifiers
 
@@ -74,6 +75,7 @@ evidence stays in the node's private WM audit KA.
 | `context_graph_id` | `umanitek/blackbox-threats-staging` | `BLACKBOX_CONTEXT_GRAPH_ID` |
 | `dkg_url` | `http://127.0.0.1:9320` | `BLACKBOX_DKG_DAEMON_URL` / `BLACKBOX_DKG_URL` |
 | `dkg_home` | `$HERMES_HOME/blackbox/dkg` | `BLACKBOX_DKG_HOME` |
+| `dkg_bin` | `$HERMES_HOME/blackbox/dkg-cli/node_modules/.bin/dkg` | `BLACKBOX_DKG_BIN` |
 | `sync_interval` | `300` | `BLACKBOX_SYNC_INTERVAL` |
 | `report` | `true` | `BLACKBOX_REPORT` |
 | `daily_report_limit` | `9999` | `BLACKBOX_DAILY_REPORT_LIMIT` |
@@ -216,18 +218,36 @@ hermes blackbox sync --wait            # force a ruleset refresh after DKG catch
 hermes blackbox chat                   # dedicated Blackbox operator chat
 hermes blackbox report --type ...      # submit a NEW candidate threat to SWM
                                        #   (injection|escalation|dependency|fileaccess|skill)
-hermes blackbox setup-graph            # curator: create + register the public CG (accessPolicy 0, publishPolicy 0)
+hermes blackbox setup-graph            # curator: create + register the private/community CG
 hermes blackbox curate list --pending  # candidate threats grouped by distinct reporters
 hermes blackbox curate show <id>       # one threat + its reporters
 hermes blackbox curate approve <id>    # promote to curated threat, any of the five
                                        #   categories (share + vm/publish)
 hermes blackbox curate reject <id>     # reject locally (+ optional SWM false-positive)
+hermes blackbox curate auto-accept --once
+                                       # curator: approve pending DKG graph join requests
+hermes blackbox curate redeliver-approval --agent 0x...
+                                       # curator: re-send approval when a member is stuck at 0 rows
 hermes blackbox curate import --file … # bulk import a catalog (OSV enrichment for deps)
 hermes blackbox dashboard [--port]     # start the loopback dashboard
 hermes blackbox setup-llm              # configure the optional LLM injection reviewer
 hermes blackbox setup-llm --configure  # choose provider/key/model again
 hermes blackbox setup-llm --disable    # turn the LLM reviewer off
 ```
+
+### DKG Join Repair
+
+If a consumer node reports `Join request: this node is already a member` but
+`hermes blackbox sync --wait` still ends with `data 0, shared memory 0`, the DKG
+node may have missed the curator approval notification before syncing the graph
+`_meta` rows. Do not edit DKG SQLite state by hand. On the curator node, run:
+
+```bash
+hermes blackbox curate auto-accept --once
+hermes blackbox curate redeliver-approval --agent <consumer-agent-address>
+```
+
+Then rerun `hermes blackbox sync --wait --timeout 180` on the consumer.
 
 `hermes blackbox chat` bootstraps a managed `blackbox` profile, writes a
 Blackbox-specific `SOUL.md`, pins `context_file_max_chars` high enough for this

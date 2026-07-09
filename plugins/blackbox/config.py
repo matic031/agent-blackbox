@@ -12,12 +12,13 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Dict, Mapping, Tuple
 
 from . import constants
 
-#: The five detection categories a user can tune individually.
-DETECTION_CATEGORIES = ("injection", "escalation", "dependency", "fileaccess", "skill", "secret")
+#: The detection categories a user can tune individually.
+DETECTION_CATEGORIES = ("injection", "escalation", "dependency", "fileaccess", "skill", "secret", "ioc")
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +81,17 @@ def _default_dkg_url() -> str:
     return f"http://127.0.0.1:{port}"
 
 
+def _is_default_dkg_home(value: object) -> bool:
+    """True when a config entry points at the DKG CLI's shared default home."""
+    raw = str(value or "").strip()
+    if not raw:
+        return False
+    try:
+        return Path(raw).expanduser().resolve() == (Path.home() / ".dkg").resolve()
+    except Exception:
+        return Path(raw).expanduser() == Path.home() / ".dkg"
+
+
 @dataclass(frozen=True)
 class BlackboxConfig:
     """Resolved Blackbox settings for the current process."""
@@ -89,6 +101,7 @@ class BlackboxConfig:
     curator_peer_id: str = constants.DEFAULT_CURATOR_PEER_ID
     dkg_url: str = constants.DEFAULT_DKG_URL
     dkg_home: str = field(default_factory=lambda: str(constants.blackbox_dkg_home()))
+    dkg_bin: str = field(default_factory=lambda: str(constants.blackbox_dkg_bin()))
     sync_interval: int = 300
     report: bool = True
     daily_report_limit: int = 9999
@@ -243,11 +256,25 @@ def load_blackbox_config() -> BlackboxConfig:
         )
         context_graph_id = constants.DEFAULT_CONTEXT_GRAPH_ID
     default_dkg_home = str(constants.blackbox_dkg_home())
+    dkg_home_env = _first_env("BLACKBOX_DKG_HOME")
+    configured_dkg_home = entry.get("dkg_home") or entry.get("dkgHome")
+    if not dkg_home_env and _is_default_dkg_home(configured_dkg_home):
+        logger.info(
+            "blackbox: switching shared default dkg_home %s -> %s",
+            configured_dkg_home,
+            default_dkg_home,
+        )
+        configured_dkg_home = ""
     dkg_home = str(
-        _first_env("BLACKBOX_DKG_HOME")
-        or entry.get("dkg_home")
-        or entry.get("dkgHome")
+        dkg_home_env
+        or configured_dkg_home
         or default_dkg_home
+    ).strip()
+    dkg_bin = str(
+        _first_env("BLACKBOX_DKG_BIN")
+        or entry.get("dkg_bin")
+        or entry.get("dkgBin")
+        or constants.blackbox_dkg_bin()
     ).strip()
     dkg_url_env = _first_env("BLACKBOX_DKG_DAEMON_URL", "BLACKBOX_DKG_URL")
     dkg_url = str(
@@ -257,7 +284,7 @@ def load_blackbox_config() -> BlackboxConfig:
         or _default_dkg_url()
     ).rstrip("/")
     legacy_dkg_urls = {"http://127.0.0.1:9200", "http://localhost:9200"}
-    has_configured_dkg_home = bool(entry.get("dkg_home") or entry.get("dkgHome"))
+    has_configured_dkg_home = bool(configured_dkg_home)
     if not dkg_url_env and not has_configured_dkg_home and dkg_url in legacy_dkg_urls:
         dkg_url = _default_dkg_url()
     return BlackboxConfig(
@@ -273,6 +300,7 @@ def load_blackbox_config() -> BlackboxConfig:
         ),
         dkg_url=dkg_url,
         dkg_home=dkg_home,
+        dkg_bin=dkg_bin,
         sync_interval=_as_int(
             _env_or(entry, env="BLACKBOX_SYNC_INTERVAL", key="sync_interval", default=300), 300
         ),

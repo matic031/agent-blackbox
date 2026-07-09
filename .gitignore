@@ -147,12 +147,35 @@ infographic/
 # Local internal notes (not for the repo)
 document.md
 
-# Guardian / DKG credentials — never commit (public repo)
+# Blackbox / DKG credentials — never commit (public repo)
 auth.token
 wallets.json
 *.pem
 *.p12
 dkg.json
+# DKG node home / config — holds chain.rpcUrl with the paid RPC provider key
+.dkg/
+# Internal ops notes / support reports (may name infra: wallet, RPC provider, peer ids)
+ORIGINTRAIL_DKG_ISSUE_REPORT.md
+*_DKG_ISSUE_REPORT.md
+ORIGINTRAIL_ISSUE_REPORT_*.md
+FABLE_SEEDING_HANDOFF.md
+SOURCE_MENU.md
+STATUS.md
+agent-blackbox-community-outreach.md
+start-stack.sh
+
+# Blackbox threat-intel scratch/experimental seed pipeline files. These are
+# local working artifacts unless intentionally force-added for a seed-pipeline PR.
+scripts/build_blackbox_seed_bundle.py
+scripts/fetch_ioc_feeds.py
+scripts/fetch_safedep_ti.py
+scripts/fetch_scamsniffer_blacklist.py
+scripts/fetch_socket_threat_feed.py
+scripts/fetch_whitelist.py
+tests/plugins/test_blackbox_ioc.py
+tests/scripts/test_build_blackbox_seed_bundle.py
+tests/scripts/test_threat_source_fetchers.py
 
 testing.md
 

@@ -386,6 +386,7 @@ def create_app():
             "context_graph_id": cfg.context_graph_id,
             "dkg_url": cfg.dkg_url,
             "dkg_home": cfg.dkg_home,
+            "dkg_bin": cfg.dkg_bin,
             "node_reachable": g["node_reachable"],
             "sync_interval": cfg.sync_interval,
             "last_sync": rs.synced_at,

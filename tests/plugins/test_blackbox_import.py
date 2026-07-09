@@ -40,7 +40,7 @@ def test_seed_entries_dedups_and_dry_run_spends_nothing():
     # A real seed publishes on-chain: dry-run previews exactly which ids would be
     # published (the ledger/TRAC set) without spending anything.
     seeded, skipped, errors, new_ids = cli._seed_entries(
-        None, None, entries, publish=True, already=already, dry_run=True
+        None, None, entries, publish=True, already=already, dry_run=True, source="UnitTest"
     )
     assert (seeded, skipped, errors) == (2, 2, 0)
     assert new_ids == ["dep:npm:evil@1.0.0", "dep:npm:evil@2.0.0"]
@@ -48,7 +48,7 @@ def test_seed_entries_dedups_and_dry_run_spends_nothing():
     # A --no-publish (SWM-only) run records NOTHING in the ledger, so it can
     # never make a later real publish skip these ids as "already published".
     _, _, _, no_pub_ids = cli._seed_entries(
-        None, None, entries, publish=False, already={"dep:npm:seen@9.0.0"}, dry_run=True
+        None, None, entries, publish=False, already={"dep:npm:seen@9.0.0"}, dry_run=True, source="UnitTest"
     )
     assert no_pub_ids == []
 
@@ -66,12 +66,23 @@ def test_seed_entries_limit_caps_new_publishes_for_batching():
     ]
     already = {"dep:npm:seen@1.0.0"}
     seeded, skipped, errors, new_ids = cli._seed_entries(
-        None, None, entries, publish=True, already=already, dry_run=True, limit=2
+        None, None, entries, publish=True, already=already, dry_run=True, limit=2, source="UnitTest"
     )
     assert (seeded, skipped, errors) == (2, 1, 0)
     assert new_ids == ["dep:npm:a@1.0.0", "dep:npm:b@1.0.0"]
     # 'c' was never processed, so a follow-up run picks it up next.
     assert "dep:npm:c@1.0.0" not in already
+
+
+def test_seed_entries_requires_source_provenance():
+    entries = [
+        {"type": "dependency", "ecosystem": "npm", "name": "evil", "version": "1.0.0"},
+    ]
+    seeded, skipped, errors, new_ids = cli._seed_entries(
+        None, None, entries, publish=True, already=set(), dry_run=True
+    )
+    assert (seeded, skipped, errors) == (0, 0, 1)
+    assert new_ids == []
 
 
 # A small bumblebee-shaped catalog: one package, three malicious versions.

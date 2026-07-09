@@ -407,6 +407,51 @@ def detect_skill(tool_name: str, args: Any, ruleset: Any) -> List[Finding]:
     return out
 
 
+def detect_ioc(tool_name: str, args: Any, ruleset: Any) -> List[Finding]:
+    """Match indicators (domain/url/ip/hash/wallet/contract) in the tool args.
+
+    Extracts candidate indicators from the flattened args and looks each up in
+    the synced ``ioc`` rules. Only KNOWN-BAD values match, so extraction can be
+    broad without raising false positives on unrelated tokens. IOC findings
+    ALWAYS flag but never auto-block in this rollout (see :mod:`hooks`) — network
+    and address blocklists are higher-churn than pinned package versions, so we
+    alert first and let a curator enable blocking once the false-positive rate
+    is validated.
+    """
+    ioc_rules = getattr(ruleset, "ioc", {}) or {}
+    if not ioc_rules:
+        return []
+    text = _injection_scan_text(args)
+    if not text:
+        return []
+    out: List[Finding] = []
+    seen: set = set()
+    for ident in quads.iter_ioc_candidates(text):
+        rule = ioc_rules.get(ident)
+        if rule is None or ident in seen:
+            continue
+        seen.add(ident)
+        src = _rule_source(rule)
+        ioc_type = rule.get("iocType") or (ident.split(":", 2) + ["", ""])[1]
+        value = ident.split(":", 2)[2] if ident.count(":") >= 2 else ident
+        out.append(
+            Finding(
+                identifier=ident,
+                category="ioc",
+                severity=rule.get("severity", "high"),
+                title=rule.get("name") or f"Known-bad {ioc_type}",
+                tool_name=tool_name or "",
+                matched=value[:200],
+                evidence=f"{ioc_type} {value}"[:200],
+                confirmed=src == "public",
+                source=src,
+                kind=rule.get("kind"),
+                fields={"ioc_type": ioc_type} if src == "community" else {},
+            )
+        )
+    return out
+
+
 def discover_dependency_candidates(tool_name: str, args: Any, ruleset: Any, osv_lookup: Any) -> List[Finding]:
     """Best-effort OSV auto-discovery of vulnerable installs not in the graph.
 
@@ -607,6 +652,7 @@ def detect_all(tool_name: str, args: Any, ruleset: Any, discover: bool = True) -
         findings.extend(discover_injection(args_text, ruleset))
     findings.extend(detect_fileaccess(tool_name, args, ruleset))
     findings.extend(detect_skill(tool_name, args, ruleset))
+    findings.extend(detect_ioc(tool_name, args, ruleset))
     # Secret-value exposure always runs (not gated by discovery) — a real secret
     # in the tool args is a personal, always-on signal, never a graph candidate.
     findings.extend(detect_secret_exposure(tool_name, args))

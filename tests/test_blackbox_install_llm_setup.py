@@ -72,13 +72,21 @@ def test_unix_installer_uses_isolated_blackbox_dkg_node() -> None:
     text = INSTALL_SH.read_text()
 
     assert 'BLACKBOX_DKG_PORT="${BLACKBOX_DKG_PORT:-9320}"' in text
+    assert 'BLACKBOX_DKG_STORE_PORT="${BLACKBOX_DKG_STORE_PORT:-7879}"' in text
     assert 'BLACKBOX_DKG_HOME="${BLACKBOX_DKG_HOME:-$BLACKBOX_HOME/dkg}"' in text
+    assert 'BLACKBOX_DKG_CLI_DIR="${BLACKBOX_DKG_CLI_DIR:-$BLACKBOX_HOME/dkg-cli}"' in text
+    assert 'BLACKBOX_DKG_BIN="${BLACKBOX_DKG_BIN:-$BLACKBOX_DKG_CLI_DIR/node_modules/.bin/dkg}"' in text
     assert 'BLACKBOX_DKG_DAEMON_URL="${BLACKBOX_DKG_DAEMON_URL:-${BLACKBOX_DKG_URL:-http://127.0.0.1:$BLACKBOX_DKG_PORT}}"' in text
-    assert 'blackbox_dkg dkg hermes setup --network "$DKG_NETWORK"' in text
-    assert '--port "$BLACKBOX_DKG_PORT"' in text
-    assert '--daemon-url "$BLACKBOX_DKG_DAEMON_URL"' in text
-    assert 'blackbox_dkg dkg subscribe "$blackbox_cg" --save' in text
+    assert 'npm install --prefix "$BLACKBOX_DKG_CLI_DIR" "$BLACKBOX_DKG_PACKAGE"' in text
+    assert "ensure_blackbox_dkg_config" in text
+    assert 'blackbox_dkg start' in text
+    assert '"apiPort"] = api_port' in text
+    assert 'options["port"] = store_port' in text
+    assert 'blackbox_dkg subscribe "$blackbox_cg" --save' in text
     assert 'blackbox["dkg_home"] = dkg_home' in text
+    assert 'blackbox["dkg_bin"] = dkg_bin' in text
+    assert "npm i -g" not in text
+    assert "npm install -g" not in text
     assert '"dkg_url": "http://127.0.0.1:9200"' not in text
 
 
@@ -86,10 +94,18 @@ def test_windows_installer_uses_isolated_blackbox_dkg_node() -> None:
     text = INSTALL_PS1.read_text()
 
     assert "$DkgPort" in text and "9320" in text
+    assert "$DkgStorePort" in text and "7879" in text
     assert '$DkgHome     = if ($env:BLACKBOX_DKG_HOME)' in text
+    assert '$DkgCliDir   = if ($env:BLACKBOX_DKG_CLI_DIR)' in text
+    assert '$DkgBin      = if ($env:BLACKBOX_DKG_BIN)' in text
     assert '$DkgDaemonUrl = if ($env:BLACKBOX_DKG_DAEMON_URL)' in text
-    assert "Invoke-BlackboxDkg hermes setup --network $Network" in text
-    assert "--port $DkgPort" in text
-    assert "--daemon-url $DkgDaemonUrl" in text
+    assert "npm install --prefix $DkgCliDir $DkgPackage" in text
+    assert "Ensure-BlackboxDkgConfig" in text
+    assert "Invoke-BlackboxDkg start" in text
+    assert 'data["apiPort"] = api_port' in text
+    assert 'options["port"] = store_port' in text
     assert 'blackbox["dkg_home"] = dkg_home' in text
+    assert 'blackbox["dkg_bin"] = dkg_bin' in text
+    assert "npm i -g" not in text
+    assert "npm install -g" not in text
     assert '"dkg_url": "http://127.0.0.1:9200"' not in text

@@ -55,6 +55,7 @@ def read_settings() -> Dict[str, Any]:
             "fileaccess": "Sensitive file access",
             "skill": "Suspicious skills",
             "secret": "Secret exposure",
+            "ioc": "Malicious indicators",
         },
     }
 

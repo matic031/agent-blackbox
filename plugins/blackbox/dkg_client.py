@@ -323,6 +323,22 @@ class DkgClient:
         return self._request("POST", f"/api/context-graph/{enc}/approve-join",
                              {"agentAddress": agent_address}, timeout=_STORE_TIMEOUT)
 
+    def redeliver_join_approval(self, cg_id: str, agent_address: str) -> Dict[str, Any]:
+        """Curator-side: re-fire a join-approved notification to an approved agent.
+
+        DKG can get into an otherwise-valid "already member, but no synced _meta"
+        state after a missed approval notification or daemon restart. The v10
+        daemon exposes this route so the curator can poke the approved member
+        without touching DKG's internal SQLite state.
+        """
+        enc = urllib.parse.quote(cg_id, safe="")
+        return self._request(
+            "POST",
+            f"/api/context-graph/{enc}/redeliver-approval",
+            {"agentAddress": agent_address},
+            timeout=_STORE_TIMEOUT,
+        )
+
     def request_join(self, cg_id: str, curator_peer_id: str,
                      agent_name: str = "agent-blackbox") -> Dict[str, Any]:
         """Consumer-side: sign a join request and forward it to the curator.

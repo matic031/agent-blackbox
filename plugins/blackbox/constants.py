@@ -38,6 +38,9 @@ INJECTION_THREAT_TYPE_IRI = f"{BLACKBOX_ONTOLOGY}PromptInjectionThreat"
 ESCALATION_THREAT_TYPE_IRI = f"{BLACKBOX_ONTOLOGY}EscalationThreat"
 FILE_ACCESS_THREAT_TYPE_IRI = f"{BLACKBOX_ONTOLOGY}FileAccessThreat"
 SUSPICIOUS_SKILL_THREAT_TYPE_IRI = f"{BLACKBOX_ONTOLOGY}SuspiciousSkillThreat"
+# Indicator-of-compromise threat: a bad domain/url/ip/hash/wallet/contract the
+# agent touches. The concrete indicator type is carried in g:category.
+IOC_THREAT_TYPE_IRI = f"{BLACKBOX_ONTOLOGY}IndicatorThreat"
 REPORT_TYPE_IRI = f"{BLACKBOX_ONTOLOGY}ThreatReport"
 FALSE_POSITIVE_TYPE_IRI = f"{BLACKBOX_ONTOLOGY}FalsePositive"
 
@@ -207,3 +210,25 @@ def blackbox_dkg_home() -> Path:
     if env and env.strip():
         return Path(env).expanduser()
     return blackbox_home() / "dkg"
+
+
+def blackbox_dkg_cli_dir() -> Path:
+    """Return the Blackbox-owned DKG CLI package directory.
+
+    The installer places ``@origintrail-official/dkg`` here instead of using
+    ``npm -g``. Keeping the CLI package beside the Blackbox DKG home prevents a
+    Blackbox install from upgrading or depending on a user's unrelated DKG CLI.
+    """
+    env = os.environ.get("BLACKBOX_DKG_CLI_DIR")
+    if env and env.strip():
+        return Path(env).expanduser()
+    return blackbox_home() / "dkg-cli"
+
+
+def blackbox_dkg_bin() -> Path:
+    """Return the Blackbox-owned ``dkg`` executable path."""
+    env = os.environ.get("BLACKBOX_DKG_BIN")
+    if env and env.strip():
+        return Path(env).expanduser()
+    bin_name = "dkg.cmd" if os.name == "nt" else "dkg"
+    return blackbox_dkg_cli_dir() / "node_modules" / ".bin" / bin_name

@@ -25,8 +25,20 @@ REPO_BRANCH="${BLACKBOX_REPO_BRANCH:-feat/guardian}"
 HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
 DKG_NETWORK="${BLACKBOX_DKG_NETWORK:-mainnet-base}"   # a valid dkg mainnet (mainnet-base | mainnet-gnosis). Base uses ETH for gas. No testnet.
 BLACKBOX_HOME="${BLACKBOX_HOME:-$HERMES_HOME/blackbox}"
+BLACKBOX_DKG_PORT_EXPLICIT=false
+[ -n "${BLACKBOX_DKG_PORT+x}" ] && BLACKBOX_DKG_PORT_EXPLICIT=true
+BLACKBOX_DKG_STORE_PORT_EXPLICIT=false
+[ -n "${BLACKBOX_DKG_STORE_PORT+x}" ] && BLACKBOX_DKG_STORE_PORT_EXPLICIT=true
+BLACKBOX_DKG_URL_EXPLICIT=false
+if [ -n "${BLACKBOX_DKG_DAEMON_URL+x}" ] || [ -n "${BLACKBOX_DKG_URL+x}" ]; then
+    BLACKBOX_DKG_URL_EXPLICIT=true
+fi
 BLACKBOX_DKG_PORT="${BLACKBOX_DKG_PORT:-9320}"
+BLACKBOX_DKG_STORE_PORT="${BLACKBOX_DKG_STORE_PORT:-7879}"
 BLACKBOX_DKG_HOME="${BLACKBOX_DKG_HOME:-$BLACKBOX_HOME/dkg}"
+BLACKBOX_DKG_CLI_DIR="${BLACKBOX_DKG_CLI_DIR:-$BLACKBOX_HOME/dkg-cli}"
+BLACKBOX_DKG_BIN="${BLACKBOX_DKG_BIN:-$BLACKBOX_DKG_CLI_DIR/node_modules/.bin/dkg}"
+BLACKBOX_DKG_PACKAGE="${BLACKBOX_DKG_PACKAGE:-@origintrail-official/dkg@latest}"
 BLACKBOX_DKG_DAEMON_URL="${BLACKBOX_DKG_DAEMON_URL:-${BLACKBOX_DKG_URL:-http://127.0.0.1:$BLACKBOX_DKG_PORT}}"
 NODE_MAJOR="${BLACKBOX_NODE_MAJOR:-22}"
 BLACKBOX_CONTEXT_GRAPH_ID="${BLACKBOX_CONTEXT_GRAPH_ID:-umanitek/blackbox-threats-staging}"
@@ -42,6 +54,7 @@ BLACKBOX_INSTALL_INCOMPLETE=false
 BLACKBOX_THREAT_GRAPH_INCOMPLETE=false
 BLACKBOX_SYNC_PENDING=false
 BLACKBOX_SYNC_LOG=""
+BLACKBOX_DKG_ALREADY_RUNNING=false
 HERMES_API_KEY_VARS='OPENAI_API_KEY|ANTHROPIC_API_KEY|OPENROUTER_API_KEY|NOUS_API_KEY|ZAI_API_KEY|KIMI_API_KEY|KIMI_CN_API_KEY|MINIMAX_API_KEY|MINIMAX_CN_API_KEY|GOOGLE_API_KEY|GEMINI_API_KEY|MISTRAL_API_KEY|GROQ_API_KEY|TOGETHER_API_KEY|XAI_API_KEY'
 HERMES_API_KEY_RE="^[[:space:]]*(${HERMES_API_KEY_VARS})[[:space:]]*=[[:space:]]*[^[:space:]#]+"
 
@@ -72,17 +85,15 @@ run_detached() {
 }
 
 blackbox_dkg() {
-    DKG_HOME="$BLACKBOX_DKG_HOME" "$@"
+    DKG_HOME="$BLACKBOX_DKG_HOME" "$BLACKBOX_DKG_BIN" "$@"
 }
 
-check_blackbox_dkg_port() {
-    local port="$BLACKBOX_DKG_PORT"
-    local url="$BLACKBOX_DKG_DAEMON_URL"
-    if command -v curl >/dev/null 2>&1 && curl -fsS "$url/api/status" >/dev/null 2>&1; then
-        ok "Blackbox DKG endpoint already responds at $url"
-        return 0
-    fi
-    if "$VENV_DIR/bin/python" - "$port" <<'PYEOF'
+blackbox_has_dkg_state() {
+    [ -f "$BLACKBOX_DKG_HOME/auth.token" ] || [ -f "$BLACKBOX_DKG_HOME/config.json" ]
+}
+
+port_in_use() {
+    "$VENV_DIR/bin/python" - "$1" <<'PYEOF'
 import socket
 import sys
 
@@ -94,14 +105,164 @@ try:
 finally:
     sock.close()
 PYEOF
-    then
-        BLACKBOX_INSTALL_INCOMPLETE=true
-        BLACKBOX_THREAT_GRAPH_INCOMPLETE=true
+}
+
+set_blackbox_dkg_port() {
+    BLACKBOX_DKG_PORT="$1"
+    if [ "$BLACKBOX_DKG_URL_EXPLICIT" != true ]; then
+        BLACKBOX_DKG_DAEMON_URL="http://127.0.0.1:$BLACKBOX_DKG_PORT"
+    fi
+}
+
+choose_blackbox_dkg_port() {
+    local start="$BLACKBOX_DKG_PORT"
+    local candidate
+    for candidate in $(seq "$start" 9399); do
+        if ! port_in_use "$candidate"; then
+            set_blackbox_dkg_port "$candidate"
+            ok "Using Blackbox DKG port $BLACKBOX_DKG_PORT"
+            return 0
+        fi
+    done
+    return 1
+}
+
+choose_blackbox_dkg_store_port() {
+    local start="$BLACKBOX_DKG_STORE_PORT"
+    local candidate
+    for candidate in $(seq "$start" 7899); do
+        if ! port_in_use "$candidate"; then
+            BLACKBOX_DKG_STORE_PORT="$candidate"
+            ok "Using Blackbox Oxigraph port $BLACKBOX_DKG_STORE_PORT"
+            return 0
+        fi
+    done
+    return 1
+}
+
+check_blackbox_dkg_port() {
+    local port="$BLACKBOX_DKG_PORT"
+    local url="$BLACKBOX_DKG_DAEMON_URL"
+    if command -v curl >/dev/null 2>&1 && curl -fsS "$url/api/status" >/dev/null 2>&1; then
+        if blackbox_has_dkg_state; then
+            ok "Blackbox DKG endpoint already responds at $url"
+            BLACKBOX_DKG_ALREADY_RUNNING=true
+            return 0
+        fi
+        warn "Port $port already has a DKG endpoint, but $BLACKBOX_DKG_HOME has no Blackbox node state."
+        if [ "$BLACKBOX_DKG_PORT_EXPLICIT" = true ] || [ "$BLACKBOX_DKG_URL_EXPLICIT" = true ]; then
+            BLACKBOX_INSTALL_INCOMPLETE=true
+            BLACKBOX_THREAT_GRAPH_INCOMPLETE=true
+            step "Set BLACKBOX_DKG_PORT to a free port or stop the process on $url."
+            return 1
+        fi
+        step "Choosing a different Blackbox-owned port so the existing DKG node is untouched."
+        choose_blackbox_dkg_port || {
+            BLACKBOX_INSTALL_INCOMPLETE=true
+            BLACKBOX_THREAT_GRAPH_INCOMPLETE=true
+            warn "Could not find a free Blackbox DKG port in 9320-9399."
+            return 1
+        }
+        return 0
+    fi
+    if port_in_use "$port"; then
         warn "Port $port is already in use, but it did not answer as a DKG node at $url."
-        step "Set BLACKBOX_DKG_PORT to a free port and re-run the installer."
-        return 1
+        if [ "$BLACKBOX_DKG_PORT_EXPLICIT" = true ] || [ "$BLACKBOX_DKG_URL_EXPLICIT" = true ]; then
+            BLACKBOX_INSTALL_INCOMPLETE=true
+            BLACKBOX_THREAT_GRAPH_INCOMPLETE=true
+            step "Set BLACKBOX_DKG_PORT to a free port and re-run the installer."
+            return 1
+        fi
+        step "Choosing a different Blackbox-owned port."
+        choose_blackbox_dkg_port || {
+            BLACKBOX_INSTALL_INCOMPLETE=true
+            BLACKBOX_THREAT_GRAPH_INCOMPLETE=true
+            warn "Could not find a free Blackbox DKG port in 9320-9399."
+            return 1
+        }
     fi
     return 0
+}
+
+check_blackbox_store_port() {
+    if port_in_use "$BLACKBOX_DKG_STORE_PORT"; then
+        warn "Oxigraph port $BLACKBOX_DKG_STORE_PORT is already in use."
+        if [ "$BLACKBOX_DKG_STORE_PORT_EXPLICIT" = true ]; then
+            BLACKBOX_INSTALL_INCOMPLETE=true
+            BLACKBOX_THREAT_GRAPH_INCOMPLETE=true
+            step "Set BLACKBOX_DKG_STORE_PORT to a free port and re-run the installer."
+            return 1
+        fi
+        step "Choosing a different Blackbox-owned Oxigraph port."
+        choose_blackbox_dkg_store_port || {
+            BLACKBOX_INSTALL_INCOMPLETE=true
+            BLACKBOX_THREAT_GRAPH_INCOMPLETE=true
+            warn "Could not find a free Blackbox Oxigraph port in 7879-7899."
+            return 1
+        }
+    fi
+    return 0
+}
+
+ensure_blackbox_dkg_config() {
+    "$VENV_DIR/bin/python" - "$BLACKBOX_DKG_HOME" "$BLACKBOX_DKG_PORT" "$BLACKBOX_DKG_STORE_PORT" "$BLACKBOX_CONTEXT_GRAPH_ID" <<'PYEOF'
+import json
+import os
+import secrets
+import sys
+from pathlib import Path
+
+home = Path(sys.argv[1]).expanduser()
+api_port = int(sys.argv[2])
+store_port = int(sys.argv[3])
+context_graph = sys.argv[4]
+home.mkdir(parents=True, exist_ok=True)
+cfg_path = home / "config.json"
+if cfg_path.exists():
+    try:
+        data = json.loads(cfg_path.read_text(encoding="utf-8"))
+    except Exception:
+        data = {}
+else:
+    data = {}
+
+data.setdefault("name", "agent-blackbox")
+data["apiPort"] = api_port
+data.setdefault("listenPort", 0)
+data["nodeRole"] = "edge"
+data["networkConfig"] = "mainnet-base"
+graphs = data.get("contextGraphs")
+if not isinstance(graphs, list):
+    graphs = []
+if context_graph not in graphs:
+    graphs.append(context_graph)
+data["contextGraphs"] = graphs
+data.setdefault("autoUpdate", {"enabled": False})
+data["chain"] = {
+    "type": "evm",
+    "rpcUrl": "https://mainnet.base.org",
+    "rpcUrls": ["https://base-rpc.publicnode.com", "https://base.drpc.org"],
+    "hubAddress": "0x99Aa571fD5e681c2D27ee08A7b7989DB02541d13",
+    "chainId": "base:8453",
+}
+auth = data.get("auth") if isinstance(data.get("auth"), dict) else {}
+data["auth"] = {**auth, "enabled": True}
+store = data.get("store") if isinstance(data.get("store"), dict) else {}
+options = store.get("options") if isinstance(store.get("options"), dict) else {}
+options["port"] = store_port
+data["store"] = {"backend": "oxigraph-server", "options": options}
+cfg_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+
+token_path = home / "auth.token"
+if not token_path.exists():
+    token_path.write_text(
+        "# DKG node API token - treat this like a password\n"
+        + secrets.token_urlsafe(32)
+        + "\n",
+        encoding="utf-8",
+    )
+    os.chmod(token_path, 0o600)
+PYEOF
 }
 
 banner() {
@@ -124,8 +285,9 @@ Options:
 Environment overrides:
   BLACKBOX_REPO_URL, BLACKBOX_REPO_BRANCH, HERMES_HOME,
   BLACKBOX_NODE_MAJOR, BLACKBOX_INSTALL_DIR, BLACKBOX_CONTEXT_GRAPH_ID,
-  BLACKBOX_DKG_PORT, BLACKBOX_DKG_HOME, BLACKBOX_DKG_DAEMON_URL,
-  BLACKBOX_DKG_CATCHUP_TIMEOUT, BLACKBOX_LLM_PROVIDER,
+  BLACKBOX_DKG_PORT, BLACKBOX_DKG_STORE_PORT, BLACKBOX_DKG_HOME, BLACKBOX_DKG_CLI_DIR,
+  BLACKBOX_DKG_BIN, BLACKBOX_DKG_DAEMON_URL, BLACKBOX_DKG_CATCHUP_TIMEOUT,
+  BLACKBOX_LLM_PROVIDER,
   BLACKBOX_LLM_MODEL, BLACKBOX_LLM_KEY_SOURCE, BLACKBOX_LLM_API_KEY,
   BLACKBOX_HERMES_SETUP=reuse|always|never, BLACKBOX_AUTO_DASHBOARD=0|1,
   BLACKBOX_SYNC_MODE=background|wait
@@ -136,7 +298,9 @@ Threat-graph sync does not require a Nous subscription or model key. The LLM
 reviewer can reuse existing config, use BLACKBOX_LLM_* env values, or prompt on
 a real terminal. Blackbox uses its own DKG home and port by default:
   DKG home: $BLACKBOX_DKG_HOME
+  DKG CLI:  $BLACKBOX_DKG_BIN
   DKG URL:  $BLACKBOX_DKG_DAEMON_URL
+  Store:    http://127.0.0.1:$BLACKBOX_DKG_STORE_PORT/query
 EOF
 }
 
@@ -541,16 +705,18 @@ install_dkg() {
         return 0
     fi
 
-    if command -v dkg >/dev/null 2>&1; then
-        ok "dkg CLI already installed ($(dkg --version 2>/dev/null || echo present))"
+    mkdir -p "$BLACKBOX_DKG_CLI_DIR"
+    if [ -x "$BLACKBOX_DKG_BIN" ]; then
+        ok "Blackbox DKG CLI already installed ($("$BLACKBOX_DKG_BIN" --version 2>/dev/null || echo present))"
     else
-        step "Installing the DKG CLI (npm i -g @origintrail-official/dkg) ..."
-        if npm i -g @origintrail-official/dkg >/dev/null 2>&1; then
-            ok "dkg CLI installed"
+        step "Installing the Blackbox-owned DKG CLI ($BLACKBOX_DKG_PACKAGE) ..."
+        step "  CLI dir: $BLACKBOX_DKG_CLI_DIR"
+        if npm install --prefix "$BLACKBOX_DKG_CLI_DIR" "$BLACKBOX_DKG_PACKAGE" >/dev/null 2>&1; then
+            ok "Blackbox DKG CLI installed at $BLACKBOX_DKG_BIN"
         else
             BLACKBOX_INSTALL_INCOMPLETE=true
             BLACKBOX_THREAT_GRAPH_INCOMPLETE=true
-            warn "Global npm install failed (permissions?). The plugin is installed, but threat-graph sync is not active."
+            warn "Local npm install failed. The plugin is installed, but threat-graph sync is not active."
             dkg_manual_hint
             return 0
         fi
@@ -561,11 +727,22 @@ install_dkg() {
         dkg_manual_hint
         return 0
     fi
+    if [ "$BLACKBOX_DKG_ALREADY_RUNNING" = true ]; then
+        DKG_READY=true
+        return 0
+    fi
+    if ! check_blackbox_store_port; then
+        dkg_manual_hint
+        return 0
+    fi
+    ensure_blackbox_dkg_config
 
     step "Bootstrapping a Blackbox-owned $DKG_NETWORK node at $BLACKBOX_DKG_DAEMON_URL ..."
     step "  DKG home: $BLACKBOX_DKG_HOME"
+    step "  DKG CLI:  $BLACKBOX_DKG_BIN"
+    step "  Store:    http://127.0.0.1:$BLACKBOX_DKG_STORE_PORT/query"
     step "  (non-interactive; reading the public threat graph is free — no funds needed)"
-    if blackbox_dkg dkg hermes setup --network "$DKG_NETWORK" --port "$BLACKBOX_DKG_PORT" --daemon-url "$BLACKBOX_DKG_DAEMON_URL" --no-fund; then
+    if blackbox_dkg start; then
         ok "DKG node bootstrapped on $DKG_NETWORK"
         DKG_READY=true
     else
@@ -595,8 +772,8 @@ sync_ruleset() {
     # Subscribe the daemon (--save persists it) so it catches up the community
     # pool — a fresh node never subscribes on its own, so sync would return 0.
     local blackbox_cg="$BLACKBOX_CONTEXT_GRAPH_ID"
-    step "Subscribing the node to $blackbox_cg (dkg subscribe --save) ..."
-    if blackbox_dkg dkg subscribe "$blackbox_cg" --save >/dev/null 2>&1; then
+    step "Subscribing the node to $blackbox_cg (Blackbox DKG CLI subscribe --save) ..."
+    if blackbox_dkg subscribe "$blackbox_cg" --save >/dev/null 2>&1; then
         ok "Subscribed — the node will catch up the community pool from peers"
         wait_for_dkg_catchup "$blackbox_cg" "$BLACKBOX_DKG_CATCHUP_TIMEOUT" || true
     else
@@ -622,9 +799,9 @@ wait_for_dkg_catchup() {
     local timeout="${2:-180}"
     local deadline=$((SECONDS + timeout))
     local out status result announced=false
-    command -v dkg >/dev/null 2>&1 || return 0
+    [ -x "$BLACKBOX_DKG_BIN" ] || return 0
     while [ "$SECONDS" -lt "$deadline" ]; do
-        out="$(blackbox_dkg dkg sync catchup-status "$cg" 2>&1 || true)"
+        out="$(blackbox_dkg sync catchup-status "$cg" 2>&1 || true)"
         status="$(printf '%s\n' "$out" | awk -F: '/^[[:space:]]*Status:/ {gsub(/^[ \t]+/, "", $2); print tolower($2); exit}')"
         result="$(printf '%s\n' "$out" | awk -F: '/^[[:space:]]*Result:/ {gsub(/^[ \t]+/, "", $2); print $2; exit}')"
         case "$status" in
@@ -654,11 +831,15 @@ wait_for_dkg_catchup() {
 
 dkg_manual_hint() {
     step "To set up the DKG node later:"
-    echo "      npm i -g @origintrail-official/dkg"
+    echo "      mkdir -p \"$BLACKBOX_DKG_CLI_DIR\""
+    echo "      npm install --prefix \"$BLACKBOX_DKG_CLI_DIR\" \"$BLACKBOX_DKG_PACKAGE\""
     echo "      export BLACKBOX_DKG_HOME=\"$BLACKBOX_DKG_HOME\""
+    echo "      export BLACKBOX_DKG_BIN=\"$BLACKBOX_DKG_BIN\""
     echo "      export BLACKBOX_DKG_PORT=\"$BLACKBOX_DKG_PORT\""
+    echo "      export BLACKBOX_DKG_STORE_PORT=\"$BLACKBOX_DKG_STORE_PORT\""
     echo "      export BLACKBOX_DKG_DAEMON_URL=\"$BLACKBOX_DKG_DAEMON_URL\""
-    echo "      DKG_HOME=\"\$BLACKBOX_DKG_HOME\" dkg hermes setup --network $DKG_NETWORK --port \"\$BLACKBOX_DKG_PORT\" --daemon-url \"\$BLACKBOX_DKG_DAEMON_URL\" --no-fund"
+    echo "      # create config.json/auth.token as in scripts/blackbox-install.sh, then:"
+    echo "      DKG_HOME=\"\$BLACKBOX_DKG_HOME\" \"\$BLACKBOX_DKG_BIN\" start"
     echo "      # then re-run:  hermes blackbox sync --wait --require-rules"
 }
 
@@ -675,9 +856,9 @@ enable_and_seed() {
     fi
 
     step "Seeding plugins.entries.blackbox defaults into $HERMES_HOME/config.yaml ..."
-    if "$VENV_DIR/bin/python" - "$HERMES_HOME/config.yaml" "$DKG_NETWORK" "$BLACKBOX_CONTEXT_GRAPH_ID" "$BLACKBOX_DKG_DAEMON_URL" "$BLACKBOX_DKG_HOME" <<'PYEOF'
+    if "$VENV_DIR/bin/python" - "$HERMES_HOME/config.yaml" "$DKG_NETWORK" "$BLACKBOX_CONTEXT_GRAPH_ID" "$BLACKBOX_DKG_DAEMON_URL" "$BLACKBOX_DKG_HOME" "$BLACKBOX_DKG_BIN" <<'PYEOF'
 import sys, os
-cfg_path, network, context_graph_id, dkg_url, dkg_home = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5]
+cfg_path, network, context_graph_id, dkg_url, dkg_home, dkg_bin = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5], sys.argv[6]
 try:
     import yaml
 except Exception:
@@ -693,17 +874,30 @@ if os.path.exists(cfg_path):
 plugins = data.setdefault("plugins", {})
 entries = plugins.setdefault("entries", {})
 blackbox = entries.setdefault("blackbox", {})
-# Idempotent: only fill keys that are missing — never clobber user edits.
+# Idempotent for custom user edits, but migrate deprecated defaults that point
+# at the user's shared DKG install or pre-Blackbox Guardian graph.
 legacy_dkg_urls = {"http://127.0.0.1:9200", "http://localhost:9200"}
+legacy_graphs = {"umanitek/guardian-threats-staging", "umanitek/guardian-threats"}
+default_dkg_home = os.path.abspath(os.path.expanduser("~/.dkg"))
 added = []
 current_dkg_url = str(blackbox.get("dkg_url") or blackbox.get("dkgUrl") or "").rstrip("/")
-has_dkg_home = bool(blackbox.get("dkg_home") or blackbox.get("dkgHome"))
-if "dkg_url" not in blackbox or (current_dkg_url in legacy_dkg_urls and not has_dkg_home):
+current_dkg_home = str(blackbox.get("dkg_home") or blackbox.get("dkgHome") or "").strip()
+current_dkg_home_abs = os.path.abspath(os.path.expanduser(current_dkg_home)) if current_dkg_home else ""
+uses_shared_dkg_home = current_dkg_home_abs == default_dkg_home
+current_graph = str(blackbox.get("context_graph_id") or "")
+if "dkg_url" not in blackbox or current_dkg_url in legacy_dkg_urls or uses_shared_dkg_home:
     blackbox["dkg_url"] = dkg_url.rstrip("/")
     added.append("dkg_url")
-if "dkg_home" not in blackbox or not blackbox.get("dkg_home"):
+if "dkg_home" not in blackbox or not blackbox.get("dkg_home") or uses_shared_dkg_home:
     blackbox["dkg_home"] = dkg_home
     added.append("dkg_home")
+current_dkg_bin = str(blackbox.get("dkg_bin") or blackbox.get("dkgBin") or "").strip()
+if not current_dkg_bin or current_dkg_bin == "dkg":
+    blackbox["dkg_bin"] = dkg_bin
+    added.append("dkg_bin")
+if current_graph in legacy_graphs:
+    blackbox["context_graph_id"] = context_graph_id
+    added.append("context_graph_id")
 defaults = {
     "mode": "audit",
     # TEMPORARY: default to the private STAGING graph while production is still
@@ -899,6 +1093,8 @@ ${path_note}
   Dashboard:  http://127.0.0.1:${BLACKBOX_DASHBOARD_PORT:-9700}
   DKG node:   $BLACKBOX_DKG_DAEMON_URL
   DKG home:   $BLACKBOX_DKG_HOME
+  DKG CLI:    $BLACKBOX_DKG_BIN
+  Store:      http://127.0.0.1:$BLACKBOX_DKG_STORE_PORT/query
 
   The DKG catch-up/ruleset sync is running in the background. Do not treat this
   install as fully protected until this command succeeds:
@@ -931,6 +1127,8 @@ EOF
   Dashboard:  http://127.0.0.1:${BLACKBOX_DASHBOARD_PORT:-9700}
   DKG node:   $BLACKBOX_DKG_DAEMON_URL
   DKG home:   $BLACKBOX_DKG_HOME
+  DKG CLI:    $BLACKBOX_DKG_BIN
+  Store:      http://127.0.0.1:$BLACKBOX_DKG_STORE_PORT/query
   Docs:        $docs_url
 EOF
         echo ""
@@ -942,6 +1140,8 @@ ${path_note}
   Dashboard:  http://127.0.0.1:${BLACKBOX_DASHBOARD_PORT:-9700}
   DKG node:   $BLACKBOX_DKG_DAEMON_URL
   DKG home:   $BLACKBOX_DKG_HOME
+  DKG CLI:    $BLACKBOX_DKG_BIN
+  Store:      http://127.0.0.1:$BLACKBOX_DKG_STORE_PORT/query
   Sync now:    hermes blackbox sync --wait
   Docs:        $docs_url
 EOF
