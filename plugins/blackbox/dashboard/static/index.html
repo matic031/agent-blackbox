@@ -553,12 +553,18 @@
   .agent-reports strong { color: var(--text); font-weight: 600; }
   .attach-box { width: 100%; display: flex; justify-content: center; padding: 10px 0 2px; }
   .attach-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; width: 100%; padding: 9px 11px; border: 1px solid var(--border); border-radius: 8px; background: rgba(255,255,255,0.025); }
+  .attach-row.disabled {
+    opacity: 0.58;
+    cursor: help;
+    background: rgba(255,255,255,0.015);
+  }
   .attach-main { display: flex; align-items: center; gap: 10px; min-width: 0; flex: 1 1 auto; }
   .attach-row .set-toggle { flex: 0 0 auto; }
   .attach-list { display: flex; flex-direction: column; gap: 8px; }
   .attach-main .agent-info { min-width: 0; flex: 1 1 auto; overflow: hidden; }
   .attach-main .agent-fw { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: block; }
   .attach-path { display: block; min-width: 0; font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace; font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .attach-row.disabled .attach-path { color: var(--high); }
   .attach-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
   .attach-actions.center { justify-content: center; }
   .attach-btn { font: inherit; font-size: 12px; font-weight: 600; border-radius: 8px; padding: 7px 13px; cursor: pointer; border: 1px solid var(--border); color: var(--text); background: rgba(255,255,255,0.04); }
@@ -1105,8 +1111,11 @@
   .set-foot {
     position: sticky; bottom: 0;
     display: flex; align-items: center; gap: 12px;
-    padding: 14px 22px;
-    background: transparent;
+    padding: 16px 22px;
+    background: linear-gradient(180deg, rgba(24,24,24,0.96), var(--panel));
+    border-top: 1px solid var(--border);
+    box-shadow: 0 -18px 34px rgba(0,0,0,0.38);
+    z-index: 3;
   }
   .set-foot .set-status { flex: 1 1 auto; min-width: 0; font-size: 12px; color: var(--muted); line-height: 1.4; }
   .set-foot .set-status.ok { color: var(--mint); }
@@ -1126,12 +1135,28 @@
   .set-save:hover { filter: brightness(1.06); }
   .set-save:focus-visible { outline: 2px solid var(--text); outline-offset: 2px; }
   .set-save:disabled { opacity: 0.55; cursor: default; filter: none; }
+  .toast {
+    position: fixed; right: 22px; bottom: 22px; z-index: 1200;
+    max-width: min(360px, calc(100vw - 44px));
+    padding: 11px 14px;
+    border-radius: 10px;
+    border: 1px solid color-mix(in srgb, var(--mint) 38%, var(--border));
+    background: linear-gradient(180deg, var(--elevated), var(--panel));
+    color: var(--text);
+    font-size: 13px; font-weight: 600;
+    box-shadow: 0 18px 44px rgba(0,0,0,0.48);
+    opacity: 0; transform: translateY(8px);
+    pointer-events: none;
+    transition: opacity .18s ease, transform .18s ease;
+  }
+  .toast.show { opacity: 1; transform: none; }
+  .toast.ok { color: var(--mint); }
 
   @media (max-width: 560px) {
     .set-row { flex-wrap: wrap; }
     .cat-row { flex-wrap: wrap; }
     .set-body { padding-bottom: 88px; }
-    .set-foot { position: static; flex-wrap: wrap; background: var(--panel); border-top: 1px solid var(--border); }
+    .set-foot { position: static; flex-wrap: wrap; }
     .set-foot .set-status { flex-basis: 100%; }
     .set-cancel, .set-save { flex: 1 1 0; }
   }
@@ -1669,13 +1694,17 @@
     box.innerHTML = attachTargets.map(function (t, i) {
       var label = fwLabel(t.kind || "agent");
       var checked = t.protected ? " checked" : "";
-      return '<div class="attach-row">' +
+      var available = t.available !== false;
+      var reason = t.disabled_reason || t.reason || "This agent was not detected on this machine.";
+      var targetLabel = available ? (t.target || "") : reason;
+      var title = available ? (t.target || "") : reason;
+      return '<div class="attach-row' + (available ? '' : ' disabled') + '" title="' + esc(title) + '">' +
         '<span class="attach-main">' +
           '<span class="agent-avatar" style="--fw:' + fwColor(t.kind) + '">' + fwIcon(t.kind) + '</span>' +
           '<span class="agent-info"><span class="agent-fw">' + esc(label) + '</span>' +
-          '<span class="attach-path" title="' + esc(t.target || "") + '">' + esc(t.target || "") + '</span></span>' +
+          '<span class="attach-path" title="' + esc(title) + '">' + esc(targetLabel) + '</span></span>' +
         '</span>' +
-        '<label class="set-toggle"><input type="checkbox" class="attach-enabled" data-i="' + i + '"' + checked + ' aria-label="Protect ' + esc(label) + '" /><span class="set-track"></span></label>' +
+        '<label class="set-toggle" title="' + esc(title) + '"><input type="checkbox" ' + (available ? 'class="attach-enabled" data-i="' + i + '"' + checked : 'disabled') + ' aria-label="Protect ' + esc(label) + '" /><span class="set-track"></span></label>' +
       '</div>';
     }).join("");
     if (status) status.textContent = note || "Changes apply after agent restart.";
@@ -1695,7 +1724,7 @@
     var checks = document.querySelectorAll(".attach-enabled");
     var targets = Array.prototype.map.call(checks, function (c) {
       var t = attachTargets[Number(c.getAttribute("data-i"))];
-      if (!t) return null;
+      if (!t || t.available === false || !t.target) return null;
       return { kind: t.kind, target: t.target, enabled: !!c.checked };
     }).filter(Boolean);
     var note = $("attach-status");
@@ -3720,7 +3749,9 @@
         // refresh in-memory settings from the server's authoritative view
         if (result.settings) setState = normalizeSettings(result.settings);
         renderAllSettings();
-        setStatus("Saved.", "ok");
+        setStatus("");
+        closeSettings();
+        showToast("Changes saved successfully.", "ok");
       } else {
         var errs = Array.isArray(result.errors) && result.errors.length
           ? result.errors.join(" · ")
@@ -3976,14 +4007,16 @@
     if (panel && panel.classList.contains("open")) closeChat();
     else openChat();
   }
-  function prefillChatPrompt(prompt) {
-    var input = $("chat-input");
-    if (!input) return;
-    input.value = prompt;
-    input.focus();
-    try {
-      input.setSelectionRange(input.value.length, input.value.length);
-    } catch (_) {}
+  var toastTimer = null;
+  function showToast(message, kind) {
+    var toast = $("toast");
+    if (!toast) return;
+    toast.textContent = message || "";
+    toast.className = "toast " + (kind || "ok") + " show";
+    if (toastTimer) clearTimeout(toastTimer);
+    toastTimer = setTimeout(function () {
+      toast.className = "toast " + (kind || "ok");
+    }, 3200);
   }
   function setChatBusy(busy) {
     chatBusy = !!busy;
@@ -3992,13 +4025,13 @@
     if (send) { send.disabled = chatBusy; send.textContent = chatBusy ? "Sending…" : "Send"; }
     if (input) input.disabled = chatBusy;
   }
-  function submitChat() {
+  function submitChat(promptText) {
     if (chatBusy) return;
     var input = $("chat-input");
-    if (!input) return;
-    var text = input.value.trim();
+    if (!input && typeof promptText !== "string") return;
+    var text = (typeof promptText === "string" ? promptText : input.value).trim();
     if (!text) return;
-    input.value = "";
+    if (input) input.value = "";
     chatAdd("user", text);
     var waitIndex = 0;
     var pending = chatAdd("blackbox", CHAT_WAIT_MESSAGES[waitIndex], "pending");
@@ -4041,7 +4074,7 @@
     });
     Array.prototype.forEach.call(document.querySelectorAll(".chat-prompt"), function (btn) {
       btn.addEventListener("click", function () {
-        prefillChatPrompt(btn.getAttribute("data-prompt") || "");
+        submitChat(btn.getAttribute("data-prompt") || "");
       });
     });
     document.addEventListener("keydown", function (e) {
@@ -4065,6 +4098,8 @@
   if (!document.hidden) startPolling();
 })();
 </script>
+
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
 
 <div class="chat-scrim" id="chat-panel" aria-hidden="true">
   <aside class="chat-sheet" role="complementary" aria-labelledby="chat-title">
