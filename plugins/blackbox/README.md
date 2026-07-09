@@ -43,6 +43,9 @@ at the repo root.
 
 `$BLACKBOX_HOME` defaults to `$HERMES_HOME/blackbox` and holds `ruleset.json`,
 `ruleset.lock`, `audit.jsonl`, `findings.jsonl`, and rate/reject state files.
+The installer also creates a Blackbox-owned DKG home at
+`$HERMES_HOME/blackbox/dkg` and serves it on `http://127.0.0.1:9320`, separate
+from the DKG CLI's default `~/.dkg` / `9200` node.
 
 ## Threat model & identifiers
 
@@ -69,7 +72,8 @@ evidence stays in the node's private WM audit KA.
 |-----|---------|-----|
 | `mode` | `audit` | `BLACKBOX_MODE` |
 | `context_graph_id` | `umanitek/blackbox-threats-staging` | `BLACKBOX_CONTEXT_GRAPH_ID` |
-| `dkg_url` | `http://127.0.0.1:9200` | `DKG_DAEMON_URL` |
+| `dkg_url` | `http://127.0.0.1:9320` | `BLACKBOX_DKG_DAEMON_URL` / `BLACKBOX_DKG_URL` |
+| `dkg_home` | `$HERMES_HOME/blackbox/dkg` | `BLACKBOX_DKG_HOME` |
 | `sync_interval` | `300` | `BLACKBOX_SYNC_INTERVAL` |
 | `report` | `true` | `BLACKBOX_REPORT` |
 | `daily_report_limit` | `9999` | `BLACKBOX_DAILY_REPORT_LIMIT` |

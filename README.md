@@ -15,6 +15,8 @@
 
 Agent Blackbox is a security plugin that lives inside your AI agent and checks every action it takes - prompts, shell commands, file access, package installs, skills - against a shared threat graph on the OriginTrail Decentralized Knowledge Graph (DKG). A threat discovered by one agent protects all of them: when the graph learns about an attack, every protected agent picks it up on its next sync. It flags by default; blocking is one config switch away.
 
+Blackbox runs its own local DKG node by default at `http://127.0.0.1:9320` with state under `~/.hermes/blackbox/dkg`. That is intentional: it avoids touching a user's existing DKG CLI/node at the default `~/.dkg` / `9200`. The dashboard is separate and still runs on `9700`.
+
 ## Install
 
 ```bash
@@ -42,7 +44,13 @@ ln -sf "$PWD/venv/bin/hermes" ~/.local/bin/hermes
 
 # 4. Local DKG node (required for first-run protection)
 npm i -g @origintrail-official/dkg
-dkg hermes setup --network mainnet-base --no-fund   # reading the public graph is free
+export BLACKBOX_DKG_HOME="$HOME/.hermes/blackbox/dkg"
+export BLACKBOX_DKG_PORT=9320
+export BLACKBOX_DKG_DAEMON_URL="http://127.0.0.1:$BLACKBOX_DKG_PORT"
+DKG_HOME="$BLACKBOX_DKG_HOME" dkg hermes setup --network mainnet-base \
+  --port "$BLACKBOX_DKG_PORT" \
+  --daemon-url "$BLACKBOX_DKG_DAEMON_URL" \
+  --no-fund   # reading the public graph is free
 
 # 5. Enable Agent Blackbox and protect every local agent
 hermes plugins enable blackbox
@@ -192,7 +200,8 @@ Set under `plugins.entries.blackbox.*` in `config.yaml`.
 | Key | Default | Meaning |
 |-----|---------|---------|
 | `mode` | `audit` | `audit` or `block` |
-| `dkg_url` | `http://127.0.0.1:9200` | local DKG node |
+| `dkg_url` | `http://127.0.0.1:9320` | Blackbox-managed local DKG node |
+| `dkg_home` | `~/.hermes/blackbox/dkg` | isolated DKG node config, token, pid, and cache |
 | `context_graph_id` | `umanitek/blackbox-threats-staging` | staging curated threat graph until production is seeded |
 | `daily_report_limit` | `9999` | max threat reports sent to the community graph per day |
 | `report_min_severity` | `high` | minimum severity for heuristic candidates to be flagged and reported |

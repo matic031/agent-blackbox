@@ -38,6 +38,7 @@ export interface BlackboxConfig {
   mode: "audit" | "block";
   contextGraphId: string;
   dkgUrl: string;
+  dkgHome: string;
   syncInterval: number; // seconds
   report: boolean;
   dailyReportLimit: number;
@@ -85,6 +86,12 @@ export function defaultBlackboxHome(): string {
   return join(base, "blackbox");
 }
 
+/** Default isolated DKG home for a standalone OpenClaw Blackbox install. */
+export function defaultBlackboxDkgHome(): string {
+  const hermesHome = process.env.HERMES_HOME || join(homedir(), ".hermes");
+  return join(hermesHome, "blackbox", "dkg");
+}
+
 /**
  * Sensible out-of-the-box protected paths — high-signal credential stores an
  * agent rarely has a legitimate reason to read. Applied only when the config
@@ -101,12 +108,16 @@ export const DEFAULT_PROTECTED_PATHS: readonly string[] = [
   "~/.aws/credentials", // cloud credential store
 ];
 
+const DEFAULT_DKG_PORT = 9320;
+const DEFAULT_DKG_URL = `http://127.0.0.1:${DEFAULT_DKG_PORT}`;
+
 const DEFAULTS: BlackboxConfig = {
   mode: "audit",
   // TEMPORARY: default to the private STAGING graph while production is still
   // being seeded. TODO(launch): switch to "umanitek/blackbox-threats" (production).
   contextGraphId: "umanitek/blackbox-threats-staging",
-  dkgUrl: "http://127.0.0.1:9200",
+  dkgUrl: DEFAULT_DKG_URL,
+  dkgHome: "",
   syncInterval: 300,
   report: true,
   dailyReportLimit: 9999,
@@ -140,6 +151,13 @@ function bool(value: unknown): boolean | undefined {
     if (["false", "0", "no", "off"].includes(v)) return false;
   }
   return undefined;
+}
+
+function envDkgUrl(): string | undefined {
+  const explicit = str(process.env.BLACKBOX_DKG_DAEMON_URL) ?? str(process.env.BLACKBOX_DKG_URL);
+  if (explicit) return explicit.replace(/\/+$/, "");
+  const port = num(process.env.BLACKBOX_DKG_PORT);
+  return port !== undefined ? `http://127.0.0.1:${port}` : undefined;
 }
 
 function mode(value: unknown): "audit" | "block" | undefined {
@@ -243,7 +261,17 @@ export function resolveConfig(pluginConfig: Record<string, unknown> = {}): Black
       str(pluginConfig.contextGraphId) ??
       str(pluginConfig.context_graph_id) ??
       DEFAULTS.contextGraphId,
-    dkgUrl: str(env.DKG_DAEMON_URL) ?? str(pluginConfig.dkgUrl) ?? str(pluginConfig.dkg_url) ?? DEFAULTS.dkgUrl,
+    dkgUrl:
+      envDkgUrl() ??
+      str(pluginConfig.dkgUrl)?.replace(/\/+$/, "") ??
+      str(pluginConfig.dkg_url)?.replace(/\/+$/, "") ??
+      str(pluginConfig.daemonUrl)?.replace(/\/+$/, "") ??
+      DEFAULTS.dkgUrl,
+    dkgHome:
+      str(env.BLACKBOX_DKG_HOME) ??
+      str(pluginConfig.dkgHome) ??
+      str(pluginConfig.dkg_home) ??
+      defaultBlackboxDkgHome(),
     syncInterval:
       num(env.BLACKBOX_SYNC_INTERVAL) ??
       num(pluginConfig.syncInterval) ??

@@ -475,7 +475,7 @@ function makeSessionEnd(rt: BlackboxRuntime) {
 
 function buildRuntime(api: OpenClawPluginApi): BlackboxRuntime {
   const cfg = resolveConfig((api.pluginConfig ?? {}) as Record<string, unknown>);
-  const client = new DkgClient({ url: cfg.dkgUrl });
+  const client = new DkgClient({ url: cfg.dkgUrl, dkgHome: cfg.dkgHome });
   const ruleset = new RulesetCache({
     client,
     contextGraphId: cfg.contextGraphId,

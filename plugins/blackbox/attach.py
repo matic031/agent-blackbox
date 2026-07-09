@@ -574,7 +574,8 @@ def _merge_openclaw(data: Dict[str, Any], cfg: Dict[str, Any], load_path: Option
     desired_entry = {
         "enabled": True,
         "config": {
-            "daemonUrl": cfg["dkg_url"],
+            "dkgUrl": cfg["dkg_url"],
+            "dkgHome": cfg["dkg_home"],
             "contextGraphId": cfg["context_graph_id"],
             "mode": cfg["mode"],
             # Point OpenClaw's local findings log at THIS Hermes blackbox home so
@@ -668,6 +669,7 @@ def load_blackbox_config_snapshot() -> Dict[str, Any]:
         cfg = load_blackbox_config()
         return {
             "dkg_url": cfg.dkg_url,
+            "dkg_home": cfg.dkg_home,
             "context_graph_id": cfg.context_graph_id,
             "mode": cfg.mode,
             "blackbox_home": str(constants.blackbox_home()),
@@ -675,6 +677,7 @@ def load_blackbox_config_snapshot() -> Dict[str, Any]:
     except Exception:
         return {
             "dkg_url": constants.DEFAULT_DKG_URL,
+            "dkg_home": str(constants.blackbox_dkg_home()),
             "context_graph_id": constants.DEFAULT_CONTEXT_GRAPH_ID,
             "mode": "audit",
             "blackbox_home": str(constants.blackbox_home()),

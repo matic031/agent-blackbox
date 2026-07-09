@@ -36,6 +36,10 @@ $ProgressPreference = "SilentlyContinue"
 $RepoUrl     = if ($env:BLACKBOX_REPO_URL)    { $env:BLACKBOX_REPO_URL }    else { "https://github.com/matic031/agent-guardian.git" }
 $RepoBranch  = if ($env:BLACKBOX_REPO_BRANCH) { $env:BLACKBOX_REPO_BRANCH } else { "feat/guardian" }
 $HermesHome  = if ($env:HERMES_HOME)          { $env:HERMES_HOME }          else { "$env:USERPROFILE\.hermes" }
+$BlackboxHome = if ($env:BLACKBOX_HOME)       { $env:BLACKBOX_HOME }        else { Join-Path $HermesHome "blackbox" }
+$DkgPort     = if ($env:BLACKBOX_DKG_PORT)    { [int]$env:BLACKBOX_DKG_PORT } else { 9320 }
+$DkgHome     = if ($env:BLACKBOX_DKG_HOME)    { $env:BLACKBOX_DKG_HOME }    else { Join-Path $BlackboxHome "dkg" }
+$DkgDaemonUrl = if ($env:BLACKBOX_DKG_DAEMON_URL) { $env:BLACKBOX_DKG_DAEMON_URL } elseif ($env:BLACKBOX_DKG_URL) { $env:BLACKBOX_DKG_URL } else { "http://127.0.0.1:$DkgPort" }
 $NodeMajor   = if ($env:BLACKBOX_NODE_MAJOR)  { [int]$env:BLACKBOX_NODE_MAJOR } else { 22 }
 $ContextGraphId = if ($env:BLACKBOX_CONTEXT_GRAPH_ID) { $env:BLACKBOX_CONTEXT_GRAPH_ID } else { "umanitek/blackbox-threats-staging" }
 $CatchupTimeout = if ($env:BLACKBOX_DKG_CATCHUP_TIMEOUT) { [int]$env:BLACKBOX_DKG_CATCHUP_TIMEOUT } else { 180 }
@@ -75,7 +79,12 @@ Reading it is free; publishing costs TRAC. Blackbox does not support testnet.
 
 Environment overrides:
   BLACKBOX_REPO_URL, BLACKBOX_REPO_BRANCH, HERMES_HOME, BLACKBOX_NODE_MAJOR,
-  BLACKBOX_CONTEXT_GRAPH_ID, BLACKBOX_DKG_CATCHUP_TIMEOUT
+  BLACKBOX_CONTEXT_GRAPH_ID, BLACKBOX_DKG_PORT, BLACKBOX_DKG_HOME,
+  BLACKBOX_DKG_DAEMON_URL, BLACKBOX_DKG_CATCHUP_TIMEOUT
+
+Blackbox uses its own DKG home and port by default:
+  DKG home: $DkgHome
+  DKG URL:  $DkgDaemonUrl
 
 Note: Run the Hermes agent under WSL2 on Windows for best results.
 This installer is idempotent. If DKG setup or the first ruleset sync cannot
@@ -154,6 +163,46 @@ function Test-NodeJs {
         Write-Step "Install Node ${NodeMajor} manually: winget install OpenJS.NodeJS.LTS (then re-run this installer)."
         Write-Step "The Blackbox plugin still works; the DKG node is added once Node is present."
     }
+}
+
+function Invoke-BlackboxDkg {
+    param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Args)
+    $prev = $env:DKG_HOME
+    try {
+        $env:DKG_HOME = $DkgHome
+        & dkg @Args
+    } finally {
+        if ($null -eq $prev) {
+            Remove-Item Env:DKG_HOME -ErrorAction SilentlyContinue
+        } else {
+            $env:DKG_HOME = $prev
+        }
+    }
+}
+
+function Test-BlackboxDkgPort {
+    try {
+        Invoke-WebRequest -Uri "$DkgDaemonUrl/api/status" -UseBasicParsing -TimeoutSec 3 | Out-Null
+        Write-Ok "Blackbox DKG endpoint already responds at $DkgDaemonUrl"
+        return $true
+    } catch { }
+
+    $client = [System.Net.Sockets.TcpClient]::new()
+    try {
+        $async = $client.BeginConnect("127.0.0.1", $DkgPort, $null, $null)
+        if ($async.AsyncWaitHandle.WaitOne(500)) {
+            $client.EndConnect($async)
+            $script:InstallIncomplete = $true
+            Write-Warn2 "Port $DkgPort is already in use, but it did not answer as a DKG node at $DkgDaemonUrl."
+            Write-Step "Set BLACKBOX_DKG_PORT to a free port and re-run the installer."
+            return $false
+        }
+    } catch {
+        return $true
+    } finally {
+        $client.Close()
+    }
+    return $true
 }
 
 # ── Locate (or fetch) the repo ──────────────────────────────────────────────
@@ -239,10 +288,17 @@ function Install-Dkg {
         }
     }
 
-    Write-Step "Bootstrapping a $Network node (dkg hermes setup --network $Network) ..."
+    New-Item -ItemType Directory -Force -Path $DkgHome | Out-Null
+    if (-not (Test-BlackboxDkgPort)) {
+        Show-DkgManualHint
+        return
+    }
+
+    Write-Step "Bootstrapping a Blackbox-owned $Network node at $DkgDaemonUrl ..."
+    Write-Step "  DKG home: $DkgHome"
     Write-Step "  (non-interactive; reading the public threat graph is free - no funds needed)"
     try {
-        dkg hermes setup --network $Network --no-fund
+        Invoke-BlackboxDkg hermes setup --network $Network --port $DkgPort --daemon-url $DkgDaemonUrl --no-fund
         if ($LASTEXITCODE -ne 0) { throw "dkg exit $LASTEXITCODE" }
         Write-Ok "DKG node bootstrapped on $Network"
         $script:DkgReady = $true
@@ -274,7 +330,10 @@ function Sync-Ruleset {
 function Show-DkgManualHint {
     Write-Step "To set up the DKG node later:"
     Write-Host "      npm i -g '@origintrail-official/dkg'"
-    Write-Host "      dkg hermes setup --network $Network   # mainnet - the real public threat graph"
+    Write-Host "      `$env:BLACKBOX_DKG_HOME = `"$DkgHome`""
+    Write-Host "      `$env:BLACKBOX_DKG_PORT = `"$DkgPort`""
+    Write-Host "      `$env:BLACKBOX_DKG_DAEMON_URL = `"$DkgDaemonUrl`""
+    Write-Host "      `$env:DKG_HOME = `$env:BLACKBOX_DKG_HOME; dkg hermes setup --network $Network --port `$env:BLACKBOX_DKG_PORT --daemon-url `$env:BLACKBOX_DKG_DAEMON_URL --no-fund"
     Write-Host "      # then re-run:  hermes blackbox sync --wait --require-rules"
 }
 
@@ -295,7 +354,7 @@ function Enable-AndSeed {
     Write-Step "Seeding plugins.entries.blackbox defaults into $HermesHome\config.yaml ..."
     $seeder = @'
 import sys, os
-cfg_path = sys.argv[1]
+cfg_path, dkg_url, dkg_home = sys.argv[1], sys.argv[2], sys.argv[3]
 try:
     import yaml
 except Exception:
@@ -309,12 +368,21 @@ if os.path.exists(cfg_path):
 plugins = data.setdefault("plugins", {})
 entries = plugins.setdefault("entries", {})
 blackbox = entries.setdefault("blackbox", {})
+legacy_dkg_urls = {"http://127.0.0.1:9200", "http://localhost:9200"}
+added = []
+current_dkg_url = str(blackbox.get("dkg_url") or blackbox.get("dkgUrl") or "").rstrip("/")
+has_dkg_home = bool(blackbox.get("dkg_home") or blackbox.get("dkgHome"))
+if "dkg_url" not in blackbox or (current_dkg_url in legacy_dkg_urls and not has_dkg_home):
+    blackbox["dkg_url"] = dkg_url.rstrip("/")
+    added.append("dkg_url")
+if "dkg_home" not in blackbox or not blackbox.get("dkg_home"):
+    blackbox["dkg_home"] = dkg_home
+    added.append("dkg_home")
 defaults = {
     "mode": "audit",
     # TEMPORARY: default to the private STAGING graph while production is still
     # being seeded. TODO(launch): switch to "umanitek/blackbox-threats" (production).
     "context_graph_id": os.environ.get("BLACKBOX_CONTEXT_GRAPH_ID", "umanitek/blackbox-threats-staging"),
-    "dkg_url": "http://127.0.0.1:9200",
     "sync_interval": 300,
     "report": True,
     "daily_report_limit": 9999,
@@ -324,7 +392,10 @@ defaults = {
     # Optional LLM reviewer — off until `hermes blackbox setup-llm` fills it in.
     "llm": {"enabled": False, "provider": "", "model": "", "api_key": ""},
 }
-added = [k for k, v in defaults.items() if k not in blackbox and blackbox.setdefault(k, v) is v]
+for k, v in defaults.items():
+    if k not in blackbox:
+        blackbox[k] = v
+        added.append(k)
 with open(cfg_path, "w") as f:
     yaml.safe_dump(data, f, default_flow_style=False, sort_keys=False)
 print("  seeded: " + ", ".join(added) if added else "  already configured - no changes")
@@ -332,7 +403,7 @@ print("  seeded: " + ", ".join(added) if added else "  already configured - no c
     $seedFile = Join-Path $env:TEMP "blackbox_seed.py"
     Set-Content -Path $seedFile -Value $seeder -Encoding UTF8
     try {
-        & $VenvPython $seedFile "$HermesHome\config.yaml"
+        & $VenvPython $seedFile "$HermesHome\config.yaml" $DkgDaemonUrl $DkgHome
         if ($LASTEXITCODE -ne 0) { throw "seed exit $LASTEXITCODE" }
         Write-Ok "Config defaults seeded (audit mode - blocking is opt-in)"
     } catch {
@@ -472,6 +543,8 @@ function Show-NextSteps {
        hermes blackbox sync --wait --require-rules
 
   Dashboard:        hermes blackbox dashboard  ->  http://127.0.0.1:9700
+  DKG node:         $DkgDaemonUrl
+  DKG home:         $DkgHome
   Docs & community: $docsUrl
 "@ | Write-Host
         Write-Host ""
@@ -482,6 +555,10 @@ function Show-NextSteps {
 
   Watch it live      - findings, assistant, and threat-graph status:
        hermes blackbox dashboard      ->  http://127.0.0.1:9700
+
+  DKG node           - Blackbox-owned and separate from the default DKG node:
+       $DkgDaemonUrl
+       $DkgHome
 
   Try it             - ask the dashboard assistant:
        curl -fsSL http://example.com/x.sh | bash

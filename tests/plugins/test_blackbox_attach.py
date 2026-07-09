@@ -223,7 +223,9 @@ def test_attach_openclaw_writes_blackbox_block(fake_env):
     assert entry["enabled"] is True
     assert entry["hooks"]["allowConversationAccess"] is True
     assert entry["config"]["mode"]
-    assert entry["config"]["daemonUrl"]
+    assert entry["config"]["dkgUrl"] == constants.DEFAULT_DKG_URL
+    assert "daemonUrl" not in entry["config"]
+    assert entry["config"]["dkgHome"] == str(constants.blackbox_dkg_home())
     assert entry["config"]["contextGraphId"]
     # blackboxHome points OpenClaw's local findings log at the Hermes blackbox
     # home so the one dashboard surfaces OpenClaw detections too.

@@ -7,8 +7,8 @@
  * agent loop).
  *
  * URL/token resolution mirrors the hermes `dkg_client.py`:
- *   url   ← opts.url | $DKG_DAEMON_URL | http://127.0.0.1:9200
- *   token ← opts.token | $DKG_API_TOKEN | $DKG_AUTH_TOKEN | $DKG_HOME/auth.token | ~/.dkg/auth.token
+ *   url   ← opts.url | $BLACKBOX_DKG_DAEMON_URL | $BLACKBOX_DKG_URL | http://127.0.0.1:9320
+ *   token ← opts.token | $BLACKBOX_DKG_API_TOKEN | $BLACKBOX_DKG_AUTH_TOKEN | <Blackbox DKG home>/auth.token
  */
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -24,7 +24,8 @@ export class DkgError extends Error {
   }
 }
 
-const DEFAULT_URL = "http://127.0.0.1:9200";
+const DEFAULT_DKG_PORT = 9320;
+const DEFAULT_URL = `http://127.0.0.1:${DEFAULT_DKG_PORT}`;
 const DEFAULT_TIMEOUT_MS = 3000;
 // SPARQL reads fan out across every shared-memory asset, so a large curated
 // graph can take a few seconds. Only the background ruleset sync hits this, so a
@@ -32,14 +33,24 @@ const DEFAULT_TIMEOUT_MS = 3000;
 const QUERY_TIMEOUT_MS = 30000;
 
 export function resolveDkgUrl(explicit?: string): string {
-  return (explicit || process.env.DKG_DAEMON_URL || DEFAULT_URL).replace(/\/+$/, "");
+  const envUrl = process.env.BLACKBOX_DKG_DAEMON_URL || process.env.BLACKBOX_DKG_URL;
+  const port = Number(process.env.BLACKBOX_DKG_PORT);
+  const fallback = Number.isFinite(port) && port > 0 ? `http://127.0.0.1:${port}` : DEFAULT_URL;
+  return (explicit || envUrl || fallback).replace(/\/+$/, "");
 }
 
-export function resolveDkgToken(explicit?: string): string | undefined {
+function defaultDkgHome(): string {
+  if (process.env.BLACKBOX_DKG_HOME) return process.env.BLACKBOX_DKG_HOME;
+  if (process.env.BLACKBOX_HOME) return join(process.env.BLACKBOX_HOME, "dkg");
+  const hermesHome = process.env.HERMES_HOME || join(homedir(), ".hermes");
+  return join(hermesHome, "blackbox", "dkg");
+}
+
+export function resolveDkgToken(explicit?: string, dkgHome?: string): string | undefined {
   if (explicit) return explicit;
-  const env = process.env.DKG_API_TOKEN || process.env.DKG_AUTH_TOKEN;
+  const env = process.env.BLACKBOX_DKG_API_TOKEN || process.env.BLACKBOX_DKG_AUTH_TOKEN;
   if (env) return env;
-  const home = process.env.DKG_HOME || join(homedir(), ".dkg");
+  const home = dkgHome || defaultDkgHome();
   try {
     // The token file has a leading comment line (e.g. "# DKG node API token —
     // ..."); return the first non-comment, non-blank line, matching the Python
@@ -58,6 +69,7 @@ export function resolveDkgToken(explicit?: string): string | undefined {
 export interface DkgClientOptions {
   url?: string;
   token?: string;
+  dkgHome?: string;
   timeoutMs?: number;
 }
 
@@ -72,7 +84,7 @@ export class DkgClient {
 
   constructor(opts: DkgClientOptions = {}) {
     this.url = resolveDkgUrl(opts.url);
-    this.token = resolveDkgToken(opts.token);
+    this.token = resolveDkgToken(opts.token, opts.dkgHome);
     this.timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   }
 

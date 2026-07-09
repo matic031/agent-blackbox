@@ -81,7 +81,7 @@ def _report_and_audit(cfg: BlackboxConfig, event: str, findings: List[detection.
         return
     client: Optional[DkgClient] = None
     try:
-        client = DkgClient(url=cfg.dkg_url)
+        client = DkgClient(url=cfg.dkg_url, dkg_home=cfg.dkg_home)
     except Exception:
         client = None
     for finding in finding_dicts:
@@ -340,6 +340,10 @@ def on_pre_tool_call(
                 f for f in findings
                 if (f.confirmed or f.source in ("custom", "secret"))
                 and getattr(f, "kind", None) != constants.KIND_VULNERABILITY
+                # IOC findings alert but never auto-block in this rollout: network
+                # and crypto-address blocklists are higher-churn/higher-FP than
+                # pinned package versions, so validate them in audit mode first.
+                and f.category != "ioc"
                 and cfg.meets_block_threshold(f.severity)
             ]
             if blocking:

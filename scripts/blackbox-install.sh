@@ -24,6 +24,10 @@ REPO_URL="${BLACKBOX_REPO_URL:-https://github.com/matic031/agent-guardian.git}"
 REPO_BRANCH="${BLACKBOX_REPO_BRANCH:-feat/guardian}"
 HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
 DKG_NETWORK="${BLACKBOX_DKG_NETWORK:-mainnet-base}"   # a valid dkg mainnet (mainnet-base | mainnet-gnosis). Base uses ETH for gas. No testnet.
+BLACKBOX_HOME="${BLACKBOX_HOME:-$HERMES_HOME/blackbox}"
+BLACKBOX_DKG_PORT="${BLACKBOX_DKG_PORT:-9320}"
+BLACKBOX_DKG_HOME="${BLACKBOX_DKG_HOME:-$BLACKBOX_HOME/dkg}"
+BLACKBOX_DKG_DAEMON_URL="${BLACKBOX_DKG_DAEMON_URL:-${BLACKBOX_DKG_URL:-http://127.0.0.1:$BLACKBOX_DKG_PORT}}"
 NODE_MAJOR="${BLACKBOX_NODE_MAJOR:-22}"
 BLACKBOX_CONTEXT_GRAPH_ID="${BLACKBOX_CONTEXT_GRAPH_ID:-umanitek/blackbox-threats-staging}"
 BLACKBOX_DKG_CATCHUP_TIMEOUT="${BLACKBOX_DKG_CATCHUP_TIMEOUT:-180}"
@@ -67,6 +71,39 @@ run_detached() {
     nohup "$@" >"$log_file" 2>&1 &
 }
 
+blackbox_dkg() {
+    DKG_HOME="$BLACKBOX_DKG_HOME" "$@"
+}
+
+check_blackbox_dkg_port() {
+    local port="$BLACKBOX_DKG_PORT"
+    local url="$BLACKBOX_DKG_DAEMON_URL"
+    if command -v curl >/dev/null 2>&1 && curl -fsS "$url/api/status" >/dev/null 2>&1; then
+        ok "Blackbox DKG endpoint already responds at $url"
+        return 0
+    fi
+    if "$VENV_DIR/bin/python" - "$port" <<'PYEOF'
+import socket
+import sys
+
+port = int(sys.argv[1])
+sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+sock.settimeout(0.5)
+try:
+    raise SystemExit(0 if sock.connect_ex(("127.0.0.1", port)) == 0 else 1)
+finally:
+    sock.close()
+PYEOF
+    then
+        BLACKBOX_INSTALL_INCOMPLETE=true
+        BLACKBOX_THREAT_GRAPH_INCOMPLETE=true
+        warn "Port $port is already in use, but it did not answer as a DKG node at $url."
+        step "Set BLACKBOX_DKG_PORT to a free port and re-run the installer."
+        return 1
+    fi
+    return 0
+}
+
 banner() {
     echo ""
     echo -e "${MINT}${BOLD}"
@@ -87,6 +124,7 @@ Options:
 Environment overrides:
   BLACKBOX_REPO_URL, BLACKBOX_REPO_BRANCH, HERMES_HOME,
   BLACKBOX_NODE_MAJOR, BLACKBOX_INSTALL_DIR, BLACKBOX_CONTEXT_GRAPH_ID,
+  BLACKBOX_DKG_PORT, BLACKBOX_DKG_HOME, BLACKBOX_DKG_DAEMON_URL,
   BLACKBOX_DKG_CATCHUP_TIMEOUT, BLACKBOX_LLM_PROVIDER,
   BLACKBOX_LLM_MODEL, BLACKBOX_LLM_KEY_SOURCE, BLACKBOX_LLM_API_KEY,
   BLACKBOX_HERMES_SETUP=reuse|always|never, BLACKBOX_AUTO_DASHBOARD=0|1,
@@ -96,7 +134,9 @@ Installs Blackbox in audit mode. Hermes model/API setup reuses existing keys by
 default and never opens the setup wizard unless BLACKBOX_HERMES_SETUP=always.
 Threat-graph sync does not require a Nous subscription or model key. The LLM
 reviewer can reuse existing config, use BLACKBOX_LLM_* env values, or prompt on
-a real terminal.
+a real terminal. Blackbox uses its own DKG home and port by default:
+  DKG home: $BLACKBOX_DKG_HOME
+  DKG URL:  $BLACKBOX_DKG_DAEMON_URL
 EOF
 }
 
@@ -516,9 +556,16 @@ install_dkg() {
         fi
     fi
 
-    step "Bootstrapping a $DKG_NETWORK node (dkg hermes setup --network $DKG_NETWORK) ..."
+    mkdir -p "$BLACKBOX_DKG_HOME"
+    if ! check_blackbox_dkg_port; then
+        dkg_manual_hint
+        return 0
+    fi
+
+    step "Bootstrapping a Blackbox-owned $DKG_NETWORK node at $BLACKBOX_DKG_DAEMON_URL ..."
+    step "  DKG home: $BLACKBOX_DKG_HOME"
     step "  (non-interactive; reading the public threat graph is free — no funds needed)"
-    if dkg hermes setup --network "$DKG_NETWORK" --no-fund; then
+    if blackbox_dkg dkg hermes setup --network "$DKG_NETWORK" --port "$BLACKBOX_DKG_PORT" --daemon-url "$BLACKBOX_DKG_DAEMON_URL" --no-fund; then
         ok "DKG node bootstrapped on $DKG_NETWORK"
         DKG_READY=true
     else
@@ -549,7 +596,7 @@ sync_ruleset() {
     # pool — a fresh node never subscribes on its own, so sync would return 0.
     local blackbox_cg="$BLACKBOX_CONTEXT_GRAPH_ID"
     step "Subscribing the node to $blackbox_cg (dkg subscribe --save) ..."
-    if dkg subscribe "$blackbox_cg" --save >/dev/null 2>&1; then
+    if blackbox_dkg dkg subscribe "$blackbox_cg" --save >/dev/null 2>&1; then
         ok "Subscribed — the node will catch up the community pool from peers"
         wait_for_dkg_catchup "$blackbox_cg" "$BLACKBOX_DKG_CATCHUP_TIMEOUT" || true
     else
@@ -577,7 +624,7 @@ wait_for_dkg_catchup() {
     local out status result announced=false
     command -v dkg >/dev/null 2>&1 || return 0
     while [ "$SECONDS" -lt "$deadline" ]; do
-        out="$(dkg sync catchup-status "$cg" 2>&1 || true)"
+        out="$(blackbox_dkg dkg sync catchup-status "$cg" 2>&1 || true)"
         status="$(printf '%s\n' "$out" | awk -F: '/^[[:space:]]*Status:/ {gsub(/^[ \t]+/, "", $2); print tolower($2); exit}')"
         result="$(printf '%s\n' "$out" | awk -F: '/^[[:space:]]*Result:/ {gsub(/^[ \t]+/, "", $2); print $2; exit}')"
         case "$status" in
@@ -608,7 +655,10 @@ wait_for_dkg_catchup() {
 dkg_manual_hint() {
     step "To set up the DKG node later:"
     echo "      npm i -g @origintrail-official/dkg"
-    echo "      dkg hermes setup --network $DKG_NETWORK   # mainnet — the real public threat graph"
+    echo "      export BLACKBOX_DKG_HOME=\"$BLACKBOX_DKG_HOME\""
+    echo "      export BLACKBOX_DKG_PORT=\"$BLACKBOX_DKG_PORT\""
+    echo "      export BLACKBOX_DKG_DAEMON_URL=\"$BLACKBOX_DKG_DAEMON_URL\""
+    echo "      DKG_HOME=\"\$BLACKBOX_DKG_HOME\" dkg hermes setup --network $DKG_NETWORK --port \"\$BLACKBOX_DKG_PORT\" --daemon-url \"\$BLACKBOX_DKG_DAEMON_URL\" --no-fund"
     echo "      # then re-run:  hermes blackbox sync --wait --require-rules"
 }
 
@@ -625,9 +675,9 @@ enable_and_seed() {
     fi
 
     step "Seeding plugins.entries.blackbox defaults into $HERMES_HOME/config.yaml ..."
-    if "$VENV_DIR/bin/python" - "$HERMES_HOME/config.yaml" "$DKG_NETWORK" "$BLACKBOX_CONTEXT_GRAPH_ID" <<'PYEOF'
+    if "$VENV_DIR/bin/python" - "$HERMES_HOME/config.yaml" "$DKG_NETWORK" "$BLACKBOX_CONTEXT_GRAPH_ID" "$BLACKBOX_DKG_DAEMON_URL" "$BLACKBOX_DKG_HOME" <<'PYEOF'
 import sys, os
-cfg_path, network, context_graph_id = sys.argv[1], sys.argv[2], sys.argv[3]
+cfg_path, network, context_graph_id, dkg_url, dkg_home = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5]
 try:
     import yaml
 except Exception:
@@ -644,12 +694,21 @@ plugins = data.setdefault("plugins", {})
 entries = plugins.setdefault("entries", {})
 blackbox = entries.setdefault("blackbox", {})
 # Idempotent: only fill keys that are missing — never clobber user edits.
+legacy_dkg_urls = {"http://127.0.0.1:9200", "http://localhost:9200"}
+added = []
+current_dkg_url = str(blackbox.get("dkg_url") or blackbox.get("dkgUrl") or "").rstrip("/")
+has_dkg_home = bool(blackbox.get("dkg_home") or blackbox.get("dkgHome"))
+if "dkg_url" not in blackbox or (current_dkg_url in legacy_dkg_urls and not has_dkg_home):
+    blackbox["dkg_url"] = dkg_url.rstrip("/")
+    added.append("dkg_url")
+if "dkg_home" not in blackbox or not blackbox.get("dkg_home"):
+    blackbox["dkg_home"] = dkg_home
+    added.append("dkg_home")
 defaults = {
     "mode": "audit",
     # TEMPORARY: default to the private STAGING graph while production is still
     # being seeded. TODO(launch): switch to "umanitek/blackbox-threats" (production).
     "context_graph_id": context_graph_id,
-    "dkg_url": "http://127.0.0.1:9200",
     "sync_interval": 300,
     "report": True,
     "daily_report_limit": 9999,
@@ -659,7 +718,10 @@ defaults = {
     # Optional LLM reviewer — off until `hermes blackbox setup-llm` fills it in.
     "llm": {"enabled": False, "provider": "", "model": "", "api_key": ""},
 }
-added = [k for k, v in defaults.items() if k not in blackbox and blackbox.setdefault(k, v) is v]
+for k, v in defaults.items():
+    if k not in blackbox:
+        blackbox[k] = v
+        added.append(k)
 with open(cfg_path, "w") as f:
     yaml.safe_dump(data, f, default_flow_style=False, sort_keys=False)
 if added:
@@ -835,6 +897,8 @@ next_steps() {
         cat <<EOF
 ${path_note}
   Dashboard:  http://127.0.0.1:${BLACKBOX_DASHBOARD_PORT:-9700}
+  DKG node:   $BLACKBOX_DKG_DAEMON_URL
+  DKG home:   $BLACKBOX_DKG_HOME
 
   The DKG catch-up/ruleset sync is running in the background. Do not treat this
   install as fully protected until this command succeeds:
@@ -865,6 +929,8 @@ EOF
         fi
         cat <<EOF
   Dashboard:  http://127.0.0.1:${BLACKBOX_DASHBOARD_PORT:-9700}
+  DKG node:   $BLACKBOX_DKG_DAEMON_URL
+  DKG home:   $BLACKBOX_DKG_HOME
   Docs:        $docs_url
 EOF
         echo ""
@@ -874,6 +940,8 @@ EOF
     cat <<EOF
 ${path_note}
   Dashboard:  http://127.0.0.1:${BLACKBOX_DASHBOARD_PORT:-9700}
+  DKG node:   $BLACKBOX_DKG_DAEMON_URL
+  DKG home:   $BLACKBOX_DKG_HOME
   Sync now:    hermes blackbox sync --wait
   Docs:        $docs_url
 EOF

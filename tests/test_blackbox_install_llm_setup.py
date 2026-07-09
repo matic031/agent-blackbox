@@ -8,6 +8,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 INSTALL_SH = REPO_ROOT / "scripts" / "blackbox-install.sh"
+INSTALL_PS1 = REPO_ROOT / "scripts" / "blackbox-install.ps1"
 
 
 def _extract_function_body(name: str) -> str:
@@ -65,3 +66,30 @@ def test_hermes_key_reuse_finds_existing_env_files() -> None:
     assert '"$HOME/.hermes/.env"' in body
     assert "Reused existing Hermes API key configuration" in body
     assert "grep -E \"$HERMES_API_KEY_RE\"" in body
+
+
+def test_unix_installer_uses_isolated_blackbox_dkg_node() -> None:
+    text = INSTALL_SH.read_text()
+
+    assert 'BLACKBOX_DKG_PORT="${BLACKBOX_DKG_PORT:-9320}"' in text
+    assert 'BLACKBOX_DKG_HOME="${BLACKBOX_DKG_HOME:-$BLACKBOX_HOME/dkg}"' in text
+    assert 'BLACKBOX_DKG_DAEMON_URL="${BLACKBOX_DKG_DAEMON_URL:-${BLACKBOX_DKG_URL:-http://127.0.0.1:$BLACKBOX_DKG_PORT}}"' in text
+    assert 'blackbox_dkg dkg hermes setup --network "$DKG_NETWORK"' in text
+    assert '--port "$BLACKBOX_DKG_PORT"' in text
+    assert '--daemon-url "$BLACKBOX_DKG_DAEMON_URL"' in text
+    assert 'blackbox_dkg dkg subscribe "$blackbox_cg" --save' in text
+    assert 'blackbox["dkg_home"] = dkg_home' in text
+    assert '"dkg_url": "http://127.0.0.1:9200"' not in text
+
+
+def test_windows_installer_uses_isolated_blackbox_dkg_node() -> None:
+    text = INSTALL_PS1.read_text()
+
+    assert "$DkgPort" in text and "9320" in text
+    assert '$DkgHome     = if ($env:BLACKBOX_DKG_HOME)' in text
+    assert '$DkgDaemonUrl = if ($env:BLACKBOX_DKG_DAEMON_URL)' in text
+    assert "Invoke-BlackboxDkg hermes setup --network $Network" in text
+    assert "--port $DkgPort" in text
+    assert "--daemon-url $DkgDaemonUrl" in text
+    assert 'blackbox["dkg_home"] = dkg_home' in text
+    assert '"dkg_url": "http://127.0.0.1:9200"' not in text

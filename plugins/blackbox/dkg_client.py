@@ -1,9 +1,10 @@
 """Stdlib HTTP client for the local DKG v10 node.
 
 Wraps the daemon's write/query API with a tiny, dependency-free ``urllib``
-client. URL and token resolution mirror the original telemetry plugin
-(``DKG_DAEMON_URL`` env → default; ``DKG_API_TOKEN``/``DKG_AUTH_TOKEN`` env →
-``$DKG_HOME/auth.token``). Every request uses a short timeout and raises
+client. Blackbox defaults to its own daemon URL and DKG home, not the DKG CLI's
+``~/.dkg``/9200 defaults. URL/token resolution is
+``BLACKBOX_DKG_*`` env → Blackbox config/home → ``$BLACKBOX_DKG_HOME/auth.token``.
+Every request uses a short timeout and raises
 :class:`DkgError` on a non-2xx response; all callers fail open.
 """
 
@@ -78,34 +79,33 @@ def _coerce_chain_id(value: Any) -> Optional[int]:
     return None
 
 
-def _dkg_home() -> Path:
-    env = os.environ.get("DKG_HOME")
-    return Path(env).expanduser() if env else Path.home() / ".dkg"
+def _dkg_home(explicit: Optional[str] = None) -> Path:
+    if explicit:
+        return Path(explicit).expanduser()
+    env = os.environ.get("BLACKBOX_DKG_HOME")
+    return Path(env).expanduser() if env else constants.blackbox_dkg_home()
 
 
 def load_daemon_url() -> str:
-    """Resolve the daemon URL: env override → hermes ``dkg.json`` → default."""
-    env = os.environ.get("DKG_DAEMON_URL") or os.environ.get("BLACKBOX_DKG_DAEMON_URL")
+    """Resolve the Blackbox daemon URL from Blackbox-specific settings."""
+    env = os.environ.get("BLACKBOX_DKG_DAEMON_URL") or os.environ.get("BLACKBOX_DKG_URL")
     if env and env.strip():
         return env.strip().rstrip("/")
-    cfg_path = constants.hermes_home() / "dkg.json"
-    if cfg_path.exists():
+    port = os.environ.get("BLACKBOX_DKG_PORT")
+    if port and port.strip():
         try:
-            data = json.loads(cfg_path.read_text(encoding="utf-8"))
-            value = data.get("daemon_url") or data.get("daemonUrl")
-            if isinstance(value, str) and value.strip():
-                return value.strip().rstrip("/")
-        except Exception:
+            return f"http://127.0.0.1:{int(port.strip())}"
+        except ValueError:
             pass
     return constants.DEFAULT_DKG_URL
 
 
-def load_token() -> Optional[str]:
-    """Resolve the bearer token: env override → ``$DKG_HOME/auth.token``."""
-    env = os.environ.get("DKG_API_TOKEN") or os.environ.get("DKG_AUTH_TOKEN")
+def load_token(dkg_home: Optional[str] = None) -> Optional[str]:
+    """Resolve the bearer token: Blackbox env override → Blackbox auth.token."""
+    env = os.environ.get("BLACKBOX_DKG_API_TOKEN") or os.environ.get("BLACKBOX_DKG_AUTH_TOKEN")
     if env and env.strip():
         return env.strip()
-    token_path = _dkg_home() / "auth.token"
+    token_path = _dkg_home(dkg_home) / "auth.token"
     try:
         if token_path.exists():
             for line in token_path.read_text(encoding="utf-8").splitlines():
@@ -121,9 +121,15 @@ class DkgClient:
     """Minimal DKG v10 HTTP client. Construct with an explicit url/token or
     let :meth:`from_env` resolve them."""
 
-    def __init__(self, url: Optional[str] = None, token: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        url: Optional[str] = None,
+        token: Optional[str] = None,
+        dkg_home: Optional[str] = None,
+    ) -> None:
         self.url = (url or load_daemon_url()).rstrip("/")
-        self.token = token if token is not None else load_token()
+        self.dkg_home = str(_dkg_home(dkg_home))
+        self.token = token if token is not None else load_token(self.dkg_home)
 
     @classmethod
     def from_env(cls) -> "DkgClient":

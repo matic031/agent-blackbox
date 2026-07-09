@@ -5,6 +5,11 @@ reports sightings to the **same** local DKG node / threat graph. Same threat
 identifiers, same arg shapes, same severities — a hermes node and an OpenClaw
 node computing the same threat converge on the same subject URI.
 
+When OpenClaw is attached by `hermes blackbox attach`, it points at the
+Blackbox-managed DKG node (`http://127.0.0.1:9320`) and home
+(`~/.hermes/blackbox/dkg`). That keeps it separate from any user-owned DKG node
+on the DKG CLI defaults (`~/.dkg` / `9200`).
+
 - **Detection rules come only from the threat graph.** The plugin syncs a
   ruleset from your local DKG node in two trust tiers (see below). On an empty
   graph it detects nothing until synced — by design.
@@ -74,7 +79,8 @@ Point OpenClaw at the plugin directory and set its config in
         "config": {
           "mode": "audit",
           "contextGraphId": "umanitek/blackbox-threats-staging",
-          "dkgUrl": "http://127.0.0.1:9200",
+          "dkgUrl": "http://127.0.0.1:9320",
+          "dkgHome": "~/.hermes/blackbox/dkg",
           "syncInterval": 300,
           "report": true,
           "dailyReportLimit": 9999,
@@ -110,7 +116,8 @@ override (env wins).
 |-----|---------|-----|---------|
 | `mode` | `audit` | `BLACKBOX_MODE` | `audit` \| `block` |
 | `contextGraphId` | `umanitek/blackbox-threats-staging` | `BLACKBOX_CONTEXT_GRAPH_ID` | staging curated CG id until production is seeded |
-| `dkgUrl` | `http://127.0.0.1:9200` | `DKG_DAEMON_URL` | local node |
+| `dkgUrl` | `http://127.0.0.1:9320` | `BLACKBOX_DKG_DAEMON_URL` / `BLACKBOX_DKG_URL` | Blackbox-managed local node |
+| `dkgHome` | `~/.hermes/blackbox/dkg` | `BLACKBOX_DKG_HOME` | isolated DKG config, API token, pid, and cache |
 | `syncInterval` | `300` | `BLACKBOX_SYNC_INTERVAL` | seconds between ruleset refresh |
 | `report` | `true` | `BLACKBOX_REPORT` | share sightings to SWM |
 | `dailyReportLimit` | `9999` | `BLACKBOX_DAILY_REPORT_LIMIT` | anti-bot cap on reports/day |
@@ -194,8 +201,10 @@ Outbound sightings are also deduplicated per identifier with a 6-hour cooldown
 (mirroring the hermes plugin's `audit.REPORT_COOLDOWN_SECS`): a re-fire of the
 same identifier within the window is not re-reported.
 
-The DKG bearer token is resolved from `$DKG_API_TOKEN` / `$DKG_AUTH_TOKEN`, then
-`$DKG_HOME/auth.token` (default `~/.dkg/auth.token`).
+The DKG bearer token is resolved from `$BLACKBOX_DKG_API_TOKEN` /
+`$BLACKBOX_DKG_AUTH_TOKEN`, then `<dkgHome>/auth.token`. Generic DKG CLI
+variables are intentionally ignored so OpenClaw does not accidentally talk to a
+user's default DKG node.
 
 Ruleset cache is stored under the OpenClaw state dir
 (`$OPENCLAW_STATE_DIR/blackbox/ruleset.json`, default `~/.openclaw/blackbox/`).

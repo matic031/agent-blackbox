@@ -141,6 +141,8 @@ class Ruleset:
     dependency: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     fileaccess: List[Dict[str, Any]] = field(default_factory=list)
     skill: List[Dict[str, Any]] = field(default_factory=list)
+    # IOC rules keyed by full identifier (``ioc:{type}:{value}``) for O(1) lookup.
+    ioc: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     synced_at: float = 0.0
 
     def counts(self) -> Dict[str, int]:
@@ -150,6 +152,7 @@ class Ruleset:
             "dependency": len(self.dependency),
             "fileaccess": len(self.fileaccess),
             "skill": len(self.skill),
+            "ioc": len(self.ioc),
         }
 
     def iter_rules(self):
@@ -166,6 +169,8 @@ class Ruleset:
             yield "fileaccess", r
         for r in self.skill:
             yield "skill", r
+        for r in self.ioc.values():
+            yield "ioc", r
 
     def source_count(self, source: str) -> int:
         """How many rules are tagged with *source* (``public`` | ``community``)."""
@@ -271,6 +276,20 @@ def _row_to_rule(row: Dict[str, Any], source: str = "public") -> Optional[tuple]
             "source": source,
         }
         return ("skill", identifier, rule)
+    if identifier.startswith("ioc:"):
+        # ioc:{type}:{value} — type also carried in ?category; value is the rest.
+        ioc_type = (extract_binding(row.get("category")) or "").strip().lower()
+        parts = identifier.split(":", 2)
+        if not ioc_type and len(parts) == 3:
+            ioc_type = parts[1].strip().lower()
+        return ("ioc", identifier, {
+            "identifier": identifier,
+            "iocType": ioc_type,
+            "kind": extract_binding(row.get("kind")) or None,
+            "severity": severity,
+            "name": name,
+            "source": source,
+        })
     return None
 
 
@@ -312,6 +331,13 @@ def build_from_rows(rows: List[Dict[str, Any]], source: str = "public") -> Rules
             if key not in skill_seen:
                 skill_seen.add(key)
                 rs.skill.append(rule)
+        elif category == "ioc":
+            existing = rs.ioc.get(key)
+            # Public (curated) rules always win over community rows.
+            if existing is None or (
+                existing.get("source") == "community" and rule.get("source") == "public"
+            ):
+                rs.ioc[key] = rule
         else:
             existing = rs.dependency.get(key)
             # Public (curated) rules always win over community rows.
@@ -345,6 +371,7 @@ def _serialize(rs: Ruleset) -> Dict[str, Any]:
         "dependency": rs.dependency,
         "fileaccess": rs.fileaccess,
         "skill": rs.skill,
+        "ioc": rs.ioc,
     }
 
 
@@ -363,6 +390,7 @@ def _deserialize(data: Dict[str, Any]) -> Ruleset:
     rs.dependency = dict(data.get("dependency", {}))
     rs.fileaccess = list(data.get("fileaccess", []))
     rs.skill = list(data.get("skill", []))
+    rs.ioc = dict(data.get("ioc", {}))
     return rs
 
 
@@ -476,7 +504,7 @@ def refresh(config: Optional[BlackboxConfig] = None, client: Optional[DkgClient]
     """
     global _memory_cache
     config = config or load_blackbox_config()
-    client = client or DkgClient(url=config.dkg_url)
+    client = client or DkgClient(url=config.dkg_url, dkg_home=config.dkg_home)
     # Public curated graph first (source of truth), then the community pool.
     tiers = (
         (constants.VIEW_VERIFIABLE_MEMORY, "public"),
@@ -537,12 +565,14 @@ def _restore_tiers(rs: Ruleset, prior: Ruleset, tiers: List[str]) -> None:
         for rule in getattr(prior, attr):
             if rule.get("source") in keep and rule.get("identifier") not in seen:
                 getattr(rs, attr).append(rule)
-    for key, rule in prior.dependency.items():
-        if rule.get("source") not in keep:
-            continue
-        existing = rs.dependency.get(key)
-        if existing is None or (existing.get("source") == "community" and rule.get("source") == "public"):
-            rs.dependency[key] = rule
+    for attr in ("dependency", "ioc"):
+        target = getattr(rs, attr)
+        for key, rule in getattr(prior, attr).items():
+            if rule.get("source") not in keep:
+                continue
+            existing = target.get(key)
+            if existing is None or (existing.get("source") == "community" and rule.get("source") == "public"):
+                target[key] = rule
 
 
 def _background_refresh(config: BlackboxConfig) -> None:

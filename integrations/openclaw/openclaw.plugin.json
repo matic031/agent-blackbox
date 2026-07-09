@@ -33,8 +33,13 @@
       },
       "dkgUrl": {
         "type": "string",
-        "default": "http://127.0.0.1:9200",
-        "description": "Local DKG node HTTP URL (override with $DKG_DAEMON_URL)."
+        "default": "http://127.0.0.1:9320",
+        "description": "Blackbox-managed local DKG node HTTP URL (override with $BLACKBOX_DKG_DAEMON_URL). Uses a non-default port so it does not collide with a user's own DKG node."
+      },
+      "dkgHome": {
+        "type": "string",
+        "default": "~/.hermes/blackbox/dkg",
+        "description": "Blackbox-managed DKG home that stores this node's config, pid, API token, and cache separately from the DKG CLI default ~/.dkg."
       },
       "syncInterval": {
         "type": "number",

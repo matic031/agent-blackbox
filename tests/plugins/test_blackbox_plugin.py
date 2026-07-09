@@ -13,6 +13,7 @@ hooks = load_blackbox("hooks")
 audit = load_blackbox("audit")
 ruleset_mod = load_blackbox("ruleset")
 config_mod = load_blackbox("config")
+constants = load_blackbox("constants")
 quads = load_blackbox("quads")
 cli_mod = load_blackbox("cli")
 
@@ -66,7 +67,7 @@ def test_blackbox_sync_parser_accepts_wait_timeout():
 
 def test_blackbox_sync_require_rules_fails_empty_ruleset(monkeypatch, capsys):
     class FakeClient:
-        def __init__(self, url):
+        def __init__(self, url, **_kwargs):
             self.url = url
 
         def subscribe_context_graph(self, cg_id):
@@ -87,7 +88,7 @@ def test_blackbox_sync_require_rules_fails_empty_ruleset(monkeypatch, capsys):
     monkeypatch.setattr(
         cli_mod,
         "load_blackbox_config",
-        lambda: config_mod.BlackboxConfig(context_graph_id="cg", dkg_url="http://127.0.0.1:9200"),
+        lambda: config_mod.BlackboxConfig(context_graph_id="cg", dkg_url=constants.DEFAULT_DKG_URL),
     )
     monkeypatch.setattr(cli_mod.ruleset, "refresh", lambda cfg, client: FakeRuleset())
 
@@ -98,7 +99,7 @@ def test_blackbox_sync_require_rules_fails_empty_ruleset(monkeypatch, capsys):
 
 def test_blackbox_sync_require_rules_fails_subscribe_error(monkeypatch, capsys):
     class FakeClient:
-        def __init__(self, url):
+        def __init__(self, url, **_kwargs):
             self.url = url
 
         def subscribe_context_graph(self, cg_id):
@@ -119,7 +120,7 @@ def test_blackbox_sync_require_rules_fails_subscribe_error(monkeypatch, capsys):
     monkeypatch.setattr(
         cli_mod,
         "load_blackbox_config",
-        lambda: config_mod.BlackboxConfig(context_graph_id="cg", dkg_url="http://127.0.0.1:9200"),
+        lambda: config_mod.BlackboxConfig(context_graph_id="cg", dkg_url=constants.DEFAULT_DKG_URL),
     )
     monkeypatch.setattr(cli_mod.ruleset, "refresh", lambda cfg, client: FakeRuleset())
 

@@ -43,11 +43,40 @@ def _capture(monkeypatch, body='{"ok": true}'):
 
 
 def test_url_and_token_resolution(monkeypatch):
-    monkeypatch.setenv("DKG_DAEMON_URL", "http://example:9999/")
-    monkeypatch.setenv("DKG_API_TOKEN", "tok-123")
+    monkeypatch.setenv("BLACKBOX_DKG_DAEMON_URL", "http://example:9999/")
+    monkeypatch.setenv("BLACKBOX_DKG_API_TOKEN", "tok-123")
     client = dkg_client.DkgClient()
     assert client.url == "http://example:9999"  # trailing slash stripped
     assert client.token == "tok-123"
+
+
+def test_blackbox_dkg_port_sets_default_url(monkeypatch):
+    monkeypatch.delenv("BLACKBOX_DKG_DAEMON_URL", raising=False)
+    monkeypatch.delenv("BLACKBOX_DKG_URL", raising=False)
+    monkeypatch.setenv("BLACKBOX_DKG_PORT", "9331")
+    assert dkg_client.load_daemon_url() == "http://127.0.0.1:9331"
+
+
+def test_generic_dkg_env_does_not_bleed_into_blackbox(monkeypatch, tmp_path):
+    blackbox_home = tmp_path / "blackbox-dkg"
+    blackbox_home.mkdir()
+    (blackbox_home / "auth.token").write_text("# local Blackbox node token\nblackbox-token\n")
+    default_dkg_home = tmp_path / "default-dkg"
+    default_dkg_home.mkdir()
+    (default_dkg_home / "auth.token").write_text("default-token\n")
+
+    monkeypatch.delenv("BLACKBOX_DKG_DAEMON_URL", raising=False)
+    monkeypatch.delenv("BLACKBOX_DKG_URL", raising=False)
+    monkeypatch.delenv("BLACKBOX_DKG_PORT", raising=False)
+    monkeypatch.delenv("BLACKBOX_DKG_API_TOKEN", raising=False)
+    monkeypatch.delenv("BLACKBOX_DKG_AUTH_TOKEN", raising=False)
+    monkeypatch.setenv("DKG_DAEMON_URL", "http://default-node:9200/")
+    monkeypatch.setenv("DKG_API_TOKEN", "default-env-token")
+    monkeypatch.setenv("DKG_HOME", str(default_dkg_home))
+
+    client = dkg_client.DkgClient(dkg_home=str(blackbox_home))
+    assert client.url == dkg_client.constants.DEFAULT_DKG_URL
+    assert client.token == "blackbox-token"
 
 
 def test_share_knowledge_asset_payload(monkeypatch):

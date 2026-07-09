@@ -66,6 +66,20 @@ def _env_or(entry: Dict[str, Any], *, env: str, key: str, default: Any) -> Any:
     return default
 
 
+def _first_env(*names: str) -> str:
+    """Return the first non-empty environment variable from *names*."""
+    for name in names:
+        value = os.environ.get(name)
+        if value is not None and value.strip() != "":
+            return value.strip()
+    return ""
+
+
+def _default_dkg_url() -> str:
+    port = _as_int(os.environ.get("BLACKBOX_DKG_PORT"), constants.DEFAULT_DKG_PORT)
+    return f"http://127.0.0.1:{port}"
+
+
 @dataclass(frozen=True)
 class BlackboxConfig:
     """Resolved Blackbox settings for the current process."""
@@ -74,6 +88,7 @@ class BlackboxConfig:
     context_graph_id: str = constants.DEFAULT_CONTEXT_GRAPH_ID
     curator_peer_id: str = constants.DEFAULT_CURATOR_PEER_ID
     dkg_url: str = constants.DEFAULT_DKG_URL
+    dkg_home: str = field(default_factory=lambda: str(constants.blackbox_dkg_home()))
     sync_interval: int = 300
     report: bool = True
     daily_report_limit: int = 9999
@@ -227,6 +242,24 @@ def load_blackbox_config() -> BlackboxConfig:
             constants.DEFAULT_CONTEXT_GRAPH_ID,
         )
         context_graph_id = constants.DEFAULT_CONTEXT_GRAPH_ID
+    default_dkg_home = str(constants.blackbox_dkg_home())
+    dkg_home = str(
+        _first_env("BLACKBOX_DKG_HOME")
+        or entry.get("dkg_home")
+        or entry.get("dkgHome")
+        or default_dkg_home
+    ).strip()
+    dkg_url_env = _first_env("BLACKBOX_DKG_DAEMON_URL", "BLACKBOX_DKG_URL")
+    dkg_url = str(
+        dkg_url_env
+        or entry.get("dkg_url")
+        or entry.get("dkgUrl")
+        or _default_dkg_url()
+    ).rstrip("/")
+    legacy_dkg_urls = {"http://127.0.0.1:9200", "http://localhost:9200"}
+    has_configured_dkg_home = bool(entry.get("dkg_home") or entry.get("dkgHome"))
+    if not dkg_url_env and not has_configured_dkg_home and dkg_url in legacy_dkg_urls:
+        dkg_url = _default_dkg_url()
     return BlackboxConfig(
         mode=mode,
         context_graph_id=context_graph_id,
@@ -238,9 +271,8 @@ def load_blackbox_config() -> BlackboxConfig:
                 default=constants.DEFAULT_CURATOR_PEER_ID,
             )
         ),
-        dkg_url=str(
-            _env_or(entry, env="DKG_DAEMON_URL", key="dkg_url", default=constants.DEFAULT_DKG_URL)
-        ).rstrip("/"),
+        dkg_url=dkg_url,
+        dkg_home=dkg_home,
         sync_interval=_as_int(
             _env_or(entry, env="BLACKBOX_SYNC_INTERVAL", key="sync_interval", default=300), 300
         ),

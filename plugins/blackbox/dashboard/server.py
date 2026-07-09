@@ -90,7 +90,7 @@ def create_app():
         while not _rescan_state["stop"]:
             try:
                 cfg = load_blackbox_config()
-                client = DkgClient(url=cfg.dkg_url)
+                client = DkgClient(url=cfg.dkg_url, dkg_home=cfg.dkg_home)
                 pending = client.list_join_requests(cfg.context_graph_id)
                 idle = 0
                 for req in pending:
@@ -177,7 +177,7 @@ def create_app():
             def _probe() -> None:
                 ok = False
                 try:
-                    ok = DkgClient(url=cfg.dkg_url).reachable(timeout=_REACH_TIMEOUT)
+                    ok = DkgClient(url=cfg.dkg_url, dkg_home=cfg.dkg_home).reachable(timeout=_REACH_TIMEOUT)
                 except Exception:  # pragma: no cover - fail open
                     ok = False
                 with _swr_lock:
@@ -367,7 +367,7 @@ def create_app():
             # retries next poll instead of caching "down" for the whole TTL.
             if not _node_reachable(cfg):
                 return None
-            client = DkgClient(url=cfg.dkg_url)
+            client = DkgClient(url=cfg.dkg_url, dkg_home=cfg.dkg_home)
             return {
                 "node_reachable": True,
                 "curated": _count_query(
@@ -385,6 +385,7 @@ def create_app():
             "mode": cfg.mode,
             "context_graph_id": cfg.context_graph_id,
             "dkg_url": cfg.dkg_url,
+            "dkg_home": cfg.dkg_home,
             "node_reachable": g["node_reachable"],
             "sync_interval": cfg.sync_interval,
             "last_sync": rs.synced_at,
@@ -415,7 +416,7 @@ def create_app():
             if not _node_reachable(cfg):
                 return None   # retry next poll; don't cache a "down" as empty
             try:
-                ident = DkgClient(url=cfg.dkg_url).agent_identity() or {}
+                ident = DkgClient(url=cfg.dkg_url, dkg_home=cfg.dkg_home).agent_identity() or {}
                 return str(ident.get("agentAddress") or ident.get("agentDid") or "")
             except Exception as exc:  # pragma: no cover - fail open
                 logger.debug("blackbox dashboard: agent identity failed: %s", exc)
@@ -472,7 +473,7 @@ def create_app():
             if not _node_reachable(cfg):
                 return None   # keep default cached briefly; retry next poll
             try:
-                client = DkgClient(url=cfg.dkg_url)
+                client = DkgClient(url=cfg.dkg_url, dkg_home=cfg.dkg_home)
                 # Read the RAW store (ms), scoped to the CG's shared-memory named
                 # graphs, instead of the shared-working-memory view. The view's
                 # per-slice trust work is O(slices) and times out (~160s) once the
@@ -638,6 +639,7 @@ def create_app():
                 "escalation": "escalation",
                 "fileaccess": "fileaccess",
                 "skill": "skill",
+                "ioc": "ioc",
             }.get(prefix, "other")
 
         # Community tab: serve from the synced ruleset cache; the
@@ -662,7 +664,7 @@ def create_app():
                 return None   # keep the default (empty) cached briefly; retry next poll
             seen: "Dict[str, Dict[str, Any]]" = {}
             try:
-                client = DkgClient(url=cfg.dkg_url)
+                client = DkgClient(url=cfg.dkg_url, dkg_home=cfg.dkg_home)
                 sparql = (
                     "PREFIX g: <http://umanitek.ai/ontology/guardian/> "
                     "PREFIX schema: <http://schema.org/> "
@@ -699,7 +701,7 @@ def create_app():
                 return None   # keep the default (empty) cached briefly; retry next poll
             out: List[Dict[str, Any]] = []
             try:
-                client = DkgClient(url=cfg.dkg_url)
+                client = DkgClient(url=cfg.dkg_url, dkg_home=cfg.dkg_home)
                 # Raw store scoped to the CG's shared-memory graphs, not the
                 # shared-working-memory view (O(slices), times out on the 15k pool
                 # and saturates the node). Mirrors the community list/detail paths.
@@ -757,7 +759,7 @@ def create_app():
         cfg = load_blackbox_config()
         tier, view = _tier_view(tier, default="community")
         prefix = identifier.split(":", 1)[0].lower() if ":" in identifier else ""
-        category = prefix if prefix in ("dep", "injection", "escalation", "fileaccess", "skill") else "other"
+        category = prefix if prefix in ("dep", "injection", "escalation", "fileaccess", "skill", "ioc") else "other"
         if category == "dep":
             category = "dependency"
         detail: Dict[str, Any] = {
@@ -777,7 +779,7 @@ def create_app():
         try:
             # Skip the point-lookup on an unreachable node so opening a threat
             # can't hang on a dead node.
-            client = DkgClient(url=cfg.dkg_url) if _node_reachable(cfg) else None
+            client = DkgClient(url=cfg.dkg_url, dkg_home=cfg.dkg_home) if _node_reachable(cfg) else None
             if client is None:
                 rows = []
             elif tier == "community":
@@ -839,7 +841,7 @@ def create_app():
                 # Probe liveness synchronously first and seed the cache, so the
                 # reads below see the node's true state, not the cold default.
                 try:
-                    ok = DkgClient(url=cfg.dkg_url).reachable(timeout=_REACH_TIMEOUT)
+                    ok = DkgClient(url=cfg.dkg_url, dkg_home=cfg.dkg_home).reachable(timeout=_REACH_TIMEOUT)
                 except Exception:  # pragma: no cover - fail open
                     ok = False
                 with _swr_lock:

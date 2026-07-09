@@ -16,6 +16,7 @@ import shutil
 import subprocess
 import sys
 import time
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
@@ -448,7 +449,7 @@ def _blackbox_chat_argv(chat_args: Optional[List[str]], profile: str = _BLACKBOX
 
 def _cmd_status(args: argparse.Namespace) -> int:
     cfg = load_blackbox_config()
-    client = DkgClient(url=cfg.dkg_url)
+    client = DkgClient(url=cfg.dkg_url, dkg_home=cfg.dkg_home)
     reachable = client.reachable()
     rs = ruleset.get(cfg)
     counts = rs.counts()
@@ -457,6 +458,7 @@ def _cmd_status(args: argparse.Namespace) -> int:
     print(f"  block severity:    {cfg.block_severity}")
     print(f"  context graph:     {cfg.context_graph_id}")
     print(f"  DKG node:          {cfg.dkg_url}  [{'reachable' if reachable else 'unreachable'}]")
+    print(f"  DKG home:          {cfg.dkg_home}")
     if reachable:
         info = client.chain_info()
         cid = info.get("chain_id")
@@ -516,7 +518,7 @@ def _print_attached_targets() -> None:
 
 def _cmd_sync(args: argparse.Namespace) -> int:
     cfg = load_blackbox_config()
-    client = DkgClient(url=cfg.dkg_url)
+    client = DkgClient(url=cfg.dkg_url, dkg_home=cfg.dkg_home)
     # Private community CG: ask the curator to admit this node before subscribing,
     # so a fresh install auto-joins with zero manual steps. Best-effort + idempotent.
     join_status = _request_join(client, cfg.context_graph_id, cfg.curator_peer_id)
@@ -541,7 +543,11 @@ def _cmd_sync(args: argparse.Namespace) -> int:
     except Exception:
         pass
     if getattr(args, "wait", False):
-        result = _wait_for_context_graph_catchup(cfg.context_graph_id, timeout_s=getattr(args, "timeout", 180))
+        result = _wait_for_context_graph_catchup(
+            cfg.context_graph_id,
+            timeout_s=getattr(args, "timeout", 180),
+            dkg_home=cfg.dkg_home,
+        )
         if result["status"]:
             print(f"DKG catch-up: {result['status']}")
         if result["detail"]:
@@ -604,6 +610,7 @@ def _wait_for_context_graph_catchup(
     *,
     timeout_s: int = 180,
     interval_s: float = 3.0,
+    dkg_home: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Poll ``dkg sync catchup-status`` until the graph catch-up finishes.
 
@@ -617,6 +624,9 @@ def _wait_for_context_graph_catchup(
     deadline = time.monotonic() + max(1, int(timeout_s or 1))
     last_status = ""
     last_detail = ""
+    env = dict(os.environ)
+    if dkg_home:
+        env["DKG_HOME"] = dkg_home
     while time.monotonic() < deadline:
         try:
             proc = subprocess.run(
@@ -624,6 +634,7 @@ def _wait_for_context_graph_catchup(
                 text=True,
                 capture_output=True,
                 timeout=15,
+                env=env,
             )
             output = (proc.stdout or "") + (proc.stderr or "")
         except Exception as exc:  # noqa: BLE001 - best-effort status only
@@ -727,7 +738,7 @@ def _print_openclaw_attach_row(row: Dict[str, Any], prefix: str) -> None:
 
 def _cmd_report(args: argparse.Namespace) -> int:
     cfg = load_blackbox_config()
-    client = DkgClient(url=cfg.dkg_url)
+    client = DkgClient(url=cfg.dkg_url, dkg_home=cfg.dkg_home)
     try:
         identifier, quad_kwargs = _build_candidate(args)
     except ValueError as exc:
@@ -771,7 +782,14 @@ def _require_mainnet_for_publish(client: DkgClient) -> bool:
     net = info.get("network") or "unknown"
     if info.get("is_testnet"):
         print(f"error: DKG node is on a TESTNET ({net}, chainId={cid}). Blackbox is mainnet-only — refusing to publish.")
-        print("       Re-bootstrap on mainnet:  dkg hermes setup --network mainnet-base")
+        dkg_home = getattr(client, "dkg_home", str(constants.blackbox_dkg_home()))
+        dkg_url = getattr(client, "url", constants.DEFAULT_DKG_URL)
+        dkg_port = urllib.parse.urlparse(dkg_url).port or constants.DEFAULT_DKG_PORT
+        print(
+            "       Re-bootstrap the Blackbox node on mainnet:  "
+            f'DKG_HOME="{dkg_home}" dkg hermes setup --network mainnet-base '
+            f"--port {dkg_port} --daemon-url {dkg_url} --no-fund"
+        )
         return False
     if cid is not None and not info.get("is_mainnet"):
         print(f"error: DKG node is on an unrecognized chain (chainId={cid}, {net}); refusing to publish.")
@@ -787,7 +805,7 @@ def _require_mainnet_for_publish(client: DkgClient) -> bool:
 
 def _cmd_setup_graph(args: argparse.Namespace) -> int:
     cfg = load_blackbox_config()
-    client = DkgClient(url=cfg.dkg_url)
+    client = DkgClient(url=cfg.dkg_url, dkg_home=cfg.dkg_home)
     if not _require_mainnet_for_publish(client):
         return 1
     cg = cfg.context_graph_id
@@ -844,7 +862,7 @@ def _cmd_curate_auto_accept(args: argparse.Namespace) -> int:
     pool. Loops on a tight poll until stopped; ``--once`` drains the current
     backlog and exits."""
     cfg = load_blackbox_config()
-    client = DkgClient(url=cfg.dkg_url)
+    client = DkgClient(url=cfg.dkg_url, dkg_home=cfg.dkg_home)
     cg = cfg.context_graph_id
     interval = max(2, int(getattr(args, "interval", 5) or 5))
     once = bool(getattr(args, "once", False))
@@ -870,7 +888,7 @@ def _cmd_curate_auto_accept(args: argparse.Namespace) -> int:
 
 def _cmd_curate_list(args: argparse.Namespace) -> int:
     cfg = load_blackbox_config()
-    client = DkgClient(url=cfg.dkg_url)
+    client = DkgClient(url=cfg.dkg_url, dkg_home=cfg.dkg_home)
     sparql = """
 PREFIX g: <http://umanitek.ai/ontology/guardian/>
 SELECT ?identifier (COUNT(DISTINCT ?reporter) AS ?reporters)
@@ -936,7 +954,7 @@ _REPORT_FIELD_NAMES = {
 
 def _cmd_curate_show(args: argparse.Namespace) -> int:
     cfg = load_blackbox_config()
-    client = DkgClient(url=cfg.dkg_url)
+    client = DkgClient(url=cfg.dkg_url, dkg_home=cfg.dkg_home)
     ident = args.identifier
     esc = ident.replace("\\", "\\\\").replace('"', '\\"')
     sparql = f"""
@@ -989,7 +1007,7 @@ LIMIT 200
 
 def _cmd_curate_approve(args: argparse.Namespace) -> int:
     cfg = load_blackbox_config()
-    client = DkgClient(url=cfg.dkg_url)
+    client = DkgClient(url=cfg.dkg_url, dkg_home=cfg.dkg_home)
     ident = args.identifier
     category, fields = _threat_fields_from_reports(client, cfg, ident)
     if category is None:
@@ -1030,6 +1048,7 @@ def _cmd_curate_approve(args: argparse.Namespace) -> int:
         skill_name=fields.get("skill_name"),
         skill_version=fields.get("skill_version"),
         danger_shape=fields.get("danger_shape"),
+        ioc_type=fields.get("ioc_type"),
     )
     if not args.no_publish and not _require_mainnet_for_publish(client):
         return 1
@@ -1063,7 +1082,7 @@ def _cmd_curate_reject(args: argparse.Namespace) -> int:
         print(f"warning: could not persist local rejection: {exc}")
     print(f"Marked {ident} rejected locally (hidden from `curate list`; its reports TTL-expire from SWM).")
     if args.dispute:
-        client = DkgClient(url=cfg.dkg_url)
+        client = DkgClient(url=cfg.dkg_url, dkg_home=cfg.dkg_home)
         reporter = _resolve_reporter(client)
         threat = quads.threat_uri(ident)
         fp_subj = f"urn:guardian:fp:{quads.stable_hash(ident + reporter, 24)}"
@@ -1083,7 +1102,7 @@ def _cmd_curate_reject(args: argparse.Namespace) -> int:
 
 def _cmd_curate_import(args: argparse.Namespace) -> int:
     cfg = load_blackbox_config()
-    client = DkgClient(url=cfg.dkg_url)
+    client = DkgClient(url=cfg.dkg_url, dkg_home=cfg.dkg_home)
 
     catalog_paths = _resolve_import_paths(args)
     if catalog_paths is None:
@@ -1147,8 +1166,8 @@ def _cmd_curate_import(args: argparse.Namespace) -> int:
         if args.dir:
             print(f"  {path.name}: {s} new, {sk} dup, {e} err")
 
-    if not dry_run:
-        _append_seeded_ledger(published_ids)  # only successful publishes are recorded
+    # The ledger is appended per-publish inside _seed_entries (interrupt-safe),
+    # so no end-of-run write is needed. published_ids is kept for the summary.
 
     capped = limit is not None and seeded >= limit
     if dry_run:
@@ -1269,6 +1288,16 @@ def _seed_entries(
         except ValueError:
             errors += 1
             continue
+        # Provenance is part of the public trust contract. A bulk seed without a
+        # named source would create a DKG asset the dashboard cannot explain, so
+        # fail it during dry-run before any TRAC can be spent.
+        prov = _entry_provenance(entry)
+        sources = prov["sources"] or ([source] if source else None)
+        contributor_value = prov["contributor"] or contributor
+        references = prov["references"]
+        if not sources:
+            errors += 1
+            continue
         if ident in already:
             skipped += 1
             continue
@@ -1278,9 +1307,6 @@ def _seed_entries(
             if publish:  # the ledger tracks on-chain publishes only
                 new_ids.append(ident)
             continue
-        # Provenance: entry-level source/contributor win; the --source/--contributor
-        # run defaults fill anything the entry (and its catalog) left blank.
-        prov = _entry_provenance(entry)
         q = quads.build_threat_quads(
             category=category,
             identifier=ident,
@@ -1289,9 +1315,9 @@ def _seed_entries(
             description=fields.get("description", ""),
             curated=True,
             kind=fields.get("kind"),
-            sources=prov["sources"] or ([source] if source else None),
-            references=prov["references"],
-            contributor=prov["contributor"] or contributor,
+            sources=sources,
+            references=references,
+            contributor=contributor_value,
             pattern=fields.get("pattern"),
             owasp_category=fields.get("owasp_category"),
             tool_name=fields.get("tool_name"),
@@ -1304,6 +1330,7 @@ def _seed_entries(
             skill_name=fields.get("skill_name"),
             skill_version=fields.get("skill_version"),
             danger_shape=fields.get("danger_shape"),
+            ioc_type=fields.get("ioc_type"),
         )
         ka_name = f"threat-{quads.slug(ident)}"
         try:
@@ -1313,6 +1340,10 @@ def _seed_entries(
             seeded += 1
             if publish:  # only on-chain publishes belong in the seeded ledger;
                 new_ids.append(ident)  # a --no-publish (SWM-only) run must not poison it
+                # Persist per-publish, not just at run end: a long VM grind that's
+                # interrupted (Ctrl-C, wallet drained, killed) must still resume
+                # without re-paying for what already published on-chain.
+                _append_seeded_ledger([ident])
         except DkgError:
             errors += 1
     return seeded, skipped, errors, new_ids
@@ -2098,6 +2129,13 @@ def _flatten_catalog(catalog: Any, forced_type: Optional[str]) -> List[Dict[str,
             for item in catalog.get(key, []) or []:
                 if isinstance(item, dict):
                     out.append({"type": ctype, **item})
+        # Split-format IOC entries already carry ``ioc_type``/``value``.
+        for item in catalog.get("iocs", []) or []:
+            if isinstance(item, dict):
+                out.append({"type": "ioc", **item})
+        # Backlog catalogs group indicators under ``backlog.{iocs,crypto,...}``;
+        # each entry's own ``type`` (domain/url/wallet/...) is the IOC type.
+        out.extend(_flatten_backlog(catalog.get("backlog")))
     defaults = _catalog_provenance_defaults(catalog)
     if defaults:
         for entry in out:
@@ -2105,9 +2143,54 @@ def _flatten_catalog(catalog: Any, forced_type: Optional[str]) -> List[Dict[str,
     return out
 
 
+def _flatten_backlog(backlog: Any) -> List[Dict[str, Any]]:
+    """Flatten a catalog ``backlog`` object into importable ``ioc`` entries.
+
+    ``backlog`` maps group names (``iocs``, ``crypto``, ``socket``, …) to lists
+    of indicator dicts whose own ``type`` (``domain``/``url``/``ip``/``hash``/
+    ``wallet``/``contract``) is the IOC type. Unknown indicator types are left
+    for ``_entry_to_threat`` to reject during dry-run.
+    """
+    if not isinstance(backlog, dict):
+        return []
+    out: List[Dict[str, Any]] = []
+    for group in backlog.values():
+        if not isinstance(group, list):
+            continue
+        for item in group:
+            if not isinstance(item, dict):
+                continue
+            rest = {k: v for k, v in item.items() if k != "type"}
+            out.append({"type": "ioc", "ioc_type": str(item.get("type") or "").lower(), **rest})
+    return out
+
+
 def _entry_to_threat(entry: Dict[str, Any]) -> tuple:
     """Return ``(category, identifier, fields)`` for a catalog entry."""
     ctype = str(entry.get("type") or "").lower()
+    if ctype == "ioc":
+        ioc_type = str(entry.get("ioc_type") or entry.get("iocType") or "").strip().lower()
+        value = str(entry.get("value") or entry.get("indicator") or "").strip()
+        # Map feed-native indicator spellings onto the supported IOC types: an
+        # ``ipv4``/``ipv6`` is an ``ip``; a hash algo (``sha256``/``sha1``/``md5``)
+        # is a ``hash`` whose value carries the ``algo:`` prefix the detector emits.
+        if ioc_type in ("ipv4", "ipv6"):
+            ioc_type = "ip"
+        elif ioc_type in ("sha256", "sha1", "sha512", "md5"):
+            if not value.lower().startswith(("sha256:", "sha1:", "sha512:", "md5:")):
+                value = f"{ioc_type}:{value}"
+            ioc_type = "hash"
+        if ioc_type not in quads.IOC_TYPES or not value:
+            raise ValueError("ioc needs a supported ioc_type + value")
+        ident = quads.ioc_identifier(ioc_type, value)
+        threat = entry.get("threat") or entry.get("title") or entry.get("name")
+        return "ioc", ident, {
+            "severity": constants.normalize_severity(entry.get("severity"), "high"),
+            "name": threat or f"{ioc_type}: {value[:80]}",
+            "description": entry.get("summary") or entry.get("description") or "",
+            "ioc_type": ioc_type,
+            "references": entry.get("references") or [],
+        }
     if ctype == "injection":
         pattern = str(entry.get("pattern") or "").strip()
         if not pattern:

@@ -106,8 +106,11 @@ LEGACY_CONTEXT_GRAPH_IDS = frozenset({
     "umanitek/guardian-threats",
 })
 
-#: Default local DKG node HTTP endpoint.
-DEFAULT_DKG_URL = "http://127.0.0.1:9200"
+#: Default Blackbox-managed local DKG node HTTP endpoint. Deliberately not the
+#: DKG CLI's default 9200, so Agent Blackbox never collides with a user's own
+#: DKG node/cache.
+DEFAULT_DKG_PORT = 9320
+DEFAULT_DKG_URL = f"http://127.0.0.1:{DEFAULT_DKG_PORT}"
 
 #: Community curator's node peer id. On a private community CG a fresh member
 #: sends its join request here; the curator running ``blackbox curate
@@ -191,3 +194,16 @@ def blackbox_home() -> Path:
     if env and env.strip():
         return Path(env).expanduser()
     return hermes_home() / "blackbox"
+
+
+def blackbox_dkg_home() -> Path:
+    """Return the Blackbox-managed DKG home.
+
+    This is separate from the DKG CLI default ``~/.dkg`` so install/bootstrap,
+    auth token reads, daemon pid/api-port files, and graph/cache storage do not
+    touch a user's existing DKG node.
+    """
+    env = os.environ.get("BLACKBOX_DKG_HOME")
+    if env and env.strip():
+        return Path(env).expanduser()
+    return blackbox_home() / "dkg"

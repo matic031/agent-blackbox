@@ -6,7 +6,7 @@ import { RulesetCache } from "../src/ruleset.ts";
 import { detectEscalation, detectDependency, detectInjection } from "../src/detection.ts";
 
 const CG = "blackbox-live-test";
-const client = new DkgClient({ url: "http://127.0.0.1:9200" }); // token auto-resolved from ~/.dkg/auth.token
+const client = new DkgClient({ url: "http://127.0.0.1:9320" }); // token auto-resolved from ~/.hermes/blackbox/dkg/auth.token
 
 const log = (l, v) => console.log(`  ${l.padEnd(22)} ${v}`);
 
