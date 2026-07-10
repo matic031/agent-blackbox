@@ -146,10 +146,19 @@ mkdir -p "$HOME/.hermes/logs"
 log "keepalive starting — home=$DKG_HOME url=$API_URL admission=$DKG_NETWORK_ADMISSION_MODE swm_open=$DKG_SWM_SYNC_OPEN"
 pin_dkg_node_runtime
 if ! api_up; then start_node || log "initial start failed; will retry in loop"; fi
+# Require several CONSECUTIVE misses before restarting. A single transient
+# /api/status failure (node busy under sync load, a brief GC pause, a slow
+# store checkpoint) must never hard-restart a healthy node — that flap-kills
+# the curator, which is worse than no keepalive.
+FAILS=0
+FAIL_THRESHOLD="${BLACKBOX_KEEPALIVE_FAIL_THRESHOLD:-3}"
 while true; do
     sleep "$POLL_SECS"
-    if ! api_up; then
-        log "node DOWN — restarting"
-        start_node || log "restart failed; retrying next cycle"
+    if api_up; then FAILS=0; continue; fi
+    FAILS=$((FAILS+1))
+    log "node not answering ($FAILS/$FAIL_THRESHOLD)"
+    if [ "$FAILS" -ge "$FAIL_THRESHOLD" ]; then
+        log "node DOWN for $FAILS consecutive checks — restarting"
+        start_node && FAILS=0 || log "restart failed; retrying next cycle"
     fi
 done

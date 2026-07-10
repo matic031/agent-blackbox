@@ -139,23 +139,23 @@ DEFAULT_ANCHOR_BATCH_SIZE = 250
 DEFAULT_DKG_PORT = 9320
 DEFAULT_DKG_URL = f"http://127.0.0.1:{DEFAULT_DKG_PORT}"
 
-#: Community curator's node peer id. Public Guardian threat graphs do not need
-#: join approval; this remains as a legacy fallback for older private graphs
-#: where a fresh member has to request curator admission before subscribing.
-#: Override with ``BLACKBOX_CURATOR_PEER_ID``.
-DEFAULT_CURATOR_PEER_ID = "12D3KooWQHQd1SNecrRxwceqPJkXSKEYn8vrV4QyJ2AfqeYwXz1E"
+#: Community curator's node peer id — the OWNER of the private community graph
+#: and the only node that can approve joins / redeliver approvals (its wallet
+#: 0xEbaf… is funded on Base to write the on-chain allowlist). A fresh member
+#: sends its join request here before it can subscribe + sync SWM. This is the
+#: ~/.dkg curator node on :9320. Override with ``BLACKBOX_CURATOR_PEER_ID``.
+DEFAULT_CURATOR_PEER_ID = "12D3KooWBY9jmNATMPv1DZcKbFas5RtjpkhT69pPwvkUBY2MMnDX"
 
 #: Stale/wrong curator peer ids that must NOT be used as the join target. A
-#: config still pointed at one of these (e.g. a machine that hand-set the peer
-#: to a member node that is not the graph owner) is transparently switched to
+#: config still pointed at one of these is transparently switched to
 #: ``DEFAULT_CURATOR_PEER_ID`` at config-load time, so join requests always
-#: reach the real curator and SWM sync is authorised. Only the OWNER node can
-#: approve joins / redeliver approvals; a member node (e.g. the 9321 staging
-#: node ...qeYwXz1E) cannot, so a node targeting it gets stuck at 0 SWM rows
-#: with a "mismatched envelope" denial. A genuinely custom peer (not in this
-#: set) is always left untouched.
+#: reach the real owner and SWM sync is authorised. The 9321 staging node
+#: (...qeYwXz1E) is a MEMBER, not the graph owner: it cannot approve joins
+#: (its wallet is unfunded), so a node targeting it gets stuck at 0 SWM rows
+#: with a "not curator" denial. A genuinely custom peer (not in this set) is
+#: always left untouched.
 LEGACY_CURATOR_PEER_IDS = frozenset({
-    "12D3KooWBY9jmNATMPv1DZcKbFas5RtjpkhT69pPwvkUBY2MMnDX",
+    "12D3KooWQHQd1SNecrRxwceqPJkXSKEYn8vrV4QyJ2AfqeYwXz1E",
 })
 
 # ---------------------------------------------------------------------------
