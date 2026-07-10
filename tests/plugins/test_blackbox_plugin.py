@@ -139,6 +139,68 @@ def test_blackbox_sync_does_not_join_when_subscribe_succeeds(monkeypatch):
     assert join_calls == []
 
 
+def test_blackbox_sync_private_zero_rows_requests_join_after_successful_subscribe(monkeypatch, capsys):
+    join_calls = []
+    refresh_calls = []
+
+    class FakeClient:
+        def __init__(self, url, **_kwargs):
+            self.url = url
+
+        def subscribe_context_graph(self, cg_id):
+            return {}
+
+        def agent_identity(self):
+            return {"agentAddress": "0xabc"}
+
+    class FakeRuleset:
+        def counts(self):
+            return {
+                "injection": 0,
+                "escalation": 0,
+                "dependency": 0,
+                "fileaccess": 0,
+                "skill": 0,
+            }
+
+    def fake_join(*args, **kwargs):
+        join_calls.append((args, kwargs))
+        return "Join request sent for umanitek/blackbox-threats-staging: delivered to 1 curator(s)."
+
+    def fake_refresh(cfg, client):
+        refresh_calls.append((cfg, client))
+        return FakeRuleset()
+
+    monkeypatch.setattr(cli_mod, "_request_join", fake_join)
+    monkeypatch.setattr(cli_mod, "DkgClient", FakeClient)
+    monkeypatch.setattr(
+        cli_mod,
+        "load_blackbox_config",
+        lambda: config_mod.BlackboxConfig(
+            context_graph_id=constants.DEFAULT_CONTEXT_GRAPH_ID,
+            dkg_url=constants.DEFAULT_DKG_URL,
+            curator_peer_id=constants.DEFAULT_CURATOR_PEER_ID,
+        ),
+    )
+    monkeypatch.setattr(
+        cli_mod,
+        "_wait_for_context_graph_catchup",
+        lambda *a, **k: {
+            "ok": True,
+            "status": "done",
+            "detail": "peers 4/4, data 0, shared memory 0",
+        },
+    )
+    monkeypatch.setattr(cli_mod.ruleset, "refresh", fake_refresh)
+
+    args = argparse.Namespace(wait=True, timeout=180, require_rules=False)
+    assert cli_mod._cmd_sync(args) == 0
+    assert len(join_calls) == 1
+    assert len(refresh_calls) == 2
+    out = capsys.readouterr().out
+    assert "Private graph returned zero rows; requesting curator admission" in out
+
+
 def test_blackbox_sync_require_rules_fails_subscribe_error(monkeypatch, capsys):
     class FakeClient:
         def __init__(self, url, **_kwargs):

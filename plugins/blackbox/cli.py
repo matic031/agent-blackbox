@@ -31,6 +31,7 @@ _BLACKBOX_CHAT_PROFILE = "blackbox"
 _BLACKBOX_SOUL_MARKER = "<!-- managed-by: hermes-blackbox-chat -->"
 _BLACKBOX_SOURCE_ROOT_MARKER = ".blackbox-source-root"
 _BLACKBOX_CONTEXT_FILE_MAX_CHARS = 100_000
+_PRIVATE_AUTO_JOIN_GRAPH_IDS = {constants.DEFAULT_CONTEXT_GRAPH_ID}
 _BLACKBOX_SOUL = f"""{_BLACKBOX_SOUL_MARKER}
 # Agent Blackbox
 
@@ -612,8 +613,12 @@ def _cmd_sync(args: argparse.Namespace) -> int:
     print(f"  {counts['injection']} injection, {counts['escalation']} escalation, "
           f"{counts['dependency']} dependency")
     if sum(counts.values()) == 0:
-        if join_already_member and _catchup_detail_reports_zero_rows(catchup_detail):
-            repaired = _retry_already_member_join_handshake(cfg, client, args)
+        if _catchup_detail_reports_zero_rows(catchup_detail):
+            repaired = None
+            if join_already_member:
+                repaired = _retry_already_member_join_handshake(cfg, client, args)
+            elif _should_request_private_join(cfg):
+                repaired = _retry_private_zero_row_join_handshake(cfg, client, args)
             if repaired is not None:
                 rs = repaired
                 counts = rs.counts()
@@ -637,6 +642,13 @@ def _cmd_sync(args: argparse.Namespace) -> int:
     return 0
 
 
+def _should_request_private_join(cfg: BlackboxConfig) -> bool:
+    return bool(
+        getattr(cfg, "curator_peer_id", "")
+        and getattr(cfg, "context_graph_id", "") in _PRIVATE_AUTO_JOIN_GRAPH_IDS
+    )
+
+
 def _join_status_is_already_member(status: Optional[str]) -> bool:
     return "already a member" in str(status or "").lower()
 
@@ -657,6 +669,43 @@ def _retry_already_member_join_handshake(
     retry_status = _request_join(client, cfg.context_graph_id, cfg.curator_peer_id)
     if retry_status:
         print(f"  repair: {retry_status}")
+    try:
+        client.subscribe_context_graph(cfg.context_graph_id)
+    except DkgError as exc:
+        print(f"  repair warning: could not resubscribe to {cfg.context_graph_id}: {exc}")
+    if getattr(args, "wait", False):
+        result = _wait_for_context_graph_catchup(
+            cfg.context_graph_id,
+            timeout_s=min(max(15, int(getattr(args, "timeout", 180) or 180)), 60),
+            dkg_home=cfg.dkg_home,
+            dkg_bin=cfg.dkg_bin,
+        )
+        if result["status"]:
+            print(f"  repair DKG catch-up: {result['status']}")
+        if result["detail"]:
+            print(f"    {result['detail']}")
+    try:
+        return ruleset.refresh(cfg, client)
+    except Exception as exc:
+        print(f"  repair warning: cache refresh failed: {exc}")
+        return None
+
+
+def _retry_private_zero_row_join_handshake(
+    cfg: BlackboxConfig,
+    client: DkgClient,
+    args: argparse.Namespace,
+) -> Optional[Any]:
+    """Fresh private-graph installs can subscribe before curator approval lands.
+
+    In that state DKG reports catch-up done with zero VM/SWM rows. Send the
+    join request anyway so the curator auto-accept/redelivery path has an agent
+    to admit, then give catch-up one short retry.
+    """
+    print("  Private graph returned zero rows; requesting curator admission...")
+    join_status = _request_join(client, cfg.context_graph_id, cfg.curator_peer_id)
+    if join_status:
+        print(f"  repair: {join_status}")
     try:
         client.subscribe_context_graph(cfg.context_graph_id)
     except DkgError as exc:

@@ -92,6 +92,51 @@ def test_ruleset_sync_once_requests_join_when_subscribe_fails():
     ]
 
 
+def test_ruleset_sync_once_requests_private_join_when_empty_after_subscribe():
+    class Cfg:
+        dkg_url = "http://127.0.0.1:9320"
+        dkg_home = "/tmp/blackbox-dkg"
+        context_graph_id = "umanitek/blackbox-threats-staging"
+        curator_peer_id = "curator-peer"
+
+    events = []
+
+    class FakeClient:
+        def __init__(self, *, url, dkg_home):
+            pass
+
+        def subscribe_context_graph(self, cg_id):
+            events.append(("subscribe", cg_id))
+
+        def request_join(self, cg_id, curator_peer_id):
+            events.append(("join", cg_id, curator_peer_id))
+
+    class FakeRuleset:
+        def counts(self):
+            return {"injection": 0}
+
+        def source_count(self, source):
+            return 0
+
+    class FakeRulesetModule:
+        @staticmethod
+        def refresh(cfg, client):
+            events.append(("refresh", cfg.context_graph_id))
+            return FakeRuleset()
+
+    assert server._sync_ruleset_once(lambda: Cfg(), FakeClient, FakeRulesetModule) == {
+        "total": 0,
+        "community": 0,
+    }
+    assert events == [
+        ("subscribe", "umanitek/blackbox-threats-staging"),
+        ("refresh", "umanitek/blackbox-threats-staging"),
+        ("join", "umanitek/blackbox-threats-staging", "curator-peer"),
+        ("subscribe", "umanitek/blackbox-threats-staging"),
+        ("refresh", "umanitek/blackbox-threats-staging"),
+    ]
+
+
 def test_dashboard_approver_skips_open_access_graph():
     approved = []
 
