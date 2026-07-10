@@ -2,7 +2,11 @@ import { type Simulation } from 'd3-force'
 import { atom, type WritableAtom } from 'nanostores'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
+import { SegmentedControl, type SegmentedControlOption } from '@/components/ui/segmented-control'
+import { Tip } from '@/components/ui/tooltip'
 import { useThemeEpoch } from '@/hooks/use-theme-epoch'
+import { useI18n } from '@/i18n'
+import { Eye, SlidersHorizontal, ZoomIn } from '@/lib/icons'
 import { createDoubleTapDetector, isSmartZoomWheel } from '@/lib/trackpad-gestures'
 import { loadStarmapGraph } from '@/store/starmap'
 import type { StarmapGraph } from '@/types/hermes'
@@ -18,7 +22,7 @@ import { buildSimulation } from './simulation'
 import { formatDate } from './text'
 import { buildTimeAxis, dateAtReveal, type TimeAxis } from './time-axis'
 import { Timeline } from './timeline'
-import type { FadeBuckets, MemoryCard, Palette, Ring, RingLabelRect, SimLink, SimNode, Viewport } from './types'
+import type { FadeBuckets, GraphDetailMode, MemoryCard, Palette, Ring, RingLabelRect, SimLink, SimNode, Viewport } from './types'
 
 // How long a full play-through sweep takes (ms), reveal 0 → 1. Longer = the
 // build-up breathes; the eased middle no longer rushes past in a blink.
@@ -107,6 +111,7 @@ export function StarMap({
   onImport?: (graph: StarmapGraph) => void
   onResetMap?: () => void
 }) {
+  const { t } = useI18n()
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
   const wrapRef = useRef<HTMLDivElement | null>(null)
 
@@ -157,6 +162,7 @@ export function StarMap({
   const [selectedId, setSelectedId] = useState<null | string>(null)
   const [menuTarget, setMenuTarget] = useState<NodeMenuTarget | null>(null)
   const [size, setSize] = useState({ h: 0, w: 0 })
+  const [detailMode, setDetailMode] = useState<GraphDetailMode>('explore')
   // Increments on every theme repaint (shared hook) so the legend swatch and the
   // canvas palette re-resolve against the freshly-painted CSS custom properties.
   const themeEpoch = useThemeEpoch()
@@ -180,7 +186,17 @@ export function StarMap({
   // next shell when a new ring is reached — growth in discrete jumps, not a
   // constant creep. This ref is the camera's current (eased) fit radius.
   const camRadiusRef = useRef(RING_OUTER)
+  const fullFitRef = useRef(detailMode === 'all')
   const timeAxis = useMemo(() => buildTimeAxis(graph, 72), [graph])
+
+  const detailOptions = useMemo<SegmentedControlOption<GraphDetailMode>[]>(
+    () => [
+      { icon: Eye, id: 'overview', label: t.starmap.detailOverview },
+      { icon: ZoomIn, id: 'explore', label: t.starmap.detailExplore },
+      { icon: SlidersHorizontal, id: 'all', label: t.starmap.detailAll }
+    ],
+    [t.starmap.detailAll, t.starmap.detailExplore, t.starmap.detailOverview]
+  )
 
   // The current map as a WoW-style share code, recomputed only when the graph
   // changes (encode walks every node/edge/card, so don't redo it per render).
@@ -283,7 +299,7 @@ export function StarMap({
     resetFades()
     // Fit the actual disk (outermost ring), so a 3-ring map frames like a 12-ring
     // one — count changes the disk size, not the framing.
-    viewportRef.current = fitViewport(size.w, size.h, rings[rings.length - 1]?.r ?? RING_OUTER)
+    viewportRef.current = fitViewport(size.w, size.h, rings[rings.length - 1]?.r ?? RING_OUTER, fullFitRef.current)
     invalidate()
 
     if (selectedIdRef.current && !byId.has(selectedIdRef.current)) {
@@ -349,7 +365,7 @@ export function StarMap({
     const { h, w } = sizeRef.current
 
     if (w > 0 && h > 0) {
-      viewportRef.current = fitViewport(w, h, radius)
+      viewportRef.current = fitViewport(w, h, radius, fullFitRef.current)
     }
   }, [])
 
@@ -569,6 +585,7 @@ export function StarMap({
           adjacency: adjacencyRef.current,
           byId: byIdRef.current,
           ctx: offCtx,
+          detailMode,
           dpr: dprRef.current,
           fades: fadeRef.current,
           focusId: selectedIdRef.current ?? hoverRef.current,
@@ -672,7 +689,7 @@ export function StarMap({
 
       invalidateRef.current = () => {}
     }
-  }, [])
+  }, [detailMode])
 
   // Size the backing canvas (DPR-aware).
   useEffect(() => {
@@ -695,11 +712,12 @@ export function StarMap({
     const vp = viewportRef.current
     // Hit radius mirrors the billboarded draw: rested fit scale, screen space.
     const nodeK = fitScale(sizeRef.current.w, sizeRef.current.h, ringsRef.current)
+    const hitPad = detailMode === 'overview' ? 6 : detailMode === 'explore' ? 9 : 12
     let best: null | SimNode = null
     let bestD = Infinity
 
     for (const n of nodesRef.current) {
-      const r = nodeRadius(n) * nodeK + 6
+      const r = nodeRadius(n) * nodeK + hitPad
       const sx = n.x * vp.k + vp.x
       const sy = n.y * vp.k * TILT + vp.y
       const d = (sx - cssX) ** 2 + (sy - cssY) ** 2
@@ -766,12 +784,25 @@ export function StarMap({
     viewportRef.current = fitViewport(
       sizeRef.current.w,
       sizeRef.current.h,
-      ringsRef.current[ringsRef.current.length - 1]?.r ?? RING_OUTER
+      ringsRef.current[ringsRef.current.length - 1]?.r ?? RING_OUTER,
+      fullFitRef.current
     )
     selectedRingRef.current = null
     invalidate()
     setSelectedId(null)
   }
+
+  useEffect(() => {
+    fullFitRef.current = detailMode === 'all'
+    viewportRef.current = fitViewport(
+      sizeRef.current.w,
+      sizeRef.current.h,
+      ringsRef.current[ringsRef.current.length - 1]?.r ?? RING_OUTER,
+      fullFitRef.current
+    )
+    resetFades()
+    invalidate()
+  }, [detailMode, invalidate, resetFades])
 
   const onMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
     if (e.button !== 0) {
@@ -951,6 +982,22 @@ export function StarMap({
           revealStore={revealStore}
           ringStops={ringStops}
         />
+      </div>
+
+      <div className="pointer-events-auto absolute right-3 top-14 z-20 flex flex-col items-end gap-1 [-webkit-app-region:no-drag]">
+        <Tip label={t.starmap.detailHint} side="left">
+          <div aria-label={t.starmap.detailControl}>
+            <SegmentedControl
+              className="bg-background/70 shadow-[0_0_0_1px_color-mix(in_srgb,var(--border)_55%,transparent)] backdrop-blur"
+              onChange={setDetailMode}
+              options={detailOptions}
+              value={detailMode}
+            />
+          </div>
+        </Tip>
+        <div className="rounded-[4px] bg-background/55 px-2 py-0.5 text-[0.58rem] font-medium tabular-nums text-muted-foreground/75 shadow-[0_0_0_1px_color-mix(in_srgb,var(--border)_35%,transparent)] backdrop-blur">
+          {t.starmap.graphCounts(graph.nodes.length, graph.edges.length)}
+        </div>
       </div>
 
       {/* Share / import (WoW-talent-style code) — bottom-right, mirroring the legend. */}

@@ -618,30 +618,85 @@
   .graph-stage {
     position: relative;
     width: 100%;
-    height: 400px;
+    height: 460px;
     overflow: hidden;
     border-radius: 0 0 var(--radius) var(--radius);
     /* subtle radial vignette so the network reads as a "field" */
     background:
       radial-gradient(120% 90% at 50% 42%, rgba(128,202,156,0.05), transparent 62%),
-      var(--panel);
+    var(--panel);
   }
   .graph-canvas { position: absolute; inset: 0; }
   .graph-canvas canvas { display: block; }
 
-  .graph-hint {
+  .graph-controls {
     position: absolute;
-    right: 14px;
+    left: auto;
     top: 12px;
-    font-size: 11px;
-    color: var(--muted);
-    background: rgba(13,13,13,0.5);
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    padding: 3px 10px;
+    right: 14px;
+    z-index: 4;
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 6px;
+    flex-wrap: wrap;
     pointer-events: none;
-    z-index: 2;
-    opacity: 0.85;
+    max-width: calc(100% - 28px);
+  }
+  .graph-controls > * { pointer-events: auto; }
+  .graph-detail {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    padding: 2px;
+    border-radius: 7px;
+    border: 1px solid var(--border);
+    background: rgba(13,13,13,0.54);
+    box-shadow: 0 6px 18px rgba(0,0,0,0.18);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+  }
+  .graph-detail button {
+    appearance: none;
+    border: 0;
+    border-radius: 5px;
+    min-height: 22px;
+    padding: 3px 8px;
+    font: inherit;
+    font-size: 10.5px;
+    font-weight: 700;
+    cursor: pointer;
+    color: var(--muted);
+    background: transparent;
+    transition: background .15s ease, color .15s ease, border-color .15s ease, opacity .15s ease;
+  }
+  .graph-detail button:hover { color: var(--text); }
+  .graph-detail button.active {
+    color: #0D0D0D;
+    background: var(--mint);
+  }
+  .graph-count {
+    border: 1px solid var(--border);
+    background: rgba(13,13,13,0.50);
+    box-shadow: 0 6px 18px rgba(0,0,0,0.16);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+  }
+  .graph-count {
+    min-height: 22px;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    border-radius: 6px;
+    padding: 3px 8px;
+    color: var(--muted);
+    font-size: 10.5px;
+    font-weight: 600;
+    white-space: nowrap;
+  }
+  .graph-count strong {
+    color: var(--text);
+    font-weight: 700;
   }
 
   /* graph empty-state overlay (centered inside the stage) */
@@ -788,6 +843,7 @@
     .section-head.graph-head { align-items: stretch; flex-direction: column; }
     .tabs { width: 100%; }
     .tab { flex: 1 1 0; justify-content: center; padding: 7px 10px; }
+    .graph-controls { left: 10px; right: 10px; }
     /* keep the gear reachable on narrow screens; only the text pills collapse */
     .status-pills .status-pill { display: none; }
   }
@@ -795,7 +851,8 @@
     .wrap, .header-inner, .banner { padding-left: 16px; padding-right: 16px; }
     .section { margin-top: 26px; }
     .section-head { align-items: flex-start; }
-    .graph-stage { height: 360px; }
+    .graph-stage { height: 390px; }
+    .graph-count { flex: 1 1 100%; justify-content: center; }
     thead th, tbody td { padding-left: 12px; padding-right: 12px; }
     .stats { grid-template-columns: 1fr; }
     .brand-sub { display: none; }
@@ -1346,7 +1403,13 @@
         <div class="graph-body" id="graph-body">
           <div class="graph-stage">
             <div class="graph-canvas" id="graph-canvas"></div>
-            <div class="graph-hint" id="graph-hint" style="display:none;">drag &middot; scroll to zoom</div>
+            <div class="graph-controls" id="graph-controls" style="display:none;">
+              <span class="graph-count" id="graph-count"></span>
+              <div class="graph-detail" role="group" aria-label="Graph mode">
+                <button type="button" id="graph-detail-compact" data-detail="compact">Compact</button>
+                <button type="button" id="graph-detail-explore" data-detail="explore">Explore</button>
+              </div>
+            </div>
             <div class="graph-empty" id="graph-empty">
               <svg class="e-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
               <div class="e-msg">Loading threats&hellip;</div>
@@ -1490,6 +1553,18 @@
   var TIERS = ["public", "community", "local"];
   var activeTier = "public";
   var graphCache = { public: null, community: null, local: null };
+  var GRAPH_DETAIL_PRESETS = {
+    compact: { cap: 20, focusCap: 80 },
+    explore: { cap: 70, focusCap: 420 }
+  };
+  var GRAPH_MAX_VISIBLE_LEAVES = 3600;
+  var graphDetailMode = { public: "compact", community: "compact" };
+  var graphLeafLimit = {
+    public: GRAPH_DETAIL_PRESETS.compact.cap,
+    community: GRAPH_DETAIL_PRESETS.compact.cap
+  };
+  var graphFocus = { public: null, community: null };
+  var graphRenderMeta = { public: null, community: null, local: null };
 
   // Findings: keep the latest fetched list so the sort toggle can re-render
   // without a network round-trip. Backend returns newest-first already.
@@ -1761,13 +1836,24 @@
   var CATS = {
     dependency: { name: "Dependency",       color: "#F59E0B" }, // amber
     injection:  { name: "Prompt injection", color: "#FB7185" }, // rose
-    escalation: { name: "Escalation",       color: "#EF4444" }, // red
-    fileaccess: { name: "File access",      color: "#3B82F6" }, // blue
-    skill:      { name: "Suspicious skill", color: "#A78BFA" }, // violet
-    secret:     { name: "Secret exposure",  color: "#F97316" }, // orange
-    other:      { name: "Other",            color: "#94A3B8" }  // slate
+      escalation: { name: "Escalation",       color: "#EF4444" }, // red
+      fileaccess: { name: "File access",      color: "#3B82F6" }, // blue
+      skill:      { name: "Suspicious skill", color: "#A78BFA" }, // violet
+      secret:     { name: "Secret exposure",  color: "#F97316" }, // orange
+      ioc:        { name: "IOC",              color: "#14B8A6" }, // teal
+      other:      { name: "Other",            color: "#94A3B8" }  // slate
+    };
+    var CAT_ORDER = ["dependency", "injection", "escalation", "fileaccess", "skill", "secret", "ioc", "other"];
+  var CAT_SUMMARY = {
+    dependency: "Known vulnerable or malicious packages and versions observed during dependency checks.",
+    injection: "Prompt and instruction patterns that can redirect an agent, leak data, or bypass policy.",
+    escalation: "Tool calls and command shapes that can raise privilege or escape the expected workflow.",
+    fileaccess: "Reads, writes, and path access patterns that touch sensitive or unusual files.",
+    skill: "Skill and plugin activity with behavior that deserves extra review.",
+    secret: "Possible credentials, tokens, or other sensitive values exposed in agent context.",
+    ioc: "Indicators of compromise reported by agents or curated threat sources.",
+    other: "Signals that do not fit a narrower category yet."
   };
-  var CAT_ORDER = ["dependency", "injection", "escalation", "fileaccess", "skill", "secret", "other"];
 
   // Severity → ring color.
   var SEV_COLOR = {
@@ -1822,80 +1908,176 @@
     }).sort().join("");
   }
 
-  // Build {nodes, links} for one tier. Draws structure + magnitude, not one
-  // leaf per threat: log-scaled category hubs, per-ecosystem sub-hubs, and a
-  // severity-ranked leaf sample; each hub labelled with its real total.
-  var GRAPH_LEAF_CAP = 20;
-  var GRAPH_SEV_RANK = { critical: 0, high: 1, medium: 2, low: 3, info: 4 };
-  function graphHubVal(count) {
-    return 13 + Math.min(19, Math.log(count + 1) * 3.2);
+    // Build {nodes, links} for one tier. Draws structure + magnitude, with
+    // user-controlled leaf density instead of a silent fixed cap.
+    var GRAPH_SEV_RANK = { critical: 0, high: 1, medium: 2, low: 3, info: 4 };
+    function graphHubVal(count) {
+      return 13 + Math.min(19, Math.log(count + 1) * 3.2);
+    }
+  function graphPreset(tier) {
+      return GRAPH_DETAIL_PRESETS[graphDetailMode[tier] || "compact"] || GRAPH_DETAIL_PRESETS.compact;
   }
-  function graphSampleLeaves(items) {
-    return items.slice().sort(function (a, b) {
-      var ra = GRAPH_SEV_RANK[sevClass(a.severity)]; if (ra == null) ra = 9;
-      var rb = GRAPH_SEV_RANK[sevClass(b.severity)]; if (rb == null) rb = 9;
-      return ra - rb;
-    }).slice(0, GRAPH_LEAF_CAP);
-  }
-
-  function buildGraphData(tier, list) {
-    var nodes = [];
-    var links = [];
-    var centerId = "__center__";
-    nodes.push({
-      id: centerId, kind: "center",
-      label: TIER_LABEL[tier] || "Threat graph",
-      color: MINT, val: 22, threatTotal: list.length
-    });
-
-    function addLeaves(parentId, ck, items) {
-      graphSampleLeaves(items).forEach(function (t) {
-        var sev = sevClass(t.severity);
-        nodes.push({
-          id: "leaf:" + (t.identifier || (parentId + ":" + nodes.length)),
-          kind: "leaf", cat: ck, label: leafLabel(t),
-          color: CATS[ck].color, ring: SEV_COLOR[sev] || SEV_COLOR.info,
-          severity: sev, identifier: t.identifier || "", name: t.name || "", val: 5
-        });
-        links.push({ source: nodes[nodes.length - 1].id, target: parentId, kind: "leaf" });
-      });
+    function graphCap(tier) {
+      return Math.max(1, Number(graphLeafLimit[tier] || graphPreset(tier).cap || 20));
+    }
+    function graphFocusKey(focus) {
+      if (!focus) return "";
+      return focus.cat + (focus.eco ? "|eco:" + focus.eco : "");
+    }
+    function graphFocusLabel(focus) {
+      if (!focus) return "";
+      var meta = catMeta(focus.cat);
+      return meta.name + (focus.eco ? " / " + focus.eco : "");
+    }
+	    function graphMatchesFocus(t, focus) {
+	      if (!focus) return true;
+	      var ck = catKey(t.category);
+	      if (ck !== focus.cat) return false;
+	      if (!focus.eco) return true;
+	      return (String(t.identifier || "").split(":")[1] || "other").toLowerCase() === focus.eco;
+	    }
+	    function graphTopCategoryFocus(tier, list) {
+	      list = list || asList(graphCache[tier]);
+	      var counts = {};
+	      list.forEach(function (t) {
+	        var ck = catKey(t.category);
+	        counts[ck] = (counts[ck] || 0) + 1;
+	      });
+	      var best = "";
+	      Object.keys(counts).forEach(function (ck) {
+	        if (!best || counts[ck] > counts[best]) best = ck;
+	      });
+	      return best ? { cat: best } : null;
+	    }
+	    function ensureExploreFocus(tier, list) {
+	      if (tier === "local" || graphDetailMode[tier] !== "explore") return;
+	      list = list || asList(graphCache[tier]);
+	      if (graphFocus[tier] && list.some(function (t) { return graphMatchesFocus(t, graphFocus[tier]); })) return;
+	      var focus = graphTopCategoryFocus(tier, list);
+	      if (!focus) return;
+	      graphFocus[tier] = focus;
+	      graphLeafLimit[tier] = Math.max(graphLeafLimit[tier] || 0, graphPreset(tier).focusCap);
+	    }
+	    function graphSampleLeaves(items, limit) {
+	      limit = Math.max(0, Math.floor(Number(limit) || 0));
+	      return items.slice().sort(function (a, b) {
+        var ra = GRAPH_SEV_RANK[sevClass(a.severity)]; if (ra == null) ra = 9;
+        var rb = GRAPH_SEV_RANK[sevClass(b.severity)]; if (rb == null) rb = 9;
+        if (ra !== rb) return ra - rb;
+        return String(a.identifier || a.name || "").localeCompare(String(b.identifier || b.name || ""));
+      }).slice(0, limit);
     }
 
-    // Bucket by category; biggest first so the force layout settles cleanly.
-    var byCat = {};
+    function buildGraphData(tier, list) {
+      var nodes = [];
+      var links = [];
+      var centerId = "__center__";
+      var focus = graphFocus[tier];
+      var preset = graphPreset(tier);
+      var baseLimit = graphCap(tier);
+      var leafLimit = focus ? Math.max(baseLimit, preset.focusCap) : baseLimit;
+      var focusLabel = graphFocusLabel(focus);
+      var activeTotal = focus
+        ? list.filter(function (t) { return graphMatchesFocus(t, focus); }).length
+        : list.length;
+      var leafBudget = leafLimit >= activeTotal ? activeTotal : GRAPH_MAX_VISIBLE_LEAVES;
+      var shownLeaves = 0;
+      nodes.push({
+        id: centerId, kind: "center",
+        label: focusLabel || TIER_LABEL[tier] || "Threat graph",
+        color: MINT, val: 22, threatTotal: list.length, focusTotal: activeTotal
+      });
+
+      function addMoreNode(parentId, ck, hiddenCount, focusTarget) {
+        if (hiddenCount <= 0) return;
+        var moreId = "more:" + parentId + ":" + nodes.length;
+        nodes.push({
+          id: moreId, kind: "gmore", cat: ck,
+          label: "+" + num(hiddenCount) + " more",
+          color: CATS[ck].color, val: 4.8,
+          hiddenCount: hiddenCount,
+          focus: focusTarget
+        });
+        links.push({ source: moreId, target: parentId, kind: "leaf" });
+      }
+
+      function addLeaves(parentId, ck, items, limit, focusTarget) {
+        var remaining = Math.max(0, leafBudget - shownLeaves);
+        var sample = graphSampleLeaves(items, Math.min(limit, remaining));
+        sample.forEach(function (t) {
+          var sev = sevClass(t.severity);
+          nodes.push({
+            id: "leaf:" + (t.identifier || (parentId + ":" + nodes.length)),
+            kind: "leaf", cat: ck, label: leafLabel(t),
+            color: CATS[ck].color, ring: SEV_COLOR[sev] || SEV_COLOR.info,
+            severity: sev, identifier: t.identifier || "", name: t.name || "", val: 5,
+            tier: tier
+          });
+          links.push({ source: nodes[nodes.length - 1].id, target: parentId, kind: "leaf" });
+        });
+        shownLeaves += sample.length;
+        addMoreNode(parentId, ck, Math.max(0, items.length - sample.length), focusTarget);
+      }
+
+      // Bucket by category; biggest first so the force layout settles cleanly.
+      var byCat = {};
     list.forEach(function (t) {
       var ck = catKey(t.category);
       if (!byCat[ck]) byCat[ck] = [];
       byCat[ck].push(t);
     });
-    Object.keys(byCat).sort(function (a, b) { return byCat[b].length - byCat[a].length; }).forEach(function (ck) {
-      var items = byCat[ck];
-      var meta = CATS[ck] || { name: ck, color: "#8891A0" };
-      var hubId = "__cat__:" + ck;
-      nodes.push({ id: hubId, kind: "hub", cat: ck, label: meta.name, count: items.length, color: meta.color, val: graphHubVal(items.length) });
-      links.push({ source: hubId, target: centerId, kind: "hub" });
+      Object.keys(byCat).sort(function (a, b) { return byCat[b].length - byCat[a].length; }).forEach(function (ck) {
+        var items = byCat[ck];
+        var meta = CATS[ck] || { name: ck, color: "#8891A0" };
+        var hubId = "__cat__:" + ck;
+        var catFocus = { cat: ck };
+        var categoryActive = !focus || focus.cat === ck;
+        nodes.push({
+          id: hubId, kind: "hub", cat: ck, label: meta.name, count: items.length,
+          color: meta.color, val: graphHubVal(items.length), focus: catFocus,
+          dimmed: !!focus && focus.cat !== ck
+        });
+        links.push({ source: hubId, target: centerId, kind: "hub" });
 
-      // Dependencies span ecosystems — split the big bucket into npm / pypi /
-      // cargo / … sub-hubs so thousands of deps read as structure, not a pile.
-      if (ck === "dependency" && items.length > GRAPH_LEAF_CAP) {
-        var byEco = {};
-        items.forEach(function (t) {
-          var eco = (String(t.identifier || "").split(":")[1] || "other").toLowerCase();
-          if (!byEco[eco]) byEco[eco] = [];
-          byEco[eco].push(t);
-        });
-        Object.keys(byEco).sort(function (a, b) { return byEco[b].length - byEco[a].length; }).forEach(function (eco) {
-          var subId = hubId + ":" + eco;
-          nodes.push({ id: subId, kind: "hub", cat: ck, label: eco, count: byEco[eco].length, color: meta.color, val: graphHubVal(byEco[eco].length) });
-          links.push({ source: subId, target: hubId, kind: "hub" });
-          addLeaves(subId, ck, byEco[eco]);
-        });
-      } else {
-        addLeaves(hubId, ck, items);
-      }
-    });
-    return { nodes: nodes, links: links };
-  }
+        // Dependencies span ecosystems — split the big bucket into npm / pypi /
+        // cargo / … sub-hubs so thousands of deps read as structure, not a pile.
+        if (ck === "dependency" && items.length > baseLimit) {
+          var byEco = {};
+          items.forEach(function (t) {
+            var eco = (String(t.identifier || "").split(":")[1] || "other").toLowerCase();
+            if (!byEco[eco]) byEco[eco] = [];
+            byEco[eco].push(t);
+          });
+          var ecos = Object.keys(byEco).sort(function (a, b) { return byEco[b].length - byEco[a].length; });
+          var perEcoLimit = (!focus || focus.eco) ? leafLimit : Math.max(1, Math.ceil(leafLimit / Math.max(1, ecos.length)));
+          ecos.forEach(function (eco) {
+            var subId = hubId + ":" + eco;
+            var ecoFocus = { cat: ck, eco: eco };
+            var ecoActive = categoryActive && (!focus || !focus.eco || focus.eco === eco);
+            nodes.push({
+              id: subId, kind: "hub", cat: ck, label: eco, count: byEco[eco].length,
+              color: meta.color, val: graphHubVal(byEco[eco].length),
+              focus: ecoFocus, dimmed: !!focus && !ecoActive
+            });
+            links.push({ source: subId, target: hubId, kind: "hub" });
+            if (ecoActive) addLeaves(subId, ck, byEco[eco], perEcoLimit, ecoFocus);
+          });
+        } else {
+          if (categoryActive) addLeaves(hubId, ck, items, leafLimit, catFocus);
+        }
+      });
+      graphRenderMeta[tier] = {
+        shownLeaves: shownLeaves,
+        totalThreats: list.length,
+        activeTotal: activeTotal,
+        hiddenLeaves: Math.max(0, activeTotal - shownLeaves),
+        focusLabel: focusLabel,
+        cap: leafLimit,
+        nodes: nodes.length,
+        links: links.length
+      };
+      return { nodes: nodes, links: links, meta: graphRenderMeta[tier] };
+    }
 
   // ---- Local tier: one connected activity graph -----------------------------
   // Same force-graph as public/community, from /api/local-activity: machine root
@@ -2074,6 +2256,8 @@
   var fgSig = { public: null, community: null, local: null };  // last-rendered signature per tier
   var fgTierShown = null;    // which tier's data is currently in the instance
   var didInitialZoom = false;
+  var graphNodesShown = [];
+  var graphLastNodeClickAt = 0;
 
   // Umanitek flag mark (the 3 white paths from assets/umanitek-icon.svg, in its
   // inner group coords). Drawn as vectors so it stays crisp at any zoom.
@@ -2205,18 +2389,20 @@
     ctx.restore();
   }
 
-  function nodeCanvas(node, ctx, scale) {
-    var kind = node.kind;
-    var isCenter = kind === "center";
-    var isSession = kind === "session";
-    var isHub = kind === "hub";
-    var isCall = kind === "call";
-    var isMore = kind === "more";
-    var isThreat = kind === "leaf" || kind === "lthreat";
-    var r = Math.sqrt(Math.max(node.val || 1, 1)) * 1.9;
+    function nodeCanvas(node, ctx, scale) {
+      var kind = node.kind;
+      var isCenter = kind === "center";
+      var isSession = kind === "session";
+      var isHub = kind === "hub";
+      var isCall = kind === "call";
+      var isMore = kind === "more" || kind === "gmore";
+      var isThreat = kind === "leaf" || kind === "lthreat";
+      var r = Math.sqrt(Math.max(node.val || 1, 1)) * 1.9;
+      ctx.save();
+      if (node.dimmed) ctx.globalAlpha = 0.38;
 
-    // filled circle — center is pure black (flag), sessions a steel panel, calls
-    // a neutral dark dot, hubs + threat leaves their solid category color.
+      // filled circle — center is pure black (flag), sessions a steel panel, calls
+      // a neutral dark dot, hubs + threat leaves their solid category color.
     ctx.beginPath();
     ctx.arc(node.x, node.y, r, 0, 2 * Math.PI, false);
     ctx.fillStyle = isCenter ? "#000000"
@@ -2267,14 +2453,14 @@
 
     // label
     var big = isCenter || isSession || isHub;
-    var fontPx = (isCenter ? 6.5 : (isSession || isHub) ? 5.5 : 4.6);
-    // Declutter: tool-call / "+more" labels are secondary — show only when
-    // zoomed in. Threat leaves appear a touch earlier; sessions/hubs/center always.
-    if ((isCall || isMore) && scale < 1.35) return;
-    if (isThreat && scale < 0.9) return;
-    ctx.font = (big ? "600 " : "500 ") + fontPx + "px -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
-    ctx.textAlign = "center";
-    ctx.textBaseline = "top";
+      var fontPx = (isCenter ? 6.5 : (isSession || isHub) ? 5.5 : 4.6);
+      // Declutter: tool-call / "+more" labels are secondary — show only when
+      // zoomed in. Threat leaves appear a touch earlier; sessions/hubs/center always.
+      if ((isCall || isMore) && scale < 1.35) { ctx.restore(); return; }
+      if (isThreat && scale < 0.9) { ctx.restore(); return; }
+      ctx.font = (big ? "600 " : "500 ") + fontPx + "px -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "top";
     var txt = node.label || "";
     var ty = node.y + r + 2.4;
     // subtle shadow for legibility over the dark field
@@ -2291,10 +2477,11 @@
       var cstr = node.count.toLocaleString();
       ctx.fillStyle = "rgba(0,0,0,0.85)";
       ctx.fillText(cstr, node.x + 0.4 / scale, cy + 0.4 / scale);
-      ctx.fillStyle = node.color;
-      ctx.fillText(cstr, node.x, cy);
+        ctx.fillStyle = node.color;
+        ctx.fillText(cstr, node.x, cy);
+      }
+      ctx.restore();
     }
-  }
 
   // enlarge the clickable/hover area to match the drawn node + label
   function nodePointerArea(node, color, ctx) {
@@ -2305,21 +2492,26 @@
     ctx.fill();
   }
 
-  function nodeTooltip(node) {
-    if (node.kind === "center") {
-      var span = (node.start ? lclock(node.start) : "") + (node.end && node.end !== node.start ? " – " + lclock(node.end) : "");
-      return '<div class="graph-tip"><div class="t-name">' + esc(node.label) + '</div>' +
-        '<div class="t-cat">' + (node.sessionCount || 0) + ' session' + (node.sessionCount === 1 ? '' : 's') +
-          ' · ' + (node.threatTotal || 0) + ' threat' + (node.threatTotal === 1 ? '' : 's') + '</div>' +
-        (span ? '<div class="t-id">' + esc(span) + '</div>' : '') + '</div>';
-    }
-    if (node.kind === "hub") {
-      var hc = node.count != null
-        ? (node.count.toLocaleString() + ' threat' + (node.count === 1 ? '' : 's') + ' · showing top ' + Math.min(GRAPH_LEAF_CAP, node.count) + ' by severity')
-        : 'category hub';
-      return '<div class="graph-tip"><div class="t-name">' + esc(node.label) + '</div>' +
-        '<div class="t-cat">' + hc + '</div></div>';
-    }
+    function nodeTooltip(node) {
+      if (node.kind === "center") {
+        var span = (node.start ? lclock(node.start) : "") + (node.end && node.end !== node.start ? " – " + lclock(node.end) : "");
+        var focusLine = node.focusTotal != null && node.focusTotal !== node.threatTotal
+          ? num(node.focusTotal) + ' in focus · '
+          : '';
+        var sessionLine = node.sessionCount != null
+          ? (node.sessionCount || 0) + ' session' + (node.sessionCount === 1 ? '' : 's') + ' · '
+          : '';
+        return '<div class="graph-tip"><div class="t-name">' + esc(node.label) + '</div>' +
+          '<div class="t-cat">' + sessionLine + focusLine + num(node.threatTotal || 0) + ' threat' + (node.threatTotal === 1 ? '' : 's') + '</div>' +
+          (span ? '<div class="t-id">' + esc(span) + '</div>' : '') + '</div>';
+      }
+	      if (node.kind === "hub") {
+	        var hc = node.count != null
+	          ? (node.count.toLocaleString() + ' threat' + (node.count === 1 ? '' : 's') + ' · click for details')
+	          : 'category hub';
+	        return '<div class="graph-tip"><div class="t-name">' + esc(node.label) + '</div>' +
+	          '<div class="t-cat">' + hc + '</div></div>';
+      }
     if (node.kind === "session") {
       var line = (node.status || "session") + (node.threatCount ? ' · ' + node.threatCount + ' threat' + (node.threatCount === 1 ? '' : 's') + (node.maxSeverity ? ' · ' + node.maxSeverity : '') : ' · clean');
       var sub = [];
@@ -2345,10 +2537,14 @@
           (nthr ? '<span class="t-cat">' + nthr + ' threat' + (nthr === 1 ? '' : 's') + ' tripped</span>' : '') + '</div>' : '') +
         '</div>';
     }
-    if (node.kind === "more") {
-      return '<div class="graph-tip"><div class="t-name">' + esc(node.label) + '</div>' +
-        '<div class="t-cat">click to see the whole session</div></div>';
-    }
+      if (node.kind === "more") {
+        return '<div class="graph-tip"><div class="t-name">' + esc(node.label) + '</div>' +
+          '<div class="t-cat">click to see the whole session</div></div>';
+      }
+      if (node.kind === "gmore") {
+        return '<div class="graph-tip"><div class="t-name">' + esc(node.label) + '</div>' +
+          '<div class="t-cat">click to load more in this branch</div></div>';
+      }
     var sev = node.severity || "info";
     var title = node.name || node.identifier || "threat";
     var meta = catMeta(node.cat);
@@ -2490,14 +2686,102 @@
     if (Array.isArray(f.references)) f.references.forEach(function (u) { if (u && out.indexOf(u) < 0) out.push(u); });
     return out;
   }
-  function reportersHTML(d) {
-    if (typeof d.reporters !== "number" || d.reporters <= 0) return "";
-    return '<div class="modal-reporters"><div class="big">' + d.reporters + '</div>' +
-      '<div class="rlabel"><b>' + d.reporters + ' agent' + (d.reporters === 1 ? '' : 's') + '</b> reported this threat' +
-      (d.framework ? ' &middot; ' + esc(d.framework) : '') + '</div></div>';
-  }
+	  function reportersHTML(d) {
+	    if (typeof d.reporters !== "number" || d.reporters <= 0) return "";
+	    return '<div class="modal-reporters"><div class="big">' + d.reporters + '</div>' +
+	      '<div class="rlabel"><b>' + d.reporters + ' agent' + (d.reporters === 1 ? '' : 's') + '</b> reported this threat' +
+	      (d.framework ? ' &middot; ' + esc(d.framework) : '') + '</div></div>';
+	  }
 
-  function renderThreatDetail(d, node) {
+	  function graphThreatsForFocus(tier, focus) {
+	    return asList(graphCache[tier]).filter(function (t) { return graphMatchesFocus(t, focus); });
+	  }
+
+	  function graphTopSeverity(items) {
+	    var best = "info";
+	    var bestRank = GRAPH_SEV_RANK.info;
+	    (items || []).forEach(function (t) {
+	      var sev = sevClass(t.severity);
+	      var rank = GRAPH_SEV_RANK[sev];
+	      if (rank == null) rank = GRAPH_SEV_RANK.info;
+	      if (rank < bestRank) {
+	        best = sev;
+	        bestRank = rank;
+	      }
+	    });
+	    return best;
+	  }
+
+	  function severityMixText(items) {
+	    var counts = { critical: 0, high: 0, medium: 0, low: 0, info: 0 };
+	    (items || []).forEach(function (t) { counts[sevClass(t.severity)] += 1; });
+	    return ["critical", "high", "medium", "low", "info"].filter(function (sev) {
+	      return counts[sev] > 0;
+	    }).map(function (sev) {
+	      return sev + " " + num(counts[sev]);
+	    }).join(" · ") || "none";
+	  }
+
+	  function categoryThreatListHTML(items) {
+	    var sample = graphSampleLeaves(items || [], 10);
+	    if (!sample.length) return '<div class="modal-empty">No threats are currently stored in this category.</div>';
+	    var rows = sample.map(function (t) {
+	      var sev = sevClass(t.severity);
+	      var title = t.name || t.title || t.identifier || "Threat";
+	      var meta = [];
+	      if (t.identifier) meta.push(t.identifier);
+	      if (t.modified || t.ts || t.time) meta.push(fmtDateFull(t.modified || t.ts || t.time));
+	      return '<div class="ldx-row">' +
+	        '<span class="pill ' + sev + '">' + esc(sev) + '</span>' +
+	        '<span class="ldx-title">' + esc(title) + (meta.length ? '<br><span class="ldx-time">' + esc(meta.join(" · ")) + '</span>' : '') + '</span>' +
+	      '</div>';
+	    }).join("");
+	    var remaining = Math.max(0, (items || []).length - sample.length);
+	    return '<div class="m-sech">Representative threats</div><div class="ldx-list">' + rows + '</div>' +
+	      (remaining ? '<div class="modal-empty">' + num(remaining) + ' more in this category.</div>' : '');
+	  }
+
+	  function openCategoryModal(node) {
+	    var overlay = $("threat-modal");
+	    if (!overlay || !node || !node.focus) return;
+	    var focus = node.focus;
+	    var cat = catKey(focus.cat || node.cat);
+	    var meta = CATS[cat] || CATS.other;
+	    var color = meta.color;
+	    var items = graphThreatsForFocus(activeTier, focus);
+	    var topSev = graphTopSeverity(items);
+	    var label = graphFocusLabel(focus) || node.label || meta.name;
+	    var renderMeta = graphRenderMeta[activeTier] || {};
+	    var focusedNow = graphSameFocus(graphFocus[activeTier], focus);
+	    var rows = [
+	      ["Graph", TIER_LABEL[activeTier] || "Threat graph"],
+	      ["Scope", label],
+	      ["Threats", num(items.length)],
+	      ["Severity mix", severityMixText(items)]
+	    ];
+	    if (focus.eco) rows.splice(2, 0, ["Ecosystem", focus.eco, true]);
+	    if (focusedNow && renderMeta.shownLeaves != null) {
+	      rows.push(["Visible now", num(renderMeta.shownLeaves) + " of " + num(renderMeta.activeTotal || items.length)]);
+	    }
+
+	    TM.node = { kind: "category", focus: focus };
+	    TM.finding = null;
+	    overlay.style.setProperty("--accent", color);
+	    $("tm-ico").innerHTML = catIconSVG(cat, color);
+	    $("tm-title").textContent = label;
+	    $("tm-tags").innerHTML = modalTags(cat, topSev, false) + '<span class="m-tag">Category</span>';
+	    $("tm-id").textContent = "";
+	    var idrow = $("tm-idrow"); if (idrow) idrow.style.display = "none";
+	    var copyBtn = $("tm-copy"); if (copyBtn) { copyBtn.textContent = "Copy"; copyBtn.classList.remove("ok"); }
+	    $("tm-body").innerHTML =
+	      '<div class="modal-desc">' + esc(CAT_SUMMARY[cat] || CAT_SUMMARY.other) + '</div>' +
+	      gridHTML(rows) +
+	      categoryThreatListHTML(items);
+	    overlay.classList.add("open");
+	    overlay.setAttribute("aria-hidden", "false");
+	  }
+
+	  function renderThreatDetail(d, node) {
     var cat = catKey(d.category || (node && node.cat));
     var color = CATS[cat].color;
     var sev = sevClass(d.severity || (node && node.severity) || "info");
@@ -2659,9 +2943,9 @@
     return '<div class="m-sech">From the threat graph</div>' + html;
   }
 
-  function openFindingModal(f) {
-    var overlay = $("threat-modal");
-    if (!overlay) return;
+    function openFindingModal(f) {
+      var overlay = $("threat-modal");
+      if (!overlay) return;
     TM.node = null;
     TM.finding = f;
     var cat = catKey(f.category || f.type);
@@ -2700,22 +2984,157 @@
       getJSON("/api/threat?tier=" + encodeURIComponent(tier) + "&identifier=" + encodeURIComponent(id))
         .then(function (d) { THREAT_CACHE[ckey] = d || {}; handle(d); })
         .catch(function () { lookup(i + 1); });   // base facts are already on screen
-    };
-    lookup(0);
-  }
+      };
+      lookup(0);
+    }
+
+    function graphSameFocus(a, b) {
+      return graphFocusKey(a) === graphFocusKey(b);
+    }
+    function graphActiveThreatsFor(focus) {
+      var list = asList(graphCache[activeTier]);
+      return focus ? list.filter(function (t) { return graphMatchesFocus(t, focus); }) : list;
+    }
+    function invalidateGraphTier(tier) {
+      fgSig[tier] = null;
+      didInitialZoom = false;
+    }
+    function loadMoreGraph(focusTarget) {
+      if (activeTier === "local") return;
+      if (focusTarget && graphDetailMode[activeTier] === "compact") graphDetailMode[activeTier] = "explore";
+      if (focusTarget && !graphSameFocus(graphFocus[activeTier], focusTarget)) {
+        graphFocus[activeTier] = focusTarget;
+      }
+      var threats = graphActiveThreatsFor(graphFocus[activeTier]);
+      var current = graphCap(activeTier);
+      var preset = graphPreset(activeTier);
+      var baseStep = graphFocus[activeTier] ? preset.focusCap : preset.cap;
+      var next = Math.max(current + baseStep, Math.ceil(current * 1.8));
+      if (threats.length > 0) next = Math.min(next, threats.length);
+      graphLeafLimit[activeTier] = Math.max(current + 1, next);
+      invalidateGraphTier(activeTier);
+      renderGraphTab();
+    }
+    function setGraphDetailMode(mode) {
+      if (!GRAPH_DETAIL_PRESETS[mode] || activeTier === "local") return;
+      graphDetailMode[activeTier] = mode;
+      graphLeafLimit[activeTier] = graphPreset(activeTier).cap;
+      if (mode === "compact") graphFocus[activeTier] = null;
+      else ensureExploreFocus(activeTier);
+      if (mode === "explore" && graphFocus[activeTier]) {
+        graphLeafLimit[activeTier] = Math.max(graphLeafLimit[activeTier], graphPreset(activeTier).focusCap);
+      }
+      invalidateGraphTier(activeTier);
+      renderGraphTab();
+    }
+    function updateGraphControls(isLocal, meta) {
+      var controls = $("graph-controls");
+      if (!controls) return;
+      if (isLocal || !meta) {
+        controls.style.display = "none";
+        return;
+      }
+      controls.style.display = "";
+      Object.keys(GRAPH_DETAIL_PRESETS).forEach(function (mode) {
+        var btn = $("graph-detail-" + mode);
+        if (btn) btn.classList.toggle("active", (graphDetailMode[activeTier] || "compact") === mode);
+      });
+      var count = $("graph-count");
+      if (count) {
+        count.style.display = meta.focusLabel ? "" : "none";
+        count.innerHTML = meta.focusLabel ? '<strong>' + esc(meta.focusLabel) + '</strong>' : "";
+      }
+    }
 
   function onNodeClick(node) {
     if (!node) return;
+    graphLastNodeClickAt = Date.now();
     // Every local node opens a real detail panel; catalog leaves use the threat
     // modal; the machine root just reframes the whole graph.
     if (node.kind === "lthreat") { if (node.finding) openFindingModal(node.finding); return; }
     if (node.kind === "leaf") { openThreatModal(node); return; }
+    if (node.kind === "gmore") { loadMoreGraph(node.focus || null); return; }
+    if (node.kind === "hub" && activeTier !== "local" && node.focus) {
+      if (graphDetailMode[activeTier] === "explore" && !graphSameFocus(graphFocus[activeTier], node.focus)) {
+        graphFocus[activeTier] = node.focus;
+        graphLeafLimit[activeTier] = Math.max(graphCap(activeTier), graphPreset(activeTier).focusCap);
+        invalidateGraphTier(activeTier);
+        renderGraphTab();
+      }
+      openCategoryModal(node);
+      return;
+    }
     if (node.kind === "session") { openSessionModal(node); return; }
     if (node.kind === "call") { openCallModal(node); return; }
     if (node.kind === "more" && node.session) { openSessionModal(node.session); return; }
     if (fg && typeof node.x === "number") {          // center/hub: frame it
       try { fg.centerAt(node.x, node.y, 500); fg.zoom(node.kind === "center" ? 1.4 : 2.4, 500); } catch (e) {}
     }
+  }
+
+  function graphClickableNode(node) {
+    return node && (
+      node.kind === "hub" || node.kind === "gmore" || node.kind === "leaf" ||
+      node.kind === "lthreat" || node.kind === "session" || node.kind === "call" ||
+      node.kind === "more"
+    );
+  }
+  function graphPriorityClickNode(node) {
+    return node && (
+      node.kind === "hub" || node.kind === "gmore" || node.kind === "session" ||
+      node.kind === "call" || node.kind === "more"
+    );
+  }
+
+  function graphNodeHitRadius(node) {
+    var base = Math.sqrt(Math.max(node.val || 1, 1)) * 1.9 + 8;
+    if (node.kind === "hub") return Math.max(base, 18);
+    if (node.kind === "gmore") return Math.max(base, 15);
+    if (node.kind === "leaf" || node.kind === "lthreat") return Math.max(base, 11);
+    return Math.max(base, 13);
+  }
+
+  function graphNodeScreenPoint(node) {
+    if (!fg || typeof node.x !== "number" || typeof node.y !== "number") return null;
+    if (typeof fg.graph2ScreenCoords === "function") {
+      try { return fg.graph2ScreenCoords(node.x, node.y); } catch (e) {}
+    }
+    return { x: node.x, y: node.y };
+  }
+
+  function graphNodeAtEvent(e) {
+    var el = $("graph-canvas");
+    if (!el || !graphNodesShown.length) return null;
+    var rect = el.getBoundingClientRect();
+    var x = e.clientX - rect.left;
+    var y = e.clientY - rect.top;
+    function nearest(filter) {
+      var best = null;
+      var bestD = Infinity;
+      graphNodesShown.forEach(function (node) {
+        if (!filter(node)) return;
+        var p = graphNodeScreenPoint(node);
+        if (!p) return;
+        var dx = p.x - x;
+        var dy = p.y - y;
+        var d = dx * dx + dy * dy;
+        var r = graphNodeHitRadius(node);
+        if (d <= r * r && d < bestD) {
+          best = node;
+          bestD = d;
+        }
+      });
+      return best;
+    }
+    return nearest(graphPriorityClickNode) || nearest(graphClickableNode);
+  }
+
+  function handleGraphCanvasClickFallback(e) {
+    if (Date.now() - graphLastNodeClickAt < 120) return;
+    var node = graphNodeAtEvent(e);
+    if (!node) return;
+    e.preventDefault();
+    onNodeClick(node);
   }
 
   function wireModal() {
@@ -2741,10 +3160,11 @@
 
   function ensureGraph() {
     if (fg) return fg;
-    if (typeof window.ForceGraph !== "function") return null;
-    var el = $("graph-canvas");
-    if (!el) return null;
-    fg = window.ForceGraph()(el)
+	    if (typeof window.ForceGraph !== "function") return null;
+	    var el = $("graph-canvas");
+	    if (!el) return null;
+	    el.addEventListener("click", handleGraphCanvasClickFallback);
+	    fg = window.ForceGraph()(el)
       .backgroundColor("rgba(0,0,0,0)")
       .width(el.clientWidth || 600)
       .height(el.clientHeight || 400)
@@ -2763,39 +3183,50 @@
       .d3VelocityDecay(0.3)
       .enableNodeDrag(true)
       .onNodeClick(onNodeClick)
-      .onNodeHover(function (node) {
-        var c = $("graph-canvas");
-        if (c) c.style.cursor = (node && (node.kind === "leaf" || node.kind === "lthreat")) ? "pointer" : "default";
-      })
+        .onNodeHover(function (node) {
+          var c = $("graph-canvas");
+          if (c) c.style.cursor = (node && (node.kind === "leaf" || node.kind === "lthreat" || node.kind === "hub" || node.kind === "gmore")) ? "pointer" : "default";
+        })
       .onEngineStop(function () {
         // frame the whole network once it first settles
-        if (!didInitialZoom && fg) {
-          didInitialZoom = true;
-          try { fg.zoomToFit(400, 40); } catch (e) {}
-        }
+          if (!didInitialZoom && fg) {
+            didInitialZoom = true;
+            try { fg.zoomToFit(450, 72); } catch (e) {}
+          }
       });
-    tuneForces(fg, false);
-    return fg;
-  }
+      tuneForces(fg, false, 0);
+      return fg;
+    }
 
-  // Spread the layout by tier density: the ~100-node local graph needs stronger
-  // repulsion + longer links to read as an open web; small tiers stay tight.
-  function tuneForces(g, dense) {
-    try { g.d3Force("charge").strength(dense ? -240 : -140); } catch (e) {}
-    try {
-      var lf = g.d3Force("link");
-      if (lf) lf.distance(dense ? function (l) { return l.kind === "hub" ? 48 : 26; } : 30);
-    } catch (e) {}
-    try { if (typeof g.d3ReheatSimulation === "function") g.d3ReheatSimulation(); } catch (e) {}
-  }
+    // Spread the layout by tier density: the ~100-node local graph needs stronger
+    // repulsion + longer links to read as an open web; small tiers stay tight.
+    function tuneForces(g, dense, nodeCount) {
+      var veryDense = Number(nodeCount || 0) > 800;
+      var moderatelyDense = dense || Number(nodeCount || 0) > 180;
+      try { g.cooldownTicks(veryDense ? 260 : (moderatelyDense ? 190 : 120)); } catch (e) {}
+      try { g.d3VelocityDecay(veryDense ? 0.22 : (moderatelyDense ? 0.25 : 0.3)); } catch (e) {}
+      try { g.d3Force("charge").strength(veryDense ? -620 : (moderatelyDense ? -360 : -140)); } catch (e) {}
+      try {
+        var lf = g.d3Force("link");
+        if (lf) lf.distance(moderatelyDense
+          ? function (l) {
+              if (l.kind === "hub") return veryDense ? 88 : 68;
+              if (l.kind === "leaf") return veryDense ? 72 : 56;
+              return veryDense ? 38 : 30;
+            }
+          : 30);
+      } catch (e) {}
+      try { if (typeof g.d3ReheatSimulation === "function") g.d3ReheatSimulation(); } catch (e) {}
+    }
 
-  function showGraphEmpty(msgHTML) {
-    var empty = $("graph-empty");
+	    function showGraphEmpty(msgHTML) {
+	      graphNodesShown = [];
+	      var empty = $("graph-empty");
     if (empty) {
       empty.querySelector(".e-msg").innerHTML = msgHTML;
       empty.style.display = "flex";
     }
-    var hint = $("graph-hint"); if (hint) hint.style.display = "none";
+    var controls = $("graph-controls"); if (controls) controls.style.display = "none";
   }
   function hideGraphEmpty() {
     var empty = $("graph-empty"); if (empty) empty.style.display = "none";
@@ -2844,21 +3275,27 @@
     }
 
     hideGraphEmpty();
-    $("graph-hint").style.display = "";
 
-    var sig = isLocal ? localSig(data) : graphSig(asList(data));
-    // Re-feed only on data change or a tier switch that isn't mounted yet, so
-    // the poll doesn't reset the user's pan/zoom.
-    if (fgTierShown !== activeTier || fgSig[activeTier] !== sig) {
-      fgSig[activeTier] = sig;
-      fgTierShown = activeTier;
-      didInitialZoom = false;
-      g.graphData(isLocal ? buildLocalGraphData(data) : buildGraphData(activeTier, asList(data)));
-      tuneForces(g, isLocal);
+      var graphList = isLocal ? null : asList(data);
+      if (!isLocal) ensureExploreFocus(activeTier, graphList);
+      var sig = isLocal ? localSig(data)
+        : graphSig(graphList) + "|" + (graphDetailMode[activeTier] || "compact") +
+          "|" + graphCap(activeTier) + "|" + graphFocusKey(graphFocus[activeTier]);
+      // Re-feed only on data change or a tier switch that isn't mounted yet, so
+      // the poll doesn't reset the user's pan/zoom.
+      if (fgTierShown !== activeTier || fgSig[activeTier] !== sig) {
+        fgSig[activeTier] = sig;
+	        fgTierShown = activeTier;
+	        didInitialZoom = false;
+	        var graphData = isLocal ? buildLocalGraphData(data) : buildGraphData(activeTier, graphList);
+	        graphNodesShown = graphData.nodes || [];
+	        g.graphData(graphData);
+        tuneForces(g, isLocal, graphData.nodes.length);
+      }
+      updateGraphControls(isLocal, isLocal ? null : graphRenderMeta[activeTier]);
+      // keep canvas sized to its container
+      resizeGraph();
     }
-    // keep canvas sized to its container
-    resizeGraph();
-  }
 
   function resizeGraph() {
     if (!fg) return;
@@ -3407,8 +3844,12 @@
   TIERS.forEach(function (t) {
     $("tab-" + t).addEventListener("click", function () { switchTier(t); });
   });
+	  Object.keys(GRAPH_DETAIL_PRESETS).forEach(function (mode) {
+	    var btn = $("graph-detail-" + mode);
+	    if (btn) btn.addEventListener("click", function () { setGraphDetailMode(mode); });
+	  });
 
-  // wire findings sort control
+	  // wire findings sort control
   function setFindingsSort(mode) {
     findingsSort = (mode === "severity") ? "severity" : "newest";
     var bn = $("sort-newest"), bs = $("sort-severity");

@@ -83,6 +83,7 @@ def test_unix_installer_uses_isolated_blackbox_dkg_node() -> None:
     assert '"apiPort"] = api_port' in text
     assert 'options["port"] = store_port' in text
     assert 'blackbox_dkg subscribe "$blackbox_cg" --save' in text
+    assert "uses_unpaired_shared_dkg_home" in text
     assert 'blackbox["dkg_home"] = dkg_home' in text
     assert 'blackbox["dkg_bin"] = dkg_bin' in text
     assert "npm i -g" not in text
@@ -104,6 +105,7 @@ def test_windows_installer_uses_isolated_blackbox_dkg_node() -> None:
     assert "Invoke-BlackboxDkg start" in text
     assert 'data["apiPort"] = api_port' in text
     assert 'options["port"] = store_port' in text
+    assert "uses_unpaired_shared_dkg_home" in text
     assert 'blackbox["dkg_home"] = dkg_home' in text
     assert 'blackbox["dkg_bin"] = dkg_bin' in text
     assert "npm i -g" not in text

@@ -31,12 +31,39 @@ def _capture(monkeypatch, body='{"ok": true}'):
     captured = {}
 
     def fake_urlopen(req, timeout=None):
-        captured["url"] = req.full_url
-        captured["method"] = req.get_method()
-        captured["headers"] = dict(req.header_items())
-        captured["body"] = req.data.decode() if req.data else None
-        captured["timeout"] = timeout
+        call = {
+            "url": req.full_url,
+            "method": req.get_method(),
+            "headers": dict(req.header_items()),
+            "body": req.data.decode() if req.data else None,
+            "timeout": timeout,
+        }
+        captured.setdefault("calls", []).append(call)
+        captured.update(call)
         return _FakeResponse(body)
+
+    monkeypatch.setattr(dkg_client.urllib.request, "urlopen", fake_urlopen)
+    return captured
+
+
+def _capture_sequence(monkeypatch, bodies):
+    """Patch urlopen to record requests and return one JSON body per call."""
+    captured = {"calls": []}
+    remaining = list(bodies)
+
+    def fake_urlopen(req, timeout=None):
+        if not remaining:
+            raise AssertionError(f"unexpected urlopen call: {req.get_method()} {req.full_url}")
+        call = {
+            "url": req.full_url,
+            "method": req.get_method(),
+            "headers": dict(req.header_items()),
+            "body": req.data.decode() if req.data else None,
+            "timeout": timeout,
+        }
+        captured["calls"].append(call)
+        captured.update(call)
+        return _FakeResponse(remaining.pop(0))
 
     monkeypatch.setattr(dkg_client.urllib.request, "urlopen", fake_urlopen)
     return captured
@@ -80,17 +107,29 @@ def test_generic_dkg_env_does_not_bleed_into_blackbox(monkeypatch, tmp_path):
 
 
 def test_share_knowledge_asset_payload(monkeypatch):
-    cap = _capture(monkeypatch)
+    cap = _capture_sequence(
+        monkeypatch,
+        [
+            '{"ok": true}',
+            '{"jobId":"share-job-1","state":"queued"}',
+            '{"jobId":"share-job-1","state":"succeeded","entitiesPromoted":1}',
+        ],
+    )
     client = dkg_client.DkgClient(url="http://node", token="tok")
     quads = [{"subject": "s", "predicate": "p", "object": '"o"'}]
-    client.share_knowledge_asset("cg", "notes", quads)
-    assert cap["url"] == "http://node/api/knowledge-assets"
-    assert cap["method"] == "POST"
-    body = json.loads(cap["body"])
+    result = client.share_knowledge_asset("cg", "notes", quads)
+    assert result["state"] == "succeeded"
+    assert cap["calls"][0]["url"] == "http://node/api/knowledge-assets"
+    assert cap["calls"][0]["method"] == "POST"
+    body = json.loads(cap["calls"][0]["body"])
     assert body["contextGraphId"] == "cg"
     assert body["name"] == "notes"
     assert body["quads"] == quads
-    assert body["alsoShareSwm"] is True
+    assert body["alsoShareSwm"] is False
+    assert cap["calls"][1]["url"] == "http://node/api/knowledge-assets/notes/swm/share-async"
+    assert json.loads(cap["calls"][1]["body"]) == {"contextGraphId": "cg", "entities": "all"}
+    assert cap["calls"][2]["url"] == "http://node/api/knowledge-assets/swm/share-jobs/share-job-1"
+    assert cap["calls"][2]["method"] == "GET"
     # Auth header present.
     assert any(v == "Bearer tok" for v in cap["headers"].values())
     # Shares that also write to SWM use the longer store timeout, not the read one.
@@ -121,6 +160,38 @@ def test_register_context_graph_sends_policies(monkeypatch):
     assert cap["url"].endswith("/api/context-graph/register")
 
 
+def test_create_context_graph_can_seed_allowed_agents(monkeypatch):
+    cap = _capture(monkeypatch)
+    client = dkg_client.DkgClient(url="http://node", token=None)
+    client.create_context_graph(
+        "cg",
+        "Threat Graph",
+        description="desc",
+        access_policy=1,
+        allowed_agents=["0x0000000000000000000000000000000000000001"],
+    )
+    body = json.loads(cap["body"])
+    assert body == {
+        "id": "cg",
+        "name": "Threat Graph",
+        "description": "desc",
+        "accessPolicy": 1,
+        "allowedAgents": ["0x0000000000000000000000000000000000000001"],
+    }
+
+
+def test_context_graph_agent_helpers(monkeypatch):
+    cap = _capture(monkeypatch, body='{"allowedAgents":["0xabc"]}')
+    client = dkg_client.DkgClient(url="http://node", token="tok")
+    assert client.list_context_graph_agents("umanitek/blackbox") == ["0xabc"]
+    assert cap["url"].endswith("/api/context-graph/umanitek%2Fblackbox/participants")
+
+    cap = _capture(monkeypatch)
+    client.add_context_graph_agent("umanitek/blackbox", "0xabc")
+    assert cap["url"].endswith("/api/context-graph/umanitek%2Fblackbox/add-participant")
+    assert json.loads(cap["body"]) == {"agentAddress": "0xabc"}
+
+
 def test_redeliver_join_approval_payload(monkeypatch):
     cap = _capture(monkeypatch, body='{"ok":true,"delivered":true}')
     client = dkg_client.DkgClient(url="http://node", token="tok")
@@ -139,7 +210,7 @@ def test_publish_payload(monkeypatch):
     client = dkg_client.DkgClient(url="http://node", token="t")
     out = client.publish("cg", "threat-x", epochs=3)
     assert out["ual"] == "did:dkg:1/2/3"
-    assert cap["url"].endswith("/api/knowledge-assets/threat-x/vm/publish")
+    assert cap["url"].endswith("/api/knowledge-assets/threat-x/vm/publish-async")
     body = json.loads(cap["body"])
     assert body["options"]["publishEpochs"] == 3
 
@@ -175,7 +246,7 @@ def test_write_path_raises_dkg_error_on_http_error(monkeypatch):
 def test_share_is_idempotent_on_already_finalized(monkeypatch):
     # Re-sharing a threat whose deterministic KA name already exists sealed must
     # be treated as success, not a 500 (verified live against a v10 node).
-    body = b'{"error":"assertion ... is already finalized with a different merkleRoot"}'
+    body = b'{"error":"assertion ... is already finalized"}'
 
     def raise_finalized(req, timeout=None):
         raise urllib.error.HTTPError(req.full_url, 500, "err", {}, io.BytesIO(body))
@@ -186,8 +257,36 @@ def test_share_is_idempotent_on_already_finalized(monkeypatch):
     assert res.get("idempotent") is True
 
 
-def test_onchain_calls_use_long_timeout(monkeypatch):
-    # register/publish are on-chain and must not use the 3s read timeout.
+def test_share_repairs_wm_merkle_conflict(monkeypatch):
+    conflict = (
+        '{"jobId":"share-job-1","state":"failed",'
+        '"lastError":{"code":"WM_DRAFT_CONFLICT","message":"draft conflict: '
+        'different merkleRoot"}}'
+    )
+    cap = _capture_sequence(
+        monkeypatch,
+        [
+            '{"jobId":"share-job-1","state":"queued"}',
+            conflict,
+            '{"seededFrom":{"layer":"swm"}}',
+            '{"jobId":"share-job-2","state":"queued"}',
+            '{"jobId":"share-job-2","state":"succeeded","entitiesPromoted":1}',
+        ],
+    )
+    client = dkg_client.DkgClient(url="http://node", token="t")
+    res = client.share_finalized_knowledge_asset("cg", "threat-abc")
+    assert res["jobId"] == "share-job-2"
+    assert res["state"] == "succeeded"
+    assert cap["calls"][2]["url"].endswith("/api/knowledge-assets/threat-abc/wm/pull-from")
+    assert json.loads(cap["calls"][2]["body"]) == {
+        "contextGraphId": "cg",
+        "layer": "swm",
+        "onConflict": "replace",
+    }
+
+
+def test_register_context_graph_uses_long_timeout(monkeypatch):
+    # Register is on-chain and must not use the 3s read timeout.
     seen = {}
 
     def capture(req, timeout=None):
@@ -198,8 +297,27 @@ def test_onchain_calls_use_long_timeout(monkeypatch):
     client = dkg_client.DkgClient(url="http://node", token="t")
     client.register_context_graph("cg", 0, 0)
     assert seen["timeout"] == dkg_client._ONCHAIN_TIMEOUT
-    client.publish("cg", "n")
-    assert seen["timeout"] == dkg_client._ONCHAIN_TIMEOUT
+
+
+def test_publish_async_queues_with_store_timeout(monkeypatch):
+    cap = _capture(monkeypatch, body='{"jobId":"job-1"}')
+    client = dkg_client.DkgClient(url="http://node", token="t")
+    client.publish_async("cg", "n")
+    assert cap["url"].endswith("/api/knowledge-assets/n/vm/publish-async")
+    assert cap["timeout"] == dkg_client._STORE_TIMEOUT
+
+
+def test_share_async_wait_raises_failed_job(monkeypatch):
+    _capture_sequence(
+        monkeypatch,
+        [
+            '{"jobId":"share-job-1","state":"queued"}',
+            '{"jobId":"share-job-1","state":"failed","lastError":{"message":"not-agent-gated"}}',
+        ],
+    )
+    client = dkg_client.DkgClient(url="http://node", token="t")
+    with pytest.raises(dkg_client.DkgError, match="not-agent-gated"):
+        client.share_async_and_wait("cg", "n", timeout_s=1, poll_s=1)
 
 
 def test_extract_binding_shapes():

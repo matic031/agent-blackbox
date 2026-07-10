@@ -171,7 +171,7 @@ def test_report_quads_carry_kind():
 
 def test_no_publish_never_records_in_ledger():
     entries = [{"type": "dependency", "ecosystem": "npm", "name": "evil", "version": "1.0.0"}]
-    _, _, _, ids = cli._seed_entries(None, None, entries, publish=False, already=set(), dry_run=True)
+    _, _, _, ids, _attempted = cli._seed_entries(None, None, entries, publish=False, already=set(), dry_run=True)
     assert ids == []
 
 

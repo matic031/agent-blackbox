@@ -2,6 +2,7 @@
 
 This graph is intentionally scoped to what a user actually learns over time:
 - non-base, learned/profile skills (agent-created or used),
+- directly-related catalog skills that explain where those learned skills connect,
 - memory chunks from ``MEMORY.md`` / ``USER.md`` as first-class nodes.
 
 Skill links come from declared ``related_skills``. Memory-to-skill links are
@@ -168,6 +169,44 @@ def build_edges(nodes: dict[str, SkillNode]) -> list[tuple[str, str]]:
     return edges
 
 
+def _has_learning_signal(node: SkillNode) -> bool:
+    return node.created_by == "agent" or node.use_count > 0
+
+
+def _learning_neighborhood(all_skills: dict[str, SkillNode]) -> tuple[dict[str, SkillNode], set[str], set[str]]:
+    """Skills worth drawing in the learning graph.
+
+    The core graph remains anchored on learned/profile skills, but it also pulls
+    in directly-related neighbors from the catalog. Those context nodes make the
+    graph explorable: a user can see where a learned skill points next without
+    having to use that neighboring skill first.
+    """
+    learned_names = {
+        name
+        for name, node in all_skills.items()
+        if node.source != "base" and _has_learning_signal(node)
+    }
+    related_names: set[str] = set()
+
+    for name in learned_names:
+        node = all_skills[name]
+        related_names.update(target for target in node.related if target in all_skills)
+
+    for name, node in all_skills.items():
+        if name in learned_names:
+            continue
+        if any(target in learned_names for target in node.related):
+            related_names.add(name)
+
+    graph_names = learned_names | related_names
+
+    return (
+        {name: node for name, node in all_skills.items() if name in graph_names},
+        learned_names,
+        related_names - learned_names,
+    )
+
+
 def density_stats(nodes: dict[str, SkillNode], edges: list[tuple[str, str]]) -> dict[str, Any]:
     linked: set[str] = set()
     for a, b in edges:
@@ -255,23 +294,20 @@ def build_learning_graph() -> dict[str, Any]:
     """Full payload for the desktop learning panel.
 
     Focus on what is profile-learned and actionable:
-    - skills that are NOT base-installed and show real learning signal
-      (agent-created or used),
-    - memory chunks as first-class graph nodes connected to those learned skills.
+    - profile skills with real learning signal (agent-created or used),
+    - directly-related catalog skills so the visible graph has explorable
+      context around learned nodes,
+    - memory chunks as first-class graph nodes connected to visible skills.
     """
     all_skills = build_skill_nodes(_skill_roots())
-    learned_skills = {
-        name: node
-        for name, node in all_skills.items()
-        if node.source != "base" and (node.created_by == "agent" or node.use_count > 0)
-    }
-    skill_edges = build_edges(learned_skills)
+    graph_skills, learned_names, related_names = _learning_neighborhood(all_skills)
+    skill_edges = build_edges(graph_skills)
     memory_cards = _memory_cards()
-    memory_edges = _memory_skill_edges(memory_cards, list(learned_skills.values()))
+    memory_edges = _memory_skill_edges(memory_cards, list(graph_skills.values()))
 
     edges = skill_edges + memory_edges
     clusters: dict[str, int] = {}
-    for node in learned_skills.values():
+    for node in graph_skills.values():
         clusters[node.category] = clusters.get(node.category, 0) + 1
     if memory_cards:
         clusters["memory"] = len(memory_cards)
@@ -281,6 +317,9 @@ def build_learning_graph() -> dict[str, Any]:
             "id": n.name,
             "label": n.name,
             "kind": "skill",
+            "source": n.source,
+            "learned": n.name in learned_names,
+            "context": n.name in related_names,
             "timestamp": n.timestamp,
             "category": n.category,
             "useCount": n.use_count,
@@ -288,7 +327,7 @@ def build_learning_graph() -> dict[str, Any]:
             "createdBy": n.created_by,
             "pinned": n.pinned,
         }
-        for n in learned_skills.values()
+        for n in graph_skills.values()
     ]
     for i, card in enumerate(memory_cards):
         graph_nodes.append(
@@ -315,10 +354,11 @@ def build_learning_graph() -> dict[str, Any]:
         ],
         "memory": memory_cards,
         "stats": {
-            **density_stats(learned_skills, skill_edges),
+            **density_stats(graph_skills, skill_edges),
             "memory_nodes": len(memory_cards),
             "memory_skill_edges": len(memory_edges),
-            "learned_skills": len(learned_skills),
+            "learned_skills": len(learned_names),
+            "related_skill_nodes": len(related_names),
         },
     }
 

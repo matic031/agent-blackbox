@@ -61,6 +61,17 @@ def _is_already_finalized(exc: DkgError) -> bool:
     return "already finalized" in msg or "already exists" in msg
 
 
+def _is_wm_merkle_conflict(exc: DkgError) -> bool:
+    """True when the local WM draft/finalized assertion is stale vs SWM."""
+    msg = str(exc).lower()
+    return (
+        "wm_draft_conflict" in msg
+        or "draft conflict" in msg
+        or "different merkleroot" in msg
+        or "different merkle root" in msg
+    )
+
+
 def _is_already_published(exc: DkgError) -> bool:
     """True when ``vm/publish`` failed only because the KA is already on-chain.
 
@@ -74,6 +85,16 @@ def _is_already_published(exc: DkgError) -> bool:
         or "already on chain" in msg
         or "already exists on chain" in msg
     )
+
+
+def _job_id_from_error(exc: DkgError) -> Optional[str]:
+    """Extract a daemon-returned job id from an HTTP error body if present."""
+    msg = str(exc)
+    for key in ("existingJobId", "jobId", "id"):
+        m = re.search(rf'"{key}"\s*:\s*"([^"]+)"', msg)
+        if m:
+            return m.group(1)
+    return None
 
 
 def _coerce_chain_id(value: Any) -> Optional[int]:
@@ -253,8 +274,14 @@ class DkgClient:
 
     # -- context graph -----------------------------------------------------
 
-    def create_context_graph(self, cg_id: str, name: str, description: str = "",
-                             access_policy: Optional[int] = None) -> Dict[str, Any]:
+    def create_context_graph(
+        self,
+        cg_id: str,
+        name: str,
+        description: str = "",
+        access_policy: Optional[int] = None,
+        allowed_agents: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
         """Create a local context graph (free, off-chain).
 
         Pass ``access_policy=0`` to create it PUBLIC. This is the *local*
@@ -272,7 +299,26 @@ class DkgClient:
             body["description"] = description
         if access_policy is not None:
             body["accessPolicy"] = access_policy
+        if allowed_agents:
+            body["allowedAgents"] = allowed_agents
         return self._request("POST", "/api/context-graph/create", body)
+
+    def add_context_graph_agent(self, cg_id: str, agent_address: str) -> Dict[str, Any]:
+        """Add an agent address to the context graph's SWM allowlist."""
+        enc = urllib.parse.quote(cg_id, safe="")
+        return self._request(
+            "POST",
+            f"/api/context-graph/{enc}/add-participant",
+            {"agentAddress": agent_address},
+            timeout=_STORE_TIMEOUT,
+        )
+
+    def list_context_graph_agents(self, cg_id: str) -> List[str]:
+        """Return agent addresses allowed in a context graph."""
+        enc = urllib.parse.quote(cg_id, safe="")
+        result = self._request("GET", f"/api/context-graph/{enc}/participants", timeout=_STORE_TIMEOUT)
+        agents = result.get("allowedAgents") if isinstance(result, dict) else None
+        return [str(agent) for agent in agents] if isinstance(agents, list) else []
 
     def register_context_graph(self, cg_id: str, access_policy: int, publish_policy: int) -> Dict[str, Any]:
         """Register a CG on-chain with explicit access/publish policies.
@@ -360,27 +406,144 @@ class DkgClient:
     # -- knowledge assets --------------------------------------------------
 
     def share_knowledge_asset(self, cg_id: str, name: str, quads: List[Quad]) -> Dict[str, Any]:
-        """One-shot create+write+seal+share of a KA to SWM.
+        """Create/finalize a KA, then explicitly share its sealed assertion to SWM.
 
-        ``POST /api/knowledge-assets {contextGraphId, name, quads, alsoShareSwm:true}``.
-        Used for outbound sightings and curated-threat authoring.
+        Private/agent-gated context graphs require the node's sender-key SWM
+        envelope. DKG's old one-shot ``alsoShareSwm:true`` path can leave assets
+        without a publish-ready share intent, so Blackbox uses the explicit v10
+        lifecycle: write/seal to WM, then enqueue ``/swm/share-async`` and poll
+        the share job.
 
         Idempotent: threat/report KA names are deterministic (``sha256`` of the
         threat identifier), so re-sharing the same threat is expected. The node
-        rejects re-finalizing an existing sealed assertion; we treat that as
-        success — the content is already on the graph.
+        rejects re-finalizing an existing sealed assertion; we then share the
+        already-sealed assertion instead of treating the whole operation as done.
         """
         _validate_quads_literal_sizes(quads)
         try:
-            return self._request(
+            self._request(
                 "POST",
                 "/api/knowledge-assets",
-                {"contextGraphId": cg_id, "name": name, "quads": quads, "alsoShareSwm": True},
+                {"contextGraphId": cg_id, "name": name, "quads": quads, "alsoShareSwm": False},
                 timeout=_STORE_TIMEOUT,
             )
         except DkgError as exc:
+            if not (_is_already_finalized(exc) or _is_wm_merkle_conflict(exc)):
+                raise
+        return self.share_finalized_knowledge_asset(cg_id, name)
+
+    def _ka_path(self, name: str, suffix: str = "") -> str:
+        enc = urllib.parse.quote(name, safe="")
+        return f"/api/knowledge-assets/{enc}{suffix}"
+
+    def pull_knowledge_asset_from(
+        self,
+        cg_id: str,
+        name: str,
+        layer: str = "swm",
+        *,
+        on_conflict: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Pull the latest KA assertion from another layer into local WM.
+
+        Used to repair stale local finalized state before re-sharing old assets.
+        """
+        body: Dict[str, Any] = {"contextGraphId": cg_id, "layer": layer}
+        if on_conflict:
+            body["onConflict"] = on_conflict
+        return self._request(
+            "POST",
+            self._ka_path(name, "/wm/pull-from"),
+            body,
+            timeout=_STORE_TIMEOUT,
+        )
+
+    def share_async(self, cg_id: str, name: str) -> Dict[str, Any]:
+        """Queue an async SWM share job for an already-finalized WM KA."""
+        try:
+            return self._request(
+                "POST",
+                self._ka_path(name, "/swm/share-async"),
+                {"contextGraphId": cg_id, "entities": "all"},
+                timeout=_STORE_TIMEOUT,
+            )
+        except DkgError as exc:
+            job_id = _job_id_from_error(exc)
+            if job_id:
+                return {"jobId": job_id, "state": "existing"}
+            raise
+
+    def share_job(self, job_id: str) -> Dict[str, Any]:
+        """Fetch one async SWM share job by id."""
+        enc = urllib.parse.quote(job_id, safe="")
+        return self._request("GET", f"/api/knowledge-assets/swm/share-jobs/{enc}", timeout=_STORE_TIMEOUT)
+
+    @staticmethod
+    def _share_job_id(result: Dict[str, Any]) -> Optional[str]:
+        if not isinstance(result, dict):
+            return None
+        job = result.get("job") if isinstance(result.get("job"), dict) else result
+        for key in ("jobId", "id", "job_id", "shareJobId", "existingJobId"):
+            value = job.get(key)
+            if value:
+                return str(value)
+        return None
+
+    def wait_for_share_job(
+        self,
+        job_id: str,
+        *,
+        timeout_s: float = 600.0,
+        poll_s: float = 5.0,
+    ) -> Dict[str, Any]:
+        """Poll an async SWM share job until it succeeds or fails."""
+        deadline = time.monotonic() + max(1.0, float(timeout_s))
+        last_state = "unknown"
+        last_job: Dict[str, Any] = {}
+        while True:
+            job = self.share_job(job_id)
+            last_job = job if isinstance(job, dict) else {}
+            last_state = str(
+                last_job.get("state") or last_job.get("status") or last_job.get("phase") or "unknown"
+            ).lower()
+            if last_state in {"succeeded", "success", "completed", "complete"}:
+                return last_job
+            if last_state in {"failed", "error", "cancelled", "canceled"}:
+                detail = json.dumps(last_job, sort_keys=True)[:1000]
+                raise DkgError(f"SWM share job {job_id} failed: {detail}")
+            if time.monotonic() >= deadline:
+                detail = json.dumps(last_job, sort_keys=True)[:1000]
+                raise DkgError(
+                    f"SWM share job {job_id} timed out after {int(timeout_s)}s "
+                    f"(last state={last_state}, job={detail})"
+                )
+            time.sleep(max(1.0, float(poll_s)))
+
+    def share_async_and_wait(
+        self,
+        cg_id: str,
+        name: str,
+        *,
+        timeout_s: float = 600.0,
+        poll_s: float = 5.0,
+    ) -> Dict[str, Any]:
+        """Queue async SWM share and poll the share job to completion."""
+        result = self.share_async(cg_id, name)
+        job_id = self._share_job_id(result)
+        if not job_id:
+            return result
+        return self.wait_for_share_job(job_id, timeout_s=timeout_s, poll_s=poll_s)
+
+    def share_finalized_knowledge_asset(self, cg_id: str, name: str) -> Dict[str, Any]:
+        """Share an already-finalized WM KA to SWM via async job polling."""
+        try:
+            return self.share_async_and_wait(cg_id, name)
+        except DkgError as exc:
             if _is_already_finalized(exc):
                 return {"name": name, "idempotent": True}
+            if _is_wm_merkle_conflict(exc):
+                self.pull_knowledge_asset_from(cg_id, name, "swm", on_conflict="replace")
+                return self.share_async_and_wait(cg_id, name)
             raise
 
     def write_private_knowledge_asset(self, cg_id: str, name: str, quads: List[Quad]) -> Dict[str, Any]:
@@ -393,26 +556,14 @@ class DkgClient:
             timeout=_STORE_TIMEOUT,
         )
 
-    def publish(self, cg_id: str, name: str, epochs: int = 1) -> Dict[str, Any]:
-        """Mint a sealed KA on-chain (VM). Returns ``{kaId, ual, txHash, ...}``.
-
-        Idempotent on re-publish: if the KA is already on-chain (lost ledger, or
-        a prior publish that confirmed after our client timed out), we treat it
-        as success instead of paying for a retry.
-
-        Guards the DKG v10 **HTTP 207** "minted-but-context-graph-binding-failed"
-        case: the KA mints (UAL is valid, TRAC is spent) but isn't bound to the
-        CG, so it never appears in CG-scoped queries — useless for the threat
-        graph. 207 is a 2xx, so it wouldn't otherwise raise; we turn a present
-        ``contextGraphError`` into a :class:`DkgError` so the caller does NOT
-        record it to the seeded ledger as "landed".
-        """
+    def publish_async(self, cg_id: str, name: str, epochs: int = 1) -> Dict[str, Any]:
+        """Queue an async VM publish job for an already SWM-shared sealed KA."""
         try:
             result = self._request(
                 "POST",
-                f"/api/knowledge-assets/{name}/vm/publish",
+                self._ka_path(name, "/vm/publish-async"),
                 {"contextGraphId": cg_id, "options": {"publishEpochs": max(1, int(epochs))}},
-                timeout=_ONCHAIN_TIMEOUT,
+                timeout=_STORE_TIMEOUT,
             )
         except DkgError as exc:
             if _is_already_published(exc):
@@ -420,8 +571,101 @@ class DkgClient:
             raise
         if isinstance(result, dict) and result.get("contextGraphError"):
             raise DkgError(
-                f"vm/publish {name}: KA minted (ual={result.get('ual')}) but context-graph "
-                f"binding failed: {result.get('contextGraphError')} — not recording as published"
+                f"vm/publish-async {name}: context-graph binding failed: "
+                f"{result.get('contextGraphError')}"
+            )
+        return result
+
+    def publisher_job(self, job_id: str) -> Dict[str, Any]:
+        """Fetch one async publisher job by id."""
+        query = urllib.parse.urlencode({"id": job_id})
+        resp = self._request("GET", f"/api/publisher/job?{query}", timeout=_STORE_TIMEOUT)
+        if isinstance(resp.get("job"), dict):
+            return resp["job"]
+        return resp
+
+    @staticmethod
+    def _publisher_job_id(result: Dict[str, Any]) -> Optional[str]:
+        if not isinstance(result, dict):
+            return None
+        job = result.get("job") if isinstance(result.get("job"), dict) else result
+        for key in ("id", "jobId", "job_id", "publisherJobId"):
+            value = job.get(key)
+            if value:
+                return str(value)
+        return None
+
+    def wait_for_publish_job(
+        self,
+        job_id: str,
+        *,
+        timeout_s: float = 600.0,
+        poll_s: float = 5.0,
+    ) -> Dict[str, Any]:
+        """Poll an async VM publisher job until it finalizes or fails."""
+        deadline = time.monotonic() + max(1.0, float(timeout_s))
+        last_status = "unknown"
+        last_job: Dict[str, Any] = {}
+        while True:
+            job = self.publisher_job(job_id)
+            last_job = job if isinstance(job, dict) else {}
+            last_status = str(
+                last_job.get("status") or last_job.get("state") or last_job.get("phase") or "unknown"
+            ).lower()
+            if last_job.get("contextGraphError"):
+                raise DkgError(
+                    f"publisher job {job_id}: context-graph binding failed: "
+                    f"{last_job.get('contextGraphError')}"
+                )
+            if last_status in {"finalized", "succeeded", "success", "completed", "complete", "published"}:
+                return last_job
+            if last_status in {"failed", "error", "cancelled", "canceled"}:
+                detail = json.dumps(last_job, sort_keys=True)[:1000]
+                raise DkgError(f"publisher job {job_id} failed: {detail}")
+            if time.monotonic() >= deadline:
+                detail = json.dumps(last_job, sort_keys=True)[:1000]
+                raise DkgError(
+                    f"publisher job {job_id} timed out after {int(timeout_s)}s "
+                    f"(last status={last_status}, job={detail})"
+                )
+            time.sleep(max(1.0, float(poll_s)))
+
+    def publish_async_and_wait(
+        self,
+        cg_id: str,
+        name: str,
+        epochs: int = 1,
+        *,
+        timeout_s: float = 600.0,
+        poll_s: float = 5.0,
+    ) -> Dict[str, Any]:
+        """Queue async VM publish and poll the publisher job to finality."""
+        result = self.publish_async(cg_id, name, epochs=epochs)
+        if result.get("idempotent"):
+            return result
+        job_id = self._publisher_job_id(result)
+        if not job_id:
+            return result
+        return self.wait_for_publish_job(job_id, timeout_s=timeout_s, poll_s=poll_s)
+
+    def publish(self, cg_id: str, name: str, epochs: int = 1) -> Dict[str, Any]:
+        """Mint a sealed KA on-chain (VM) via async job polling.
+
+        Idempotent on re-publish: if the KA is already on-chain (lost ledger, or
+        a prior publish that confirmed after our client hit its timeout), we
+        treat it as success instead of paying for a retry.
+        """
+        result = self.publish_async_and_wait(
+            cg_id,
+            name,
+            epochs=epochs,
+            timeout_s=_ONCHAIN_TIMEOUT,
+            poll_s=5.0,
+        )
+        if isinstance(result, dict) and result.get("contextGraphError"):
+            raise DkgError(
+                f"vm/publish {name}: context-graph binding failed: "
+                f"{result.get('contextGraphError')} — not recording as published"
             )
         return result
 

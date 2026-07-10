@@ -92,20 +92,23 @@ SCHEMA_CONTRIBUTOR_PRED = "http://schema.org/contributor"
 # Defaults
 # ---------------------------------------------------------------------------
 
-#: Default PRIVATE community context-graph id (config key ``context_graph_id``).
-#: Private/allowlist so its SWM replicates over the working relay path; members
-#: are auto-admitted by ``blackbox curate auto-accept``. Fresh graph because the
-#: old public ``umanitek/guardian-threats-staging`` can't be flipped (on-chain
-#: access policy is locked once registered).
-DEFAULT_CONTEXT_GRAPH_ID = "umanitek/blackbox-threats-staging"
+#: Default community context-graph id (config key ``context_graph_id``).
+#: PUBLIC graph (on-chain access open, publish authority owner-gated, empty
+#: allowlist): reads/SWM fan-out need no join or approval for any node, writes
+#: stay locked to the curator wallet, and Verifiable Memory publishing works —
+#: VM finalization needs core peers to hold the SWM data for their ACKs, which
+#: a private CG's member-only ciphertext can never satisfy. The private
+#: ``umanitek/blackbox-threats-staging`` experiment is retired for that reason;
+#: its on-chain access policy is locked, so it can never serve the public tier.
+DEFAULT_CONTEXT_GRAPH_ID = "umanitek/guardian-threats-staging"
 
-#: Legacy graph ids that predate the move to the private Blackbox CG. A node
-#: still pointed at one of these old public defaults is transparently switched to
+#: Legacy graph ids from earlier defaults (including the retired private CG).
+#: A node still pointed at one of these is transparently switched to
 #: ``DEFAULT_CONTEXT_GRAPH_ID`` at config-load time, so an existing install syncs
 #: the current graph with zero manual steps. A genuinely custom ``context_graph_id``
 #: (anything not in this set) is always left untouched.
 LEGACY_CONTEXT_GRAPH_IDS = frozenset({
-    "umanitek/guardian-threats-staging",
+    "umanitek/blackbox-threats-staging",
     "umanitek/guardian-threats",
 })
 

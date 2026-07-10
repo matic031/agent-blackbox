@@ -184,6 +184,65 @@ def test_blackbox_sync_empty_zero_data_prints_repair_hint(monkeypatch, capsys):
     assert "redeliver-approval --agent 0xabc" in out
 
 
+def test_blackbox_sync_retries_already_member_zero_data(monkeypatch, capsys):
+    join_calls = []
+    refresh_calls = []
+
+    class FakeClient:
+        def __init__(self, url, **_kwargs):
+            self.url = url
+
+        def subscribe_context_graph(self, cg_id):
+            return {}
+
+    class FakeRuleset:
+        def __init__(self, dependency_count):
+            self.dependency_count = dependency_count
+
+        def counts(self):
+            return {
+                "injection": 0,
+                "escalation": 0,
+                "dependency": self.dependency_count,
+                "fileaccess": 0,
+                "skill": 0,
+            }
+
+    def fake_join(*args, **kwargs):
+        join_calls.append((args, kwargs))
+        return "Join request: this node is already a member of cg."
+
+    def fake_refresh(cfg, client):
+        refresh_calls.append((cfg, client))
+        return FakeRuleset(0 if len(refresh_calls) == 1 else 3)
+
+    monkeypatch.setattr(cli_mod, "_request_join", fake_join)
+    monkeypatch.setattr(cli_mod, "DkgClient", FakeClient)
+    monkeypatch.setattr(
+        cli_mod,
+        "load_blackbox_config",
+        lambda: config_mod.BlackboxConfig(context_graph_id="cg", dkg_url=constants.DEFAULT_DKG_URL),
+    )
+    monkeypatch.setattr(
+        cli_mod,
+        "_wait_for_context_graph_catchup",
+        lambda *a, **k: {
+            "ok": True,
+            "status": "done",
+            "detail": "peers 4/4, data 0, shared memory 0",
+        },
+    )
+    monkeypatch.setattr(cli_mod.ruleset, "refresh", fake_refresh)
+
+    args = argparse.Namespace(wait=True, timeout=180, require_rules=True)
+    assert cli_mod._cmd_sync(args) == 0
+    assert len(join_calls) == 2
+    assert len(refresh_calls) == 2
+    out = capsys.readouterr().out
+    assert "Attempting automatic join-approval handshake repair" in out
+    assert "Ruleset synced from cg after DKG join repair" in out
+
+
 def test_blackbox_curate_redeliver_approval(monkeypatch, capsys):
     calls = []
 
@@ -477,3 +536,40 @@ def test_share_sighting_forwards_candidate_fields(monkeypatch):
     objs = " ".join(x["object"] for x in shared["quads"])
     assert "ssh-private-key" in objs  # the category signature travels
     assert "read_file" in objs
+
+
+def test_auto_approve_skips_open_access_graph():
+    # Approving a join on an open CG would write the first allowedAgent entry
+    # and flip the graph invite-only for everyone else — must be a no-op.
+    approved = []
+
+    class OpenClient:
+        def list_context_graph_agents(self, cg_id):
+            return []
+
+        def list_join_requests(self, cg_id):
+            return [{"agentAddress": "0x" + "1" * 40}]
+
+        def approve_join(self, cg_id, addr):
+            approved.append(addr)
+
+    assert cli_mod._auto_approve_joins(OpenClient(), "umanitek/guardian-threats-staging") == []
+    assert approved == []
+
+
+def test_auto_approve_still_admits_on_curated_graph():
+    approved = []
+
+    class CuratedClient:
+        def list_context_graph_agents(self, cg_id):
+            return ["0x" + "c" * 40]
+
+        def list_join_requests(self, cg_id):
+            return [{"agentAddress": "0x" + "1" * 40}]
+
+        def approve_join(self, cg_id, addr):
+            approved.append(addr)
+
+    out = cli_mod._auto_approve_joins(CuratedClient(), "some/private-cg")
+    assert len(out) == 1
+    assert approved == ["0x" + "1" * 40]

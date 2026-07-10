@@ -41,7 +41,7 @@ BLACKBOX_DKG_BIN="${BLACKBOX_DKG_BIN:-$BLACKBOX_DKG_CLI_DIR/node_modules/.bin/dk
 BLACKBOX_DKG_PACKAGE="${BLACKBOX_DKG_PACKAGE:-@origintrail-official/dkg@latest}"
 BLACKBOX_DKG_DAEMON_URL="${BLACKBOX_DKG_DAEMON_URL:-${BLACKBOX_DKG_URL:-http://127.0.0.1:$BLACKBOX_DKG_PORT}}"
 NODE_MAJOR="${BLACKBOX_NODE_MAJOR:-22}"
-BLACKBOX_CONTEXT_GRAPH_ID="${BLACKBOX_CONTEXT_GRAPH_ID:-umanitek/blackbox-threats-staging}"
+BLACKBOX_CONTEXT_GRAPH_ID="${BLACKBOX_CONTEXT_GRAPH_ID:-umanitek/guardian-threats-staging}"
 BLACKBOX_DKG_CATCHUP_TIMEOUT="${BLACKBOX_DKG_CATCHUP_TIMEOUT:-180}"
 BLACKBOX_LLM_PROVIDER="${BLACKBOX_LLM_PROVIDER:-}"
 BLACKBOX_LLM_MODEL="${BLACKBOX_LLM_MODEL:-}"
@@ -875,20 +875,21 @@ plugins = data.setdefault("plugins", {})
 entries = plugins.setdefault("entries", {})
 blackbox = entries.setdefault("blackbox", {})
 # Idempotent for custom user edits, but migrate deprecated defaults that point
-# at the user's shared DKG install or pre-Blackbox Guardian graph.
+# at the user's shared DKG install or a retired community graph.
 legacy_dkg_urls = {"http://127.0.0.1:9200", "http://localhost:9200"}
-legacy_graphs = {"umanitek/guardian-threats-staging", "umanitek/guardian-threats"}
+legacy_graphs = {"umanitek/blackbox-threats-staging", "umanitek/guardian-threats"}
 default_dkg_home = os.path.abspath(os.path.expanduser("~/.dkg"))
 added = []
 current_dkg_url = str(blackbox.get("dkg_url") or blackbox.get("dkgUrl") or "").rstrip("/")
 current_dkg_home = str(blackbox.get("dkg_home") or blackbox.get("dkgHome") or "").strip()
 current_dkg_home_abs = os.path.abspath(os.path.expanduser(current_dkg_home)) if current_dkg_home else ""
 uses_shared_dkg_home = current_dkg_home_abs == default_dkg_home
+uses_unpaired_shared_dkg_home = uses_shared_dkg_home and (not current_dkg_url or current_dkg_url in legacy_dkg_urls)
 current_graph = str(blackbox.get("context_graph_id") or "")
-if "dkg_url" not in blackbox or current_dkg_url in legacy_dkg_urls or uses_shared_dkg_home:
+if "dkg_url" not in blackbox or current_dkg_url in legacy_dkg_urls or uses_unpaired_shared_dkg_home:
     blackbox["dkg_url"] = dkg_url.rstrip("/")
     added.append("dkg_url")
-if "dkg_home" not in blackbox or not blackbox.get("dkg_home") or uses_shared_dkg_home:
+if "dkg_home" not in blackbox or not blackbox.get("dkg_home") or uses_unpaired_shared_dkg_home:
     blackbox["dkg_home"] = dkg_home
     added.append("dkg_home")
 current_dkg_bin = str(blackbox.get("dkg_bin") or blackbox.get("dkgBin") or "").strip()
@@ -900,8 +901,9 @@ if current_graph in legacy_graphs:
     added.append("context_graph_id")
 defaults = {
     "mode": "audit",
-    # TEMPORARY: default to the private STAGING graph while production is still
-    # being seeded. TODO(launch): switch to "umanitek/blackbox-threats" (production).
+    # PUBLIC staging graph: open reads/SWM for every node, publish authority
+    # stays with the curator wallet, and Verifiable Memory publishing works
+    # (impossible on the retired private CG). TODO(launch): production graph.
     "context_graph_id": context_graph_id,
     "sync_interval": 300,
     "report": True,

@@ -13,6 +13,7 @@ import { clamp, fitScale, nodeRadius, recencyInk, shapePath } from './geometry'
 import { countLabel, ellipsize, metaBadges, nodeFooter, wrapText } from './text'
 import type {
   FadeBuckets,
+  GraphDetailMode,
   MemoryCard,
   Palette,
   Rect,
@@ -31,6 +32,7 @@ export interface Scene {
   dpr: number
   fades: FadeBuckets
   focusId: null | string
+  detailMode: GraphDetailMode
   hoverId: null | string
   hoverLink: null | string
   hoverRing: null | number
@@ -159,6 +161,40 @@ function sphereFill(
 
 const rectsOverlap = (a: Rect, b: Rect) => a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y
 
+function detailDepth(mode: GraphDetailMode): number {
+  if (mode === 'overview') {
+    return 1
+  }
+
+  return mode === 'explore' ? 2 : Number.POSITIVE_INFINITY
+}
+
+function collectNeighborhood(adjacency: Map<string, Set<string>>, start: string, depth: number): Set<string> {
+  const out = new Set<string>()
+  const seen = new Set<string>([start])
+  const queue: { id: string; depth: number }[] = [{ depth: 0, id: start }]
+
+  for (let i = 0; i < queue.length; i += 1) {
+    const item = queue[i]!
+
+    if (item.depth >= depth) {
+      continue
+    }
+
+    for (const next of adjacency.get(item.id) ?? []) {
+      if (seen.has(next)) {
+        continue
+      }
+
+      seen.add(next)
+      out.add(next)
+      queue.push({ depth: item.depth + 1, id: next })
+    }
+  }
+
+  return out
+}
+
 // Paint a full frame of the star map. Pure given its inputs (draws to the
 // canvas + advances the fade buckets); returns whether it's still animating and
 // the ring-label hit rects for pointer picking.
@@ -167,6 +203,7 @@ export function drawScene(scene: Scene): DrawResult {
     adjacency,
     byId,
     ctx,
+    detailMode,
     dpr,
     fades,
     focusId,
@@ -255,11 +292,13 @@ export function drawScene(scene: Scene): DrawResult {
   const projY = (wy: number) => wy * vp.k * TILT + vp.y
   // Baseline node scale: the rested fit, held stable while the playback camera
   // dives into the core — so t≈0 nodes don't balloon (see fitScale).
-  const nodeK = fitScale(w, h, rings)
+  const restedNodeK = fitScale(w, h, rings)
+  const nodeK = detailMode === 'all' ? Math.max(vp.k, restedNodeK * 0.55) : restedNodeK
 
   // Two composable layers: node highlight (selected ?? hovered) in full ink, and
   // a selection-only ring/date filter that only shifts alpha.
-  const focusSet = focusId ? (adjacency.get(focusId) ?? new Set<string>()) : null
+  const focusSet = focusId ? collectNeighborhood(adjacency, focusId, detailDepth(detailMode)) : null
+  const focusDirect = focusId ? (adjacency.get(focusId) ?? new Set<string>()) : null
   const ringIdx = selectedRing
   const ring = ringIdx != null ? (rings[ringIdx] ?? null) : null
   // A selected ring owns the band it caps: previous ring → this ring. Ring 0 is
@@ -431,7 +470,8 @@ export function drawScene(scene: Scene): DrawResult {
     }
 
     const key = `${s.id}->${t.id}`
-    const ambient = recencyInk(erec((s.rec + t.rec) / 2)) * c.lineAlpha
+    const lineBoost = detailMode === 'overview' ? 1 : detailMode === 'explore' ? 1.35 : 1.7
+    const ambient = clamp(recencyInk(erec((s.rec + t.rec) / 2)) * c.lineAlpha * lineBoost, 0, 1)
 
     // Hovering a line fades it in a bit (×2, capped — never full white).
     const targetAlpha = !revealed
@@ -538,7 +578,7 @@ export function drawScene(scene: Scene): DrawResult {
   // land within LABEL_GAP of the last one drawn (the gridline still shows).
   ctx.font = '10px ui-sans-serif, system-ui, sans-serif'
   ctx.textAlign = 'center'
-  const LABEL_GAP = 15
+  const LABEL_GAP = detailMode === 'overview' ? 15 : detailMode === 'explore' ? 10 : 7
   let lastLabelY = Number.POSITIVE_INFINITY
   // A ring's date only shows once it actually has a revealed node — no floating
   // date over a blank disk (t=0) or a lone empty ring.
@@ -670,8 +710,8 @@ export function drawScene(scene: Scene): DrawResult {
     ctx.textBaseline = 'alphabetic'
   }
 
-  // Neighbor constellation labels — greedy placement that clamps to the overlay
-  // and dodges placed labels (date labels + tooltip) so nothing overlaps/clips.
+  // Constellation labels — greedy placement that clamps to the overlay and
+  // dodges placed labels (date labels + tooltip) so extra detail stays readable.
   ctx.font = '11px ui-sans-serif, system-ui, sans-serif'
   ctx.textAlign = 'center'
   const LBL_M = 6
@@ -682,28 +722,81 @@ export function drawScene(scene: Scene): DrawResult {
     placed.push(tipRect)
   }
 
+  const labelMap = new Map<string, { node: SimNode; priority: number }>()
+
+  const addLabel = (node: SimNode | null | undefined, priority: number) => {
+    if (!node || !seen(node.rec)) {
+      return
+    }
+
+    if (node.id === hoverId || (tipRect && node.id === tip?.id)) {
+      return
+    }
+
+    const prev = labelMap.get(node.id)
+
+    if (!prev || priority < prev.priority) {
+      labelMap.set(node.id, { node, priority })
+    }
+  }
+
   for (const id of focusSet ?? []) {
-    if (id === hoverId) {
+    addLabel(byId.get(id), focusDirect?.has(id) ? 0 : 1)
+  }
+
+  if (ring && detailMode !== 'overview') {
+    for (const node of nodes) {
+      if (node.rec >= ringLo && node.rec < ringHi) {
+        addLabel(node, 2)
+      }
+    }
+  }
+
+  if (detailMode === 'all') {
+    for (const node of nodes) {
+      addLabel(node, 4)
+    }
+  } else if (detailMode === 'explore' && !focusId && !ring) {
+    for (const node of nodes) {
+      if (node.learned || node.createdBy === 'agent' || node.pinned || node.useCount > 0) {
+        addLabel(node, 3)
+      }
+    }
+  }
+
+  const labelCandidates = [...labelMap.values()].sort((a, b) => {
+    if (a.priority !== b.priority) {
+      return a.priority - b.priority
+    }
+
+    if (a.node.pinned !== b.node.pinned) {
+      return a.node.pinned ? -1 : 1
+    }
+
+    if (a.node.useCount !== b.node.useCount) {
+      return b.node.useCount - a.node.useCount
+    }
+
+    return b.node.rec - a.node.rec || a.node.label.localeCompare(b.node.label)
+  })
+
+  for (const { node: n } of labelCandidates) {
+    if (!seen(n.rec)) {
       continue
     }
 
-    const n = byId.get(id)
-
-    if (!n || !seen(n.rec)) {
-      continue
-    }
-
-    const label = ellipsize(ctx, n.label, Math.min(180, w * 0.32))
+    const label = ellipsize(ctx, n.label, detailMode === 'all' ? Math.min(150, w * 0.26) : Math.min(180, w * 0.32))
     const bw = ctx.measureText(label).width + 8
     const x = clamp(projX(n.x) - bw / 2, LBL_M, Math.max(LBL_M, w - bw - LBL_M))
     const top = projY(n.y) - (nodeRadius(n) * nodeK + 7) - LBL_H + 4
     const clampY = (v: number) => clamp(v, LBL_M, Math.max(LBL_M, h - LBL_H - LBL_M))
     const step = LBL_H + 3
+    const fanSteps = detailMode === 'all' ? 10 : 7
     let y: null | number = null
 
     // Prefer above the node, then fan outward; skip if nothing stays clear (a
     // label on the tooltip reads worse than no label).
-    for (let k = 0; k <= 7 && y == null; k += 1) {
+    for (let k = 0; k <= fanSteps && y == null; k += 1) {
       for (const dy of k === 0 ? [0] : [-k * step, k * step]) {
         const cand = { h: LBL_H, w: bw, x, y: clampY(top + dy) }
 

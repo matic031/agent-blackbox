@@ -201,6 +201,8 @@ def setup_cli(parser: argparse.ArgumentParser) -> None:
     capprove.add_argument("--name", help="Override display name")
     capprove.add_argument("--description", default="", help="Override description")
     capprove.add_argument("--epochs", type=int, default=1, help="VM publish epochs")
+    capprove.add_argument("--publish-timeout", type=int, default=600, help="Seconds to wait for async VM finality (default: 600)")
+    capprove.add_argument("--publish-poll-interval", type=int, default=5, help="Seconds between async VM job polls (default: 5)")
     capprove.add_argument("--no-publish", action="store_true", help="Share to SWM only, skip vm/publish")
     capprove.add_argument("--source", help="Named source/feed for this threat (shown in the dashboard modal).")
     capprove.add_argument("--contributor", help="Attribution — who contributed this asset.")
@@ -237,6 +239,8 @@ def setup_cli(parser: argparse.ArgumentParser) -> None:
     cimport.add_argument("--dry-run", action="store_true", help="Preview what WOULD publish after dedup; spend no TRAC")
     cimport.add_argument("--check-graph", action="store_true", help="Also skip identifiers already on-chain (queries the VM once)")
     cimport.add_argument("--epochs", type=int, default=1, help="Storage epochs per asset — higher = longer on-chain life, more TRAC (default 1)")
+    cimport.add_argument("--publish-timeout", type=int, default=600, help="Seconds to wait for each async VM publish job (default: 600)")
+    cimport.add_argument("--publish-poll-interval", type=int, default=5, help="Seconds between async VM job polls (default: 5)")
     cimport.add_argument("--limit", type=int, help="Publish at most N NEW threats this run (batch seeding). Re-run to continue — the seeded ledger resumes where you left off, so it never double-pays.")
     cimport.add_argument("--source", help="Named source/feed for entries that don't set their own (e.g. 'OSV.dev', 'Socket'). Shown in the dashboard modal.")
     cimport.add_argument("--contributor", help="Attribution stamped on entries that don't set their own — who contributed this batch (e.g. 'Umanitek').")
@@ -479,7 +483,7 @@ def _cmd_status(args: argparse.Namespace) -> int:
     print(f"  DKG home:          {cfg.dkg_home}")
     print(f"  DKG CLI:           {cfg.dkg_bin}")
     if Path(cfg.dkg_home).expanduser() == Path.home() / ".dkg":
-        print("  warning:           DKG home is the shared ~/.dkg; Blackbox should use its own DKG home")
+        print("  note:              using shared ~/.dkg; OK for an intentional funded publisher node")
     if reachable:
         info = client.chain_info()
         cid = info.get("chain_id")
@@ -546,6 +550,7 @@ def _cmd_sync(args: argparse.Namespace) -> int:
     join_status = _request_join(client, cfg.context_graph_id, cfg.curator_peer_id)
     if join_status:
         print(join_status)
+    join_already_member = _join_status_is_already_member(join_status)
     # Subscribe before querying — a fresh install never subscribed the daemon, so
     # the store would be empty. Idempotent when already subscribed.
     subscribe_error = ""
@@ -584,6 +589,16 @@ def _cmd_sync(args: argparse.Namespace) -> int:
     print(f"  {counts['injection']} injection, {counts['escalation']} escalation, "
           f"{counts['dependency']} dependency")
     if sum(counts.values()) == 0:
+        if join_already_member and _catchup_detail_reports_zero_rows(catchup_detail):
+            repaired = _retry_already_member_join_handshake(cfg, client, args)
+            if repaired is not None:
+                rs = repaired
+                counts = rs.counts()
+                if sum(counts.values()) > 0:
+                    print(f"Ruleset synced from {cfg.context_graph_id} after DKG join repair:")
+                    print(f"  {counts['injection']} injection, {counts['escalation']} escalation, "
+                          f"{counts['dependency']} dependency")
+                    return 0
         print("  0 rules — no local public/SWM threat rows are available yet.")
         print("  Blackbox will retry automatically; force it with `hermes blackbox sync --wait`.")
         _print_empty_sync_repair_hint(cfg, client, catchup_detail=catchup_detail)
@@ -597,6 +612,48 @@ def _cmd_sync(args: argparse.Namespace) -> int:
         )
         return 3
     return 0
+
+
+def _join_status_is_already_member(status: Optional[str]) -> bool:
+    return "already a member" in str(status or "").lower()
+
+
+def _catchup_detail_reports_zero_rows(detail: str) -> bool:
+    low = str(detail or "").lower()
+    return "data 0" in low and "shared memory 0" in low
+
+
+def _retry_already_member_join_handshake(
+    cfg: BlackboxConfig,
+    client: DkgClient,
+    args: argparse.Namespace,
+) -> Optional[Any]:
+    """Consumer-side repair for DKG's already-member/no-meta notification race."""
+    print("  DKG says this agent is already a member, but no graph rows synced.")
+    print("  Attempting automatic join-approval handshake repair...")
+    retry_status = _request_join(client, cfg.context_graph_id, cfg.curator_peer_id)
+    if retry_status:
+        print(f"  repair: {retry_status}")
+    try:
+        client.subscribe_context_graph(cfg.context_graph_id)
+    except DkgError as exc:
+        print(f"  repair warning: could not resubscribe to {cfg.context_graph_id}: {exc}")
+    if getattr(args, "wait", False):
+        result = _wait_for_context_graph_catchup(
+            cfg.context_graph_id,
+            timeout_s=min(max(15, int(getattr(args, "timeout", 180) or 180)), 60),
+            dkg_home=cfg.dkg_home,
+            dkg_bin=cfg.dkg_bin,
+        )
+        if result["status"]:
+            print(f"  repair DKG catch-up: {result['status']}")
+        if result["detail"]:
+            print(f"    {result['detail']}")
+    try:
+        return ruleset.refresh(cfg, client)
+    except Exception as exc:
+        print(f"  repair warning: cache refresh failed: {exc}")
+        return None
 
 
 def _print_empty_sync_repair_hint(
@@ -863,6 +920,11 @@ def _cmd_setup_graph(args: argparse.Namespace) -> int:
     if not _require_mainnet_for_publish(client):
         return 1
     cg = cfg.context_graph_id
+    curator_agent = ""
+    try:
+        curator_agent = str(client.agent_identity().get("agentAddress") or "")
+    except DkgError as exc:
+        print(f"warning: could not read local DKG agent identity before create: {exc}")
     try:
         # PRIVATE (access_policy=1 / allowlist): the community pool replicates over
         # the curated-CG relay path (which scales), and only approved members read
@@ -872,10 +934,19 @@ def _cmd_setup_graph(args: argparse.Namespace) -> int:
         # ORIGINTRAIL_SWM_CATCHUP_ISSUE.md.
         client.create_context_graph(cg, name="Blackbox Threats",
                                     description="Curated agent-security threat intelligence.",
-                                    access_policy=1)
+                                    access_policy=1,
+                                    allowed_agents=[curator_agent] if curator_agent else None)
         print(f"Created context graph {cg} as PRIVATE/community (or already existed).")
     except DkgError as exc:
         print(f"note: create returned: {exc}")
+    if curator_agent:
+        try:
+            agents = {agent.lower() for agent in client.list_context_graph_agents(cg)}
+            if curator_agent.lower() not in agents:
+                client.add_context_graph_agent(cg, curator_agent)
+                print(f"Added local curator agent {curator_agent} to the SWM allowlist.")
+        except DkgError as exc:
+            print(f"warning: could not verify/add local curator agent allowlist: {exc}")
     try:
         client.register_context_graph(cg, access_policy=1, publish_policy=0)
         print(f"Registered {cg} on-chain (accessPolicy=1 private, publishPolicy=0) on {args.network}.")
@@ -892,7 +963,17 @@ def _auto_approve_joins(client: DkgClient, cg_id: str) -> List[Dict[str, Any]]:
     Best-effort and fail-open — only the curator's approvals take effect (the
     node's approve endpoint is curator-only), so on a member node the calls are
     rejected and skipped. Returns the requests approved on this pass.
+
+    Open-access CGs (no allowlist) are left untouched: approving a join would
+    write the first ``allowedAgent`` entry, and any non-empty allowlist flips
+    the DKG's gossip/subscribe gates from open to invite-only for every other
+    node. Joins are unnecessary there — reads and SWM fan-out are ungated.
     """
+    try:
+        if not client.list_context_graph_agents(cg_id):
+            return []
+    except DkgError:
+        return []
     try:
         pending = client.list_join_requests(cg_id)
     except DkgError:
@@ -1105,7 +1186,7 @@ def _cmd_curate_approve(args: argparse.Namespace) -> int:
     severity = args.severity or constants.severity_for_kind(kind, fields.get("severity"))
     name = args.name or fields.get("name") or ident
     description = args.description or fields.get("description") or f"Curated threat {ident}"
-    q = quads.build_threat_quads(
+    quad_kwargs = dict(
         category=category,
         identifier=ident,
         severity=severity,
@@ -1130,14 +1211,29 @@ def _cmd_curate_approve(args: argparse.Namespace) -> int:
         danger_shape=fields.get("danger_shape"),
         ioc_type=fields.get("ioc_type"),
     )
+    q = quads.build_threat_quads(**quad_kwargs)
+    vm_q = quads.build_minimal_threat_quads(**quad_kwargs)
     if not args.no_publish and not _require_mainnet_for_publish(client):
         return 1
-    ka_name = f"threat-{quads.slug(ident)}"
+    swm_ka_name = f"candidate-{quads.slug(ident)}"
+    vm_ka_name = f"threat-vm-{quads.slug(ident)}"
     try:
-        client.share_knowledge_asset(cfg.context_graph_id, ka_name, q)
-        print(f"Shared curated threat {ident} to {cfg.context_graph_id} (SWM).")
+        try:
+            client.share_knowledge_asset(cfg.context_graph_id, swm_ka_name, q)
+            print(f"Shared full curated threat {ident} to {cfg.context_graph_id} (SWM).")
+        except DkgError as exc:
+            if args.no_publish:
+                raise
+            print(f"warning: SWM refresh skipped for {ident}: {exc}")
         if not args.no_publish:
-            result = client.publish(cfg.context_graph_id, ka_name, epochs=args.epochs)
+            client.share_knowledge_asset(cfg.context_graph_id, vm_ka_name, vm_q)
+            result = client.publish_async_and_wait(
+                cfg.context_graph_id,
+                vm_ka_name,
+                epochs=args.epochs,
+                timeout_s=max(1, int(getattr(args, "publish_timeout", 600) or 600)),
+                poll_s=max(1, int(getattr(args, "publish_poll_interval", 5) or 5)),
+            )
             ual = result.get("ual") if isinstance(result, dict) else None
             tx = result.get("txHash") if isinstance(result, dict) else None
             print(f"Published to VM. UAL={ual} txHash={tx}")
@@ -1230,9 +1326,11 @@ def _cmd_curate_import(args: argparse.Namespace) -> int:
             continue
         if args.osv_enrich:
             entries = _osv_enrich(entries)
-        s, sk, e, ids = _seed_entries(
+        s, sk, e, ids, attempted = _seed_entries(
             client, cfg, entries, publish=publish, already=already,
             dry_run=dry_run, epochs=max(1, int(getattr(args, "epochs", 1) or 1)),
+            publish_timeout=max(1, int(getattr(args, "publish_timeout", 600) or 600)),
+            publish_poll_interval=max(1, int(getattr(args, "publish_poll_interval", 5) or 5)),
             limit=remaining,
             contributor=getattr(args, "contributor", None),
             source=getattr(args, "source", None),
@@ -1242,7 +1340,7 @@ def _cmd_curate_import(args: argparse.Namespace) -> int:
         errors += e
         published_ids += ids
         if remaining is not None:
-            remaining -= s
+            remaining -= attempted
         if args.dir:
             print(f"  {path.name}: {s} new, {sk} dup, {e} err")
 
@@ -1256,7 +1354,7 @@ def _cmd_curate_import(args: argparse.Namespace) -> int:
         if capped:
             print(f"  (Showing the next {limit} — the batch --limit. Drop --dry-run to publish exactly these.)")
     else:
-        tier = "the public graph (mainnet VM)" if publish else "the local graph (SWM)"
+        tier = "SWM as full candidates + the public graph (minimal VM)" if publish else "the local graph (SWM)"
         tail = f", {bad_files} unreadable files" if bad_files else ""
         print(f"Import complete: {seeded} new threats → {tier}, {dup_skipped} skipped as duplicates, {errors} errors{tail}.")
         if capped:
@@ -1344,6 +1442,8 @@ def _seed_entries(
     already: set,
     dry_run: bool = False,
     epochs: int = 1,
+    publish_timeout: int = 600,
+    publish_poll_interval: int = 5,
     limit: Optional[int] = None,
     contributor: Optional[str] = None,
     source: Optional[str] = None,
@@ -1356,12 +1456,13 @@ def _seed_entries(
     most once — every skip saves a TRAC publish. *limit*, when set, stops after
     that many NEW threats so a catalog can be seeded in verifiable batches;
     untouched entries are left for a later run (the ledger resumes them). Returns
-    ``(seeded, skipped, errors, new_ids)``.
+    ``(seeded, skipped, errors, new_ids, attempted)`` where ``attempted`` counts
+    validated new identifiers that reached the dry-run/publish boundary.
     """
-    seeded, skipped, errors = 0, 0, 0
+    seeded, skipped, errors, attempted = 0, 0, 0, 0
     new_ids: List[str] = []
     for entry in entries:
-        if limit is not None and seeded >= limit:
+        if limit is not None and attempted >= limit:
             break
         try:
             category, ident, fields = _entry_to_threat(entry)
@@ -1383,7 +1484,7 @@ def _seed_entries(
             continue
         already.add(ident)  # never publish the same identifier twice in one run
         try:
-            q = quads.build_threat_quads(
+            quad_kwargs = dict(
                 category=category,
                 identifier=ident,
                 severity=fields.get("severity", "high"),
@@ -1408,20 +1509,38 @@ def _seed_entries(
                 danger_shape=fields.get("danger_shape"),
                 ioc_type=fields.get("ioc_type"),
             )
+            q = quads.build_threat_quads(**quad_kwargs)
             quads.assert_quads_literal_size(q, label=f"threat:{ident}")
+            vm_q = quads.build_minimal_threat_quads(**quad_kwargs) if publish else []
+            if publish:
+                quads.assert_quads_literal_size(vm_q, label=f"threat-vm:{ident}")
         except ValueError:
             errors += 1
             continue
+        attempted += 1
         if dry_run:
             seeded += 1
             if publish:  # the ledger tracks on-chain publishes only
                 new_ids.append(ident)
             continue
-        ka_name = f"threat-{quads.slug(ident)}"
+        swm_ka_name = f"candidate-{quads.slug(ident)}"
+        vm_ka_name = f"threat-vm-{quads.slug(ident)}"
         try:
-            client.share_knowledge_asset(cfg.context_graph_id, ka_name, q)
+            try:
+                client.share_knowledge_asset(cfg.context_graph_id, swm_ka_name, q)
+            except DkgError as exc:
+                if not publish:
+                    raise
+                print(f"warning: SWM refresh skipped for {ident}: {exc}")
             if publish:
-                client.publish(cfg.context_graph_id, ka_name, epochs=epochs)
+                client.share_knowledge_asset(cfg.context_graph_id, vm_ka_name, vm_q)
+                client.publish_async_and_wait(
+                    cfg.context_graph_id,
+                    vm_ka_name,
+                    epochs=epochs,
+                    timeout_s=publish_timeout,
+                    poll_s=publish_poll_interval,
+                )
             seeded += 1
             if publish:  # only on-chain publishes belong in the seeded ledger;
                 new_ids.append(ident)  # a --no-publish (SWM-only) run must not poison it
@@ -1429,9 +1548,10 @@ def _seed_entries(
                 # interrupted (Ctrl-C, wallet drained, killed) must still resume
                 # without re-paying for what already published on-chain.
                 _append_seeded_ledger([ident])
-        except DkgError:
+        except DkgError as exc:
+            print(f"warning: failed to seed {ident}: {exc}")
             errors += 1
-    return seeded, skipped, errors, new_ids
+    return seeded, skipped, errors, new_ids, attempted
 
 
 def _cmd_dashboard(args: argparse.Namespace) -> int:

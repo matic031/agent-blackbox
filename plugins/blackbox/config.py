@@ -258,7 +258,8 @@ def load_blackbox_config() -> BlackboxConfig:
     default_dkg_home = str(constants.blackbox_dkg_home())
     dkg_home_env = _first_env("BLACKBOX_DKG_HOME")
     configured_dkg_home = entry.get("dkg_home") or entry.get("dkgHome")
-    if not dkg_home_env and _is_default_dkg_home(configured_dkg_home):
+    configured_dkg_url = entry.get("dkg_url") or entry.get("dkgUrl")
+    if not dkg_home_env and not configured_dkg_url and _is_default_dkg_home(configured_dkg_home):
         logger.info(
             "blackbox: switching shared default dkg_home %s -> %s",
             configured_dkg_home,
@@ -279,8 +280,7 @@ def load_blackbox_config() -> BlackboxConfig:
     dkg_url_env = _first_env("BLACKBOX_DKG_DAEMON_URL", "BLACKBOX_DKG_URL")
     dkg_url = str(
         dkg_url_env
-        or entry.get("dkg_url")
-        or entry.get("dkgUrl")
+        or configured_dkg_url
         or _default_dkg_url()
     ).rstrip("/")
     legacy_dkg_urls = {"http://127.0.0.1:9200", "http://localhost:9200"}

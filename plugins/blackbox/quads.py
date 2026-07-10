@@ -1065,6 +1065,7 @@ def build_threat_quads(
     danger_shape: Optional[str] = None,
     # ioc — the concrete indicator type (domain|url|ip|hash|wallet|contract)
     ioc_type: Optional[str] = None,
+    minimal: bool = False,
 ) -> List[Quad]:
     """Build curated Threat quads for one of the threat categories.
 
@@ -1074,6 +1075,10 @@ def build_threat_quads(
 
     *sources*, *references* and *contributor* are provenance, emitted for every
     category so the dashboard can show a threat's origin.
+
+    ``minimal=True`` builds the verifiable-memory payload: identifier, severity,
+    provenance/reference fields, and the category-specific match keys needed by
+    the detector. Rich descriptive detail stays in the SWM candidate asset.
     """
     subj = threat_uri(identifier)
     type_iri = {
@@ -1093,10 +1098,13 @@ def build_threat_quads(
         _q(subj, constants.IDENTIFIER_PRED, literal(identifier)),
         _q(subj, constants.CURATED_PRED, literal("true" if curated else "false")),
         _q(subj, constants.SEVERITY_PRED, literal(constants.normalize_severity(severity))),
-        _q(subj, constants.SCHEMA_NAME_PRED, literal(name)),
-        _q(subj, constants.SCHEMA_DESCRIPTION_PRED, literal(description)),
         _q(subj, constants.SCHEMA_DATE_MODIFIED_PRED, datetime_literal(ts)),
     ]
+    if not minimal:
+        out.extend([
+            _q(subj, constants.SCHEMA_NAME_PRED, literal(name)),
+            _q(subj, constants.SCHEMA_DESCRIPTION_PRED, literal(description)),
+        ])
     if kind:
         out.append(_q(subj, constants.KIND_PRED, literal(kind)))
 
@@ -1129,7 +1137,7 @@ def build_threat_quads(
             out.append(_q(subj, constants.PACKAGE_ECOSYSTEM_PRED, literal(ecosystem)))
         if advisory_id:
             out.append(_q(subj, constants.SCHEMA_IDENTIFIER_PRED, literal(advisory_id)))
-        if fixed_version:
+        if fixed_version and not minimal:
             out.append(_q(subj, constants.FIXED_VERSION_PRED, literal(fixed_version)))
     elif category == "fileaccess":
         if tool_name:
@@ -1149,6 +1157,12 @@ def build_threat_quads(
             out.append(_q(subj, constants.CATEGORY_PRED, literal(ioc_type)))
 
     return out
+
+
+def build_minimal_threat_quads(**kwargs: Any) -> List[Quad]:
+    """Build the lean VM version of a curated threat KA."""
+    kwargs["minimal"] = True
+    return build_threat_quads(**kwargs)
 
 
 def build_report_quads(

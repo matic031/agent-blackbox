@@ -962,7 +962,13 @@ export const zh: Translations = {
     importEmpty: '粘贴图谱代码以加载。',
     importSuccess: nodes => `已加载包含 ${nodes} 个节点的图谱。`,
     importedBadge: '导入的图谱',
-    resetToMine: '返回我的图谱'
+    resetToMine: '返回我的图谱',
+    detailControl: '图谱细节',
+    detailHint: '概览保持安静。探索会展开所选节点附近的关系。全部会适配完整图谱，并标注能放下的可见节点。',
+    detailOverview: '概览',
+    detailExplore: '探索',
+    detailAll: '全部',
+    graphCounts: (nodes, links) => `${nodes} 个节点 · ${links} 条连接`
   },
   agents: {
     close: '关闭代理',

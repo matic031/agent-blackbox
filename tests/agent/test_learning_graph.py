@@ -43,6 +43,35 @@ def test_density_stats_count_isolated_nodes():
     assert stats["isolated_pct"] == round(100 / 3, 1)
 
 
+def test_learning_neighborhood_includes_direct_related_context():
+    learned = learning_graph.SkillNode(
+        name="learned",
+        category="agent",
+        source="profile",
+        created_by="agent",
+        related=["next-step"],
+    )
+    backlink = learning_graph.SkillNode(
+        name="points-at-learned",
+        category="agent",
+        source="base",
+        related=["learned"],
+    )
+    unrelated = learning_graph.SkillNode(name="unrelated", category="misc", source="base")
+    graph_skills, learned_names, related_names = learning_graph._learning_neighborhood(
+        {
+            "learned": learned,
+            "next-step": learning_graph.SkillNode(name="next-step", category="agent", source="base"),
+            "points-at-learned": backlink,
+            "unrelated": unrelated,
+        }
+    )
+
+    assert learned_names == {"learned"}
+    assert related_names == {"next-step", "points-at-learned"}
+    assert set(graph_skills) == {"learned", "next-step", "points-at-learned"}
+
+
 def test_skill_node_timestamp_uses_iso_usage_activity(tmp_path, monkeypatch):
     skill_dir = tmp_path / "skills" / "dev" / "iso-skill"
     skill_dir.mkdir(parents=True)

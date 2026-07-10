@@ -48,7 +48,7 @@ $DkgBin      = if ($env:BLACKBOX_DKG_BIN)     { $env:BLACKBOX_DKG_BIN }     else
 $DkgPackage  = if ($env:BLACKBOX_DKG_PACKAGE) { $env:BLACKBOX_DKG_PACKAGE } else { "@origintrail-official/dkg@latest" }
 $DkgDaemonUrl = if ($env:BLACKBOX_DKG_DAEMON_URL) { $env:BLACKBOX_DKG_DAEMON_URL } elseif ($env:BLACKBOX_DKG_URL) { $env:BLACKBOX_DKG_URL } else { "http://127.0.0.1:$DkgPort" }
 $NodeMajor   = if ($env:BLACKBOX_NODE_MAJOR)  { [int]$env:BLACKBOX_NODE_MAJOR } else { 22 }
-$ContextGraphId = if ($env:BLACKBOX_CONTEXT_GRAPH_ID) { $env:BLACKBOX_CONTEXT_GRAPH_ID } else { "umanitek/blackbox-threats-staging" }
+$ContextGraphId = if ($env:BLACKBOX_CONTEXT_GRAPH_ID) { $env:BLACKBOX_CONTEXT_GRAPH_ID } else { "umanitek/guardian-threats-staging" }
 $CatchupTimeout = if ($env:BLACKBOX_DKG_CATCHUP_TIMEOUT) { [int]$env:BLACKBOX_DKG_CATCHUP_TIMEOUT } else { 180 }
 $script:InstallIncomplete = $false
 $script:DkgAlreadyRunning = $false
@@ -544,18 +544,19 @@ plugins = data.setdefault("plugins", {})
 entries = plugins.setdefault("entries", {})
 blackbox = entries.setdefault("blackbox", {})
 legacy_dkg_urls = {"http://127.0.0.1:9200", "http://localhost:9200"}
-legacy_graphs = {"umanitek/guardian-threats-staging", "umanitek/guardian-threats"}
+legacy_graphs = {"umanitek/blackbox-threats-staging", "umanitek/guardian-threats"}
 default_dkg_home = os.path.abspath(os.path.expanduser("~/.dkg"))
 added = []
 current_dkg_url = str(blackbox.get("dkg_url") or blackbox.get("dkgUrl") or "").rstrip("/")
 current_dkg_home = str(blackbox.get("dkg_home") or blackbox.get("dkgHome") or "").strip()
 current_dkg_home_abs = os.path.abspath(os.path.expanduser(current_dkg_home)) if current_dkg_home else ""
 uses_shared_dkg_home = current_dkg_home_abs == default_dkg_home
+uses_unpaired_shared_dkg_home = uses_shared_dkg_home and (not current_dkg_url or current_dkg_url in legacy_dkg_urls)
 current_graph = str(blackbox.get("context_graph_id") or "")
-if "dkg_url" not in blackbox or current_dkg_url in legacy_dkg_urls or uses_shared_dkg_home:
+if "dkg_url" not in blackbox or current_dkg_url in legacy_dkg_urls or uses_unpaired_shared_dkg_home:
     blackbox["dkg_url"] = dkg_url.rstrip("/")
     added.append("dkg_url")
-if "dkg_home" not in blackbox or not blackbox.get("dkg_home") or uses_shared_dkg_home:
+if "dkg_home" not in blackbox or not blackbox.get("dkg_home") or uses_unpaired_shared_dkg_home:
     blackbox["dkg_home"] = dkg_home
     added.append("dkg_home")
 current_dkg_bin = str(blackbox.get("dkg_bin") or blackbox.get("dkgBin") or "").strip()
@@ -563,13 +564,14 @@ if not current_dkg_bin or current_dkg_bin == "dkg":
     blackbox["dkg_bin"] = dkg_bin
     added.append("dkg_bin")
 if current_graph in legacy_graphs:
-    blackbox["context_graph_id"] = os.environ.get("BLACKBOX_CONTEXT_GRAPH_ID", "umanitek/blackbox-threats-staging")
+    blackbox["context_graph_id"] = os.environ.get("BLACKBOX_CONTEXT_GRAPH_ID", "umanitek/guardian-threats-staging")
     added.append("context_graph_id")
 defaults = {
     "mode": "audit",
-    # TEMPORARY: default to the private STAGING graph while production is still
-    # being seeded. TODO(launch): switch to "umanitek/blackbox-threats" (production).
-    "context_graph_id": os.environ.get("BLACKBOX_CONTEXT_GRAPH_ID", "umanitek/blackbox-threats-staging"),
+    # PUBLIC staging graph: open reads/SWM for every node, publish authority
+    # stays with the curator wallet, and Verifiable Memory publishing works
+    # (impossible on the retired private CG). TODO(launch): production graph.
+    "context_graph_id": os.environ.get("BLACKBOX_CONTEXT_GRAPH_ID", "umanitek/guardian-threats-staging"),
     "sync_interval": 300,
     "report": True,
     "daily_report_limit": 9999,

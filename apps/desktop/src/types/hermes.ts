@@ -429,6 +429,9 @@ export interface StarmapNode {
   label: string
   kind: 'memory' | 'skill'
   memorySource?: 'memory' | 'profile'
+  source?: 'base' | 'profile' | (string & {})
+  learned?: boolean
+  context?: boolean
   timestamp?: null | number
   category: string
   useCount: number
