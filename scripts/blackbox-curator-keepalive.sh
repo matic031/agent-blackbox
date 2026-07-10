@@ -39,6 +39,21 @@ resolve_dkg_bin() {
 }
 DKG_BIN="$(resolve_dkg_bin)"
 
+# Repo root (this script is <repo>/scripts/…). Used to re-apply the DKG
+# relay-open patch before each start — a `dkg` upgrade wipes the dist patch, and
+# without it the curator can't dial members over non-preferred relays (relayed
+# conns drop in ~300ms → members sync 0 SWM). Idempotent; --serve-open because
+# this is the curator.
+KEEPALIVE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(dirname "$KEEPALIVE_DIR")"
+apply_relay_open_patch() {
+    command -v python3 >/dev/null 2>&1 || return 0
+    [ -f "$REPO_ROOT/scripts/patch-dkg-relay-open.py" ] || return 0
+    log "re-applying DKG relay-open patch (idempotent)…"
+    python3 "$REPO_ROOT/scripts/patch-dkg-relay-open.py" --serve-open \
+        >>"$HOME/.hermes/logs/curator-keepalive.log" 2>&1 || log "relay-open patch reported an issue (continuing)"
+}
+
 # Pin the Node runtime to the one the dkg CLI was installed under. The CLI's
 # shebang is `#!/usr/bin/env node`, so `dkg start` runs under whatever `node` is
 # first on PATH. If that differs from the install's Node (e.g. a login/screen
@@ -143,6 +158,7 @@ start_node() {
     stop_node hard
     rm -f "$DKG_HOME/daemon.pid" "$DKG_HOME/api.port" 2>/dev/null
     safe_recover_oxigraph
+    apply_relay_open_patch
     ( cd "$DKG_HOME" && DKG_HOME="$DKG_HOME" nohup "$DKG_BIN" start >>"$HOME/.hermes/logs/curator-daemon.log" 2>&1 & )
     # wait up to ~3 min for the (now-fast) store open + agent init
     local i=0

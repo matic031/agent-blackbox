@@ -755,6 +755,16 @@ install_dkg() {
     fi
     ensure_blackbox_dkg_config
 
+    # Open the DKG relay gates (idempotent) so this node reaches peers via ANY
+    # relay — without it a member drops the curator's relayed connection in
+    # ~300ms and syncs 0 SWM rows. Re-applied here because a `dkg` upgrade wipes
+    # the dist patch. Relay patches only; the curator adds --serve-open via its
+    # keepalive (never open a member's private graphs from the installer).
+    if command -v python3 >/dev/null 2>&1; then
+        _bb_relay_patch="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/patch-dkg-relay-open.py"
+        [ -f "$_bb_relay_patch" ] && python3 "$_bb_relay_patch" || true
+    fi
+
     step "Bootstrapping a Blackbox-owned $DKG_NETWORK node at $BLACKBOX_DKG_DAEMON_URL ..."
     step "  DKG home: $BLACKBOX_DKG_HOME"
     step "  DKG CLI:  $BLACKBOX_DKG_BIN"
