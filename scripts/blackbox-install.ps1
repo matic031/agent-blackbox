@@ -447,6 +447,7 @@ function Install-Dkg {
             return
         }
     }
+    Patch-DkgSyncBudgets
 
     New-Item -ItemType Directory -Force -Path $DkgHome | Out-Null
     if (-not (Test-BlackboxDkgPort)) {
@@ -496,6 +497,72 @@ function Sync-Ruleset {
         Write-Step "Blackbox is installed, but setup is incomplete until DKG returns a non-empty ruleset."
         Write-Step "Retry after fixing DKG/catch-up with: hermes blackbox sync --wait --require-rules"
     }
+}
+
+# Stock DKG v10.0.5 gives the whole catch-up a 120s budget shared by every
+# graph and all three SWM phases, so a large public community graph can never
+# finish one meta pass and a fresh node stays at 0 community rows. Patch the
+# requester budgets in the Blackbox-owned DKG CLI (env-overridable, larger
+# defaults). Idempotent; warns and continues if upstream moved the constants.
+function Patch-DkgSyncBudgets {
+    $py = @'
+import pathlib, sys
+
+cli_dir = pathlib.Path(sys.argv[1])
+marker = "Ops patch (umanitek)"
+budgets = (
+    "const _envMs = (name, fallback) => {\n"
+    "    const v = Number(process.env[name] ?? '');\n"
+    "    return Number.isFinite(v) && v > 0 ? v : fallback;\n"
+    "};\n"
+)
+edits = [
+    ("dkg-agent-constants.js",
+     "export const SYNC_TOTAL_TIMEOUT_MS = 120_000;",
+     budgets + "export const SYNC_TOTAL_TIMEOUT_MS = _envMs('DKG_SYNC_TOTAL_TIMEOUT_MS', 600_000);"),
+    ("dkg-agent-constants.js",
+     "export const SYNC_PAGE_TIMEOUT_MS = 45_000;",
+     "export const SYNC_PAGE_TIMEOUT_MS = _envMs('DKG_SYNC_PAGE_TIMEOUT_MS', 90_000);"),
+    ("dkg-agent-constants.js",
+     "export const SYNC_MIN_GRAPH_BUDGET_MS = 10_000;",
+     "export const SYNC_MIN_GRAPH_BUDGET_MS = _envMs('DKG_SYNC_MIN_GRAPH_BUDGET_MS', 120_000);"),
+    ("sync/durable-session.js",
+     "export const DURABLE_DATA_SYNC_SESSION_TTL_MS = 10 * 60_000;",
+     "const _ttlEnv = Number(process.env.DKG_SYNC_SESSION_TTL_MS ?? '');\n"
+     "export const DURABLE_DATA_SYNC_SESSION_TTL_MS = "
+     "Number.isFinite(_ttlEnv) && _ttlEnv > 0 ? _ttlEnv : 60 * 60_000;"),
+]
+roots = sorted(cli_dir.glob("node_modules/**/dkg-agent/dist"))
+if not roots:
+    print("dkg-agent dist not found under " + str(cli_dir), file=sys.stderr)
+    sys.exit(1)
+failed = False
+for root in roots:
+    for rel, stock, replacement in edits:
+        path = root / rel
+        if not path.is_file():
+            failed = True
+            print(f"missing {path}", file=sys.stderr)
+            continue
+        text = path.read_text()
+        if replacement.splitlines()[-1] in text:
+            continue
+        if stock not in text:
+            failed = True
+            print(f"stock line not found in {path}: {stock}", file=sys.stderr)
+            continue
+        path.write_text(text.replace(stock, f"// {marker}: sync budget, env-overridable\n" + replacement, 1))
+sys.exit(1 if failed else 0)
+'@
+    $tmp = Join-Path $env:TEMP "blackbox-patch-dkg-sync.py"
+    Set-Content -Path $tmp -Value $py -Encoding UTF8
+    & $script:VenvPython $tmp $DkgCliDir
+    if ($LASTEXITCODE -eq 0) {
+        Write-Ok "DKG sync budgets patched for large community-graph catch-up"
+    } else {
+        Write-Warn2 "Could not patch DKG sync budgets; large community graphs may not fully catch up."
+    }
+    Remove-Item -Path $tmp -ErrorAction SilentlyContinue
 }
 
 function Show-DkgManualHint {
@@ -572,7 +639,7 @@ defaults = {
     # stays with the curator wallet, and Verifiable Memory publishing works
     # (impossible on the retired private CG). TODO(launch): production graph.
     "context_graph_id": os.environ.get("BLACKBOX_CONTEXT_GRAPH_ID", "umanitek/guardian-threats-staging"),
-    "sync_interval": 300,
+    "sync_interval": 60,
     "report": True,
     "daily_report_limit": 9999,
     "report_min_severity": "high",

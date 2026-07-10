@@ -121,14 +121,25 @@ def create_app():
 
         Public Guardian graphs do not need join approval. ``list_join_requests``
         is server-side curator-gated, so on a non-curator node the call errors and
-        this loop just idles — it self-selects to the curator's dashboard."""
+        this loop just idles — it self-selects to the curator's dashboard. On an
+        open CG (empty allowlist) it never approves: the first approval would
+        re-gate the graph for everyone (see ``_auto_approve_joins`` in cli.py)."""
         idle = 0
         while not _rescan_state["stop"]:
             try:
                 cfg = load_blackbox_config()
                 client = DkgClient(url=cfg.dkg_url, dkg_home=cfg.dkg_home)
-                pending = client.list_join_requests(cfg.context_graph_id)
-                idle = 0
+                # Open-access CGs (no allowlist) are left untouched: approving a
+                # join would write the first ``allowedAgent`` entry, and any
+                # non-empty allowlist flips the DKG's gossip/subscribe gates from
+                # open to invite-only for every other node. Joins are unnecessary
+                # there — reads and SWM fan-out are ungated.
+                if client.list_context_graph_agents(cfg.context_graph_id):
+                    pending = client.list_join_requests(cfg.context_graph_id)
+                    idle = 0
+                else:
+                    pending = []
+                    idle += 1
                 for req in pending:
                     addr = str(req.get("agentAddress") or "").strip()
                     if not addr:
@@ -147,16 +158,25 @@ def create_app():
                 time.sleep(0.1)
 
     def _ruleset_sync_loop() -> None:
-        """Keep VM/SWM threat rows syncing while the dashboard is running."""
+        """Keep VM/SWM threat rows syncing while the dashboard is running.
+
+        ``sync_interval`` is a period, not a post-sync sleep: the sync's own
+        duration is deducted from the wait so a refresh *starts* every
+        ``sync_interval`` seconds even when the sync itself is slow."""
         last_total: Any = None
         while not _rescan_state["stop"]:
             wait = _RULESET_EMPTY_RETRY_SEC
+            started = time.monotonic()
             try:
                 cfg = load_blackbox_config()
                 counts = _sync_ruleset_once(lambda: cfg, DkgClient, ruleset)
                 total = int(counts.get("total") or 0)
                 community = int(counts.get("community") or 0)
-                wait = max(_RULESET_MIN_RETRY_SEC, float(cfg.sync_interval or _RULESET_EMPTY_RETRY_SEC))
+                elapsed = time.monotonic() - started
+                wait = max(
+                    _RULESET_MIN_RETRY_SEC,
+                    float(cfg.sync_interval or _RULESET_EMPTY_RETRY_SEC) - elapsed,
+                )
                 if total == 0 or community == 0:
                     wait = min(_RULESET_EMPTY_RETRY_SEC, wait)
                 if total != last_total:

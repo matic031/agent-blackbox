@@ -405,7 +405,8 @@ class DkgClient:
 
     # -- knowledge assets --------------------------------------------------
 
-    def share_knowledge_asset(self, cg_id: str, name: str, quads: List[Quad]) -> Dict[str, Any]:
+    def share_knowledge_asset(self, cg_id: str, name: str, quads: List[Quad],
+                              create_timeout: Optional[float] = None) -> Dict[str, Any]:
         """Create/finalize a KA, then explicitly share its sealed assertion to SWM.
 
         Private/agent-gated context graphs require the node's sender-key SWM
@@ -425,7 +426,7 @@ class DkgClient:
                 "POST",
                 "/api/knowledge-assets",
                 {"contextGraphId": cg_id, "name": name, "quads": quads, "alsoShareSwm": False},
-                timeout=_STORE_TIMEOUT,
+                timeout=create_timeout or _STORE_TIMEOUT,
             )
         except DkgError as exc:
             if not (_is_already_finalized(exc) or _is_wm_merkle_conflict(exc)):

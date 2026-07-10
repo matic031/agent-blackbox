@@ -22,7 +22,7 @@ from typing import Any, Dict, Iterable, List, Optional
 
 from . import attach, audit, constants, llm, quads, ruleset, settings
 from .config import BlackboxConfig, load_blackbox_config
-from .dkg_client import DkgClient, DkgError, extract_binding
+from .dkg_client import DkgClient, DkgError, _is_already_published, extract_binding
 
 logger = logging.getLogger(__name__)
 
@@ -195,7 +195,7 @@ def setup_cli(parser: argparse.ArgumentParser) -> None:
     cshow.add_argument("--json", action="store_true", help="Emit machine-readable JSON (for an agent curator to parse)")
     cshow.set_defaults(func=_cmd_curate_show)
 
-    capprove = csub.add_parser("approve", help="Promote a candidate to a curated threat (share + publish)")
+    capprove = csub.add_parser("approve", help="Promote a candidate to a curated threat in SWM (anchor proves it on VM)")
     capprove.add_argument("identifier")
     capprove.add_argument("--severity", choices=list(constants.SEVERITY_ORDER))
     capprove.add_argument("--name", help="Override display name")
@@ -203,10 +203,24 @@ def setup_cli(parser: argparse.ArgumentParser) -> None:
     capprove.add_argument("--epochs", type=int, default=1, help="VM publish epochs")
     capprove.add_argument("--publish-timeout", type=int, default=600, help="Seconds to wait for async VM finality (default: 600)")
     capprove.add_argument("--publish-poll-interval", type=int, default=5, help="Seconds between async VM job polls (default: 5)")
-    capprove.add_argument("--no-publish", action="store_true", help="Share to SWM only, skip vm/publish")
+    capprove.add_argument("--no-publish", action="store_true", help="Compat no-op: SWM-only is the default now")
+    capprove.add_argument("--publish-threat-ka", action="store_true",
+                          help="Legacy: also publish a full per-threat VM KA (one paid publish per threat)")
     capprove.add_argument("--source", help="Named source/feed for this threat (shown in the dashboard modal).")
     capprove.add_argument("--contributor", help="Attribution — who contributed this asset.")
     capprove.set_defaults(func=_cmd_curate_approve)
+
+    canchor = csub.add_parser("anchor", help="Curator: publish compact VM proofs for unanchored curated SWM threats")
+    canchor.add_argument("--batch-size", type=int, default=constants.DEFAULT_ANCHOR_BATCH_SIZE,
+                         help=f"Curated threats per proof KA (default {constants.DEFAULT_ANCHOR_BATCH_SIZE})")
+    canchor.add_argument("--epochs", type=int, default=1, help="VM publish epochs")
+    canchor.add_argument("--publish-timeout", type=int, default=600, help="Seconds to wait for async VM finality per proof (default: 600)")
+    canchor.add_argument("--publish-poll-interval", type=int, default=5, help="Seconds between async VM job polls (default: 5)")
+    canchor.add_argument("--dry-run", action="store_true", help="Report pending batches without publishing")
+    canchor.add_argument("--max-batches", type=int, default=0, help="Publish at most this many proof batches this run (0 = all pending)")
+    canchor.add_argument("--adopt-existing", action="store_true",
+                         help="One-time migration: adopt every existing urn:guardian:threat row in the local SWM store into the curated ledger")
+    canchor.set_defaults(func=_cmd_curate_anchor)
 
     creject = csub.add_parser("reject", help="Mark a candidate rejected (locally; optional SWM false-positive)")
     creject.add_argument("identifier")
@@ -235,7 +249,9 @@ def setup_cli(parser: argparse.ArgumentParser) -> None:
         help="Force a type",
     )
     cimport.add_argument("--osv-enrich", action="store_true", help="OSV-enrich dependency entries before publish")
-    cimport.add_argument("--no-publish", action="store_true", help="Share to SWM (the free local tier) only; skip vm/publish")
+    cimport.add_argument("--no-publish", action="store_true", help="Compat no-op: SWM-only is the default now")
+    cimport.add_argument("--publish-threat-kas", action="store_true",
+                         help="Legacy: publish a full per-threat VM KA for each import (one paid publish per threat)")
     cimport.add_argument("--dry-run", action="store_true", help="Preview what WOULD publish after dedup; spend no TRAC")
     cimport.add_argument("--check-graph", action="store_true", help="Also skip identifiers already on-chain (queries the VM once)")
     cimport.add_argument("--epochs", type=int, default=1, help="Storage epochs per asset — higher = longer on-chain life, more TRAC (default 1)")
@@ -1209,20 +1225,20 @@ def _cmd_curate_approve(args: argparse.Namespace) -> int:
         ioc_type=fields.get("ioc_type"),
     )
     q = quads.build_threat_quads(**quad_kwargs)
-    vm_q = quads.build_minimal_threat_quads(**quad_kwargs)
-    if not args.no_publish and not _require_mainnet_for_publish(client):
+    # Default model: the full curated threat lives in SWM; the VM carries only
+    # batch curation proofs (`curate anchor`). The per-threat VM KA is a legacy
+    # escape hatch — one paid publish per threat does not scale.
+    publish_threat_ka = bool(getattr(args, "publish_threat_ka", False))
+    if publish_threat_ka and not _require_mainnet_for_publish(client):
         return 1
     swm_ka_name = f"candidate-{quads.slug(ident)}"
-    vm_ka_name = f"threat-vm-{quads.slug(ident)}"
     try:
-        try:
-            client.share_knowledge_asset(cfg.context_graph_id, swm_ka_name, q)
-            print(f"Shared full curated threat {ident} to {cfg.context_graph_id} (SWM).")
-        except DkgError as exc:
-            if args.no_publish:
-                raise
-            print(f"warning: SWM refresh skipped for {ident}: {exc}")
-        if not args.no_publish:
+        client.share_knowledge_asset(cfg.context_graph_id, swm_ka_name, q)
+        print(f"Shared full curated threat {ident} to {cfg.context_graph_id} (SWM).")
+        _append_curated_ledger([ident])
+        if publish_threat_ka:
+            vm_q = quads.build_minimal_threat_quads(**quad_kwargs)
+            vm_ka_name = f"threat-vm-{quads.slug(ident)}"
             client.share_knowledge_asset(cfg.context_graph_id, vm_ka_name, vm_q)
             result = client.publish_async_and_wait(
                 cfg.context_graph_id,
@@ -1236,9 +1252,140 @@ def _cmd_curate_approve(args: argparse.Namespace) -> int:
             print(f"Published to VM. UAL={ual} txHash={tx}")
             # Record the on-chain publish so a later `import` never re-pays for it.
             _append_seeded_ledger([ident])
+        else:
+            print("Anchor pending — run `hermes blackbox curate anchor` to prove curated threats on VM.")
     except DkgError as exc:
         print(f"error: {exc}")
         return 1
+    return 0
+
+
+_PROOFS_SPARQL = """PREFIX g: <http://umanitek.ai/ontology/guardian/>
+SELECT ?proof ?root ?member WHERE {
+  ?proof a g:CurationProof .
+  ?proof g:anchorRoot ?root .
+  ?proof g:anchorMember ?member .
+}"""
+
+
+def _anchor_field_rows(client: DkgClient, cfg) -> Optional[List[Dict[str, str]]]:
+    """Threat-subject rows (anchor fields only) from the local community store.
+
+    Only ``urn:guardian:threat:*`` subjects are hashed — reports share the
+    identifier and would shadow the threat row's hash. The SELECT set and
+    extraction must match the consumer side (:mod:`ruleset`), because both
+    ends hash these binding values.
+    """
+    prefix = f"did:dkg:context-graph:{cfg.context_graph_id}/_shared_memory"
+    sparql = f"""PREFIX g: <http://umanitek.ai/ontology/guardian/>
+PREFIX schema: <http://schema.org/>
+SELECT ?threat ?identifier ?kind ?severity ?name ?pattern ?toolName ?argShape WHERE {{
+  GRAPH ?g {{
+    ?threat g:identifier ?identifier .
+    OPTIONAL {{ ?threat g:kind ?kind . }}
+    OPTIONAL {{ ?threat g:severity ?severity . }}
+    OPTIONAL {{ ?threat schema:name ?name . }}
+    OPTIONAL {{ ?threat g:pattern ?pattern . }}
+    OPTIONAL {{ ?threat g:toolName ?toolName . }}
+    OPTIONAL {{ ?threat g:argShape ?argShape . }}
+  }}
+  FILTER(STRSTARTS(STR(?g), "{prefix}"))
+  FILTER(STRSTARTS(STR(?threat), "urn:guardian:threat:"))
+}}"""
+    _FAILED = object()
+    rows = _FAILED
+    for _ in range(3):  # a scoped store read can blip under concurrent load
+        rows = client.query_store(sparql, on_error=_FAILED)
+        if rows is not _FAILED:
+            break
+        time.sleep(1)
+    if rows is _FAILED:
+        return None  # signal a read failure — NOT an empty curated set
+    out: List[Dict[str, str]] = []
+    for row in rows or []:
+        out.append({k: extract_binding(row.get(k)) for k in quads.ANCHOR_FIELDS})
+    return out
+
+
+def _cmd_curate_anchor(args: argparse.Namespace) -> int:
+    """Publish compact VM proofs (batch root + members) for curated SWM rows.
+
+    Idempotent: identifiers already covered by a VM proof are skipped, and a
+    re-run over the same pending set reproduces the same root/KA name.
+    """
+    cfg = load_blackbox_config()
+    client = DkgClient(url=cfg.dkg_url, dkg_home=cfg.dkg_home)
+    dry_run = bool(getattr(args, "dry_run", False))
+    if not dry_run and not _require_mainnet_for_publish(client):
+        return 1
+    proof_rows = client.query(_PROOFS_SPARQL, cfg.context_graph_id,
+                              view=constants.VIEW_VERIFIABLE_MEMORY) or []
+    anchored = {extract_binding(r.get("member")) for r in proof_rows}
+    anchored.discard("")
+    rows = _anchor_field_rows(client, cfg)
+    if rows is None:
+        print("error: could not read curated threats from the local store (node busy?). Try again.")
+        return 1
+    hashes = quads.anchor_hashes_from_rows(rows)
+    if getattr(args, "adopt_existing", False):
+        adopt = sorted(set(hashes) - _load_curated_ledger())
+        if adopt:
+            _append_curated_ledger(adopt)
+            print(f"Adopted {len(adopt)} existing SWM threat row(s) into the curated ledger.")
+        else:
+            print("Adopt: every SWM threat row is already in the curated ledger.")
+    curated = _load_curated_ledger()
+    eligible = curated & set(hashes)
+    missing = len(curated - set(hashes))
+    pending = sorted(i for i in eligible if i not in anchored)
+    print(f"Curated ledger: {len(curated)}  with SWM rows: {len(eligible)}  "
+          f"anchored on VM: {len(eligible & anchored)}  pending: {len(pending)}")
+    if missing:
+        print(f"note: {missing} ledger identifier(s) have no local SWM row yet — share/sync first, then re-run.")
+    if not pending:
+        return 0
+    batch_size = max(1, int(getattr(args, "batch_size", constants.DEFAULT_ANCHOR_BATCH_SIZE)
+                            or constants.DEFAULT_ANCHOR_BATCH_SIZE))
+    batches = [pending[i:i + batch_size] for i in range(0, len(pending), batch_size)]
+    if dry_run:
+        for n, batch in enumerate(batches, 1):
+            root = quads.anchor_root((i, hashes[i]) for i in batch)
+            print(f"  batch {n}/{len(batches)}: {len(batch)} threats, root {root[:16]} (dry-run)")
+        return 0
+    max_batches = int(getattr(args, "max_batches", 0) or 0)
+    if max_batches > 0 and len(batches) > max_batches:
+        print(f"Publishing the first {max_batches} of {len(batches)} pending batch(es) this run "
+              f"(re-run `curate anchor` to continue).")
+        batches = batches[:max_batches]
+    published = 0
+    for n, batch in enumerate(batches, 1):
+        root = quads.anchor_root((i, hashes[i]) for i in batch)
+        name = f"curation-proof-{root[:16]}"
+        pq = quads.build_curation_proof_quads(root=root, members=batch)
+        # A proof KA holds ~1 triple per member; finalizing a large assertion
+        # can exceed the default create timeout, so scale it with batch size.
+        create_timeout = max(180.0, 0.5 * len(batch))
+        try:
+            client.share_knowledge_asset(cfg.context_graph_id, name, pq, create_timeout=create_timeout)
+            result = client.publish_async_and_wait(
+                cfg.context_graph_id,
+                name,
+                epochs=args.epochs,
+                timeout_s=max(1, int(getattr(args, "publish_timeout", 600) or 600)),
+                poll_s=max(1, int(getattr(args, "publish_poll_interval", 5) or 5)),
+            )
+            ual = result.get("ual") if isinstance(result, dict) else None
+            print(f"  batch {n}/{len(batches)}: {len(batch)} threats, root {root[:16]} -> published (UAL={ual})")
+            published += 1
+        except DkgError as exc:
+            if _is_already_published(exc):
+                print(f"  batch {n}/{len(batches)}: root {root[:16]} already on-chain — ok")
+                published += 1
+                continue
+            print(f"error: proof publish failed for batch {n} (root {root[:16]}): {exc}")
+            print("       already-published batches stay valid; re-run `curate anchor` to retry the rest.")
+            return 1
+    print(f"Done: {published}/{len(batches)} proof KA(s) on VM.")
     return 0
 
 
@@ -1284,7 +1431,10 @@ def _cmd_curate_import(args: argparse.Namespace) -> int:
         print("No catalog JSON files found to import.")
         return 0
 
-    publish = not args.no_publish
+    # Default model: bulk imports land in SWM only; `curate anchor` proves
+    # them on VM in cheap batches. Per-threat VM KAs are the legacy escape
+    # hatch — one paid publish per threat does not scale to the full catalog.
+    publish = bool(getattr(args, "publish_threat_kas", False))
     dry_run = getattr(args, "dry_run", False)
 
     # Before spending any TRAC, verify the node is actually on a supported
@@ -1391,6 +1541,39 @@ def _load_rejected() -> set:
 def _seeded_ledger_path() -> Path:
     """Curator-local record of every identifier already published (dedup)."""
     return constants.blackbox_home() / "seeded_identifiers.txt"
+
+
+def _curated_ledger_path() -> Path:
+    """Curator-local record of every identifier this curator approved or seeded.
+
+    `curate anchor` proves EXACTLY this set on VM. The anchor set never comes
+    from a store scan — the SWM is open-write, so store rows (including any
+    ``curated`` flag) are attacker-writable; the local ledger is not.
+    """
+    return constants.blackbox_home() / "curated_identifiers.txt"
+
+
+def _load_curated_ledger() -> set:
+    try:
+        return {
+            ln.strip()
+            for ln in _curated_ledger_path().read_text(encoding="utf-8").splitlines()
+            if ln.strip()
+        }
+    except Exception:
+        return set()
+
+
+def _append_curated_ledger(identifiers: List[str]) -> None:
+    if not identifiers:
+        return
+    path = _curated_ledger_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write("\n".join(identifiers) + "\n")
+    except Exception:  # pragma: no cover - defensive
+        pass
 
 
 def _load_seeded_ledger() -> set:
@@ -1539,6 +1722,9 @@ def _seed_entries(
                     poll_s=publish_poll_interval,
                 )
             seeded += 1
+            # Every seeded threat is curator-blessed — record it so `curate
+            # anchor` can prove it on VM without trusting store contents.
+            _append_curated_ledger([ident])
             if publish:  # only on-chain publishes belong in the seeded ledger;
                 new_ids.append(ident)  # a --no-publish (SWM-only) run must not poison it
                 # Persist per-publish, not just at run end: a long VM grind that's

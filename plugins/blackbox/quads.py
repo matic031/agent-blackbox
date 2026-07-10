@@ -1027,6 +1027,70 @@ def _q(subject: str, predicate: str, obj: str) -> Quad:
 
 
 # ---------------------------------------------------------------------------
+# Curation-proof anchors (raw data on SWM, proofs on VM)
+# ---------------------------------------------------------------------------
+
+#: Detection-relevant fields covered by a threat's anchor hash, in canonical
+#: order. Curator and consumers hash the SAME SPARQL binding values, so
+#: tampering with any field the detector consumes breaks the batch root.
+ANCHOR_FIELDS = ("identifier", "kind", "severity", "name", "pattern", "toolName", "argShape")
+
+
+def threat_anchor_hash(fields: Dict[str, Any]) -> str:
+    """Canonical sha256 over a threat row's detection-relevant fields."""
+    lines = [f"{k}={fields.get(k) or ''}" for k in ANCHOR_FIELDS]
+    return hashlib.sha256("\n".join(lines).encode("utf-8")).hexdigest()
+
+
+def anchor_hashes_from_rows(rows: Iterable[Dict[str, Any]]) -> Dict[str, str]:
+    """Map identifier -> anchor hash from plain-string binding rows.
+
+    A re-published threat can yield several rows per identifier; keeping the
+    lexicographically greatest hash makes curator and consumers converge on
+    the same value without coordinating row order.
+    """
+    out: Dict[str, str] = {}
+    for row in rows:
+        ident = str(row.get("identifier") or "").strip()
+        if not ident:
+            continue
+        h = threat_anchor_hash(row)
+        if ident not in out or h > out[ident]:
+            out[ident] = h
+    return out
+
+
+def anchor_root(pairs: Iterable[tuple]) -> str:
+    """Batch root: sha256 over the sorted ``identifier\\x00hash`` lines."""
+    lines = sorted(f"{ident}\x00{h}" for ident, h in pairs)
+    return hashlib.sha256("\n".join(lines).encode("utf-8")).hexdigest()
+
+
+def proof_uri(root: str) -> str:
+    return f"urn:guardian:proof:{root[:16]}"
+
+
+def build_curation_proof_quads(
+    *,
+    root: str,
+    members: Iterable[str],
+    ts: Optional[datetime] = None,
+) -> List[Quad]:
+    """Build one compact VM anchor for a batch of curated SWM threats."""
+    member_list = sorted(set(members))
+    subj = proof_uri(root)
+    out: List[Quad] = [
+        _q(subj, constants.RDF_TYPE, iri(constants.CURATION_PROOF_TYPE_IRI)),
+        _q(subj, constants.ANCHOR_ROOT_PRED, literal(root)),
+        _q(subj, constants.ANCHOR_COUNT_PRED, literal(str(len(member_list)))),
+        _q(subj, constants.SCHEMA_DATE_MODIFIED_PRED, datetime_literal(ts)),
+    ]
+    for member in member_list:
+        out.append(_q(subj, constants.ANCHOR_MEMBER_PRED, literal(member)))
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Threat / report quad builders
 # ---------------------------------------------------------------------------
 

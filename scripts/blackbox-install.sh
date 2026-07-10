@@ -721,6 +721,7 @@ install_dkg() {
             return 0
         fi
     fi
+    patch_dkg_sync_budgets
 
     mkdir -p "$BLACKBOX_DKG_HOME"
     if ! check_blackbox_dkg_port; then
@@ -829,6 +830,70 @@ wait_for_dkg_catchup() {
     return 1
 }
 
+# Stock DKG v10.0.5 gives the whole catch-up a 120s budget shared by every
+# graph and all three SWM phases, so a large public community graph
+# (~178k _shared_memory_meta triples at 20k entities) can never finish one
+# meta pass and a fresh node stays at 0 community rows forever. Patch the
+# requester budgets in the Blackbox-owned DKG CLI (env-overridable, larger
+# defaults). Idempotent; fails open with a warning if upstream moved the
+# constants (a future release may fix this properly).
+patch_dkg_sync_budgets() {
+    if "$VENV_DIR/bin/python" - "$BLACKBOX_DKG_CLI_DIR" <<'PYEOF'
+import pathlib, sys
+
+cli_dir = pathlib.Path(sys.argv[1])
+marker = "Ops patch (umanitek)"
+budgets = (
+    "const _envMs = (name, fallback) => {\n"
+    "    const v = Number(process.env[name] ?? '');\n"
+    "    return Number.isFinite(v) && v > 0 ? v : fallback;\n"
+    "};\n"
+)
+edits = [  # (relative glob, stock line, replacement)
+    ("dkg-agent-constants.js",
+     "export const SYNC_TOTAL_TIMEOUT_MS = 120_000;",
+     budgets + "export const SYNC_TOTAL_TIMEOUT_MS = _envMs('DKG_SYNC_TOTAL_TIMEOUT_MS', 600_000);"),
+    ("dkg-agent-constants.js",
+     "export const SYNC_PAGE_TIMEOUT_MS = 45_000;",
+     "export const SYNC_PAGE_TIMEOUT_MS = _envMs('DKG_SYNC_PAGE_TIMEOUT_MS', 90_000);"),
+    ("dkg-agent-constants.js",
+     "export const SYNC_MIN_GRAPH_BUDGET_MS = 10_000;",
+     "export const SYNC_MIN_GRAPH_BUDGET_MS = _envMs('DKG_SYNC_MIN_GRAPH_BUDGET_MS', 120_000);"),
+    ("sync/durable-session.js",
+     "export const DURABLE_DATA_SYNC_SESSION_TTL_MS = 10 * 60_000;",
+     "const _ttlEnv = Number(process.env.DKG_SYNC_SESSION_TTL_MS ?? '');\n"
+     "export const DURABLE_DATA_SYNC_SESSION_TTL_MS = "
+     "Number.isFinite(_ttlEnv) && _ttlEnv > 0 ? _ttlEnv : 60 * 60_000;"),
+]
+roots = sorted(cli_dir.glob("node_modules/**/dkg-agent/dist"))
+if not roots:
+    print("dkg-agent dist not found under " + str(cli_dir), file=sys.stderr)
+    sys.exit(1)
+failed = False
+for root in roots:
+    for rel, stock, replacement in edits:
+        path = root / rel
+        if not path.is_file():
+            failed = True
+            print(f"missing {path}", file=sys.stderr)
+            continue
+        text = path.read_text()
+        if replacement.splitlines()[-1] in text:
+            continue  # already patched
+        if stock not in text:
+            failed = True
+            print(f"stock line not found in {path}: {stock}", file=sys.stderr)
+            continue
+        path.write_text(text.replace(stock, f"// {marker}: sync budget, env-overridable\n" + replacement, 1))
+sys.exit(1 if failed else 0)
+PYEOF
+    then
+        ok "DKG sync budgets patched for large community-graph catch-up"
+    else
+        warn "Could not patch DKG sync budgets; large community graphs may not fully catch up."
+    fi
+}
+
 dkg_manual_hint() {
     step "To set up the DKG node later:"
     echo "      mkdir -p \"$BLACKBOX_DKG_CLI_DIR\""
@@ -905,7 +970,7 @@ defaults = {
     # stays with the curator wallet, and Verifiable Memory publishing works
     # (impossible on the retired private CG). TODO(launch): production graph.
     "context_graph_id": context_graph_id,
-    "sync_interval": 300,
+    "sync_interval": 60,
     "report": True,
     "daily_report_limit": 9999,
     "report_min_severity": "high",

@@ -15,7 +15,7 @@ at the repo root.
   (`confirmed=false`, `source="community"`) and is re-reported to strengthen
   consensus, but **never** blocks. Built-in **heuristics** only nominate NEW
   candidates (`source="heuristic"`), flagged/reported only when severity ≥
-  `report_min_severity`. Public wins any identifier collision. On an empty
+  `report_min_severity`. Public wins any identifier collision. Raw curated data lives in SWM; the VM carries compact curation proofs (`curate anchor`), and a community row whose batch root matches an on-chain proof is promoted to the public tier at sync time - so one paid publish proves a whole batch instead of one KA per threat. On an empty
   graph nothing can block — high-severity heuristic candidates are still
   flagged and reported for curators to promote.
 - **Deterministic HTTP pushes.** Every write to the DKG is a plain HTTP call
@@ -76,7 +76,7 @@ evidence stays in the node's private WM audit KA.
 | `dkg_url` | `http://127.0.0.1:9320` | `BLACKBOX_DKG_DAEMON_URL` / `BLACKBOX_DKG_URL` |
 | `dkg_home` | `$HERMES_HOME/blackbox/dkg` | `BLACKBOX_DKG_HOME` |
 | `dkg_bin` | `$HERMES_HOME/blackbox/dkg-cli/node_modules/.bin/dkg` | `BLACKBOX_DKG_BIN` |
-| `sync_interval` | `300` | `BLACKBOX_SYNC_INTERVAL` |
+| `sync_interval` | `60` | `BLACKBOX_SYNC_INTERVAL` |
 | `report` | `true` | `BLACKBOX_REPORT` |
 | `daily_report_limit` | `9999` | `BLACKBOX_DAILY_REPORT_LIMIT` |
 | `report_min_severity` | `high` | `BLACKBOX_REPORT_MIN_SEVERITY` |
@@ -221,8 +221,10 @@ hermes blackbox report --type ...      # submit a NEW candidate threat to SWM
 hermes blackbox setup-graph            # curator: create + register the public/community CG
 hermes blackbox curate list --pending  # candidate threats grouped by distinct reporters
 hermes blackbox curate show <id>       # one threat + its reporters
-hermes blackbox curate approve <id>    # promote to curated threat, any of the five
-                                       #   categories (share + vm/publish)
+hermes blackbox curate approve <id>    # promote to curated threat in SWM, any of
+                                       #   the five categories (anchor covers VM)
+hermes blackbox curate anchor          # curator: publish compact VM proofs (batch
+                                       #   root + members) for curated SWM threats
 hermes blackbox curate reject <id>     # reject locally (+ optional SWM false-positive)
 hermes blackbox curate auto-accept --once
                                        # legacy private graph: approve pending DKG graph join requests
@@ -249,6 +251,55 @@ hermes blackbox curate redeliver-approval --agent <consumer-agent-address>
 ```
 
 Then rerun `hermes blackbox sync --wait --timeout 180` on the consumer.
+
+### Open access model (curator ops)
+
+The access model is: every user can read the verifiable memory and the
+community graph and push reports to the community graph; publishing to the
+verifiable memory stays gated to the curator wallet, so curators choose what
+gets promoted from the community pool. Three things keep the "everyone gets
+in" half true:
+
+- The community graph is a PUBLIC context graph with an EMPTY allowlist.
+  Reads, SWM pushes, and fan-out need no join or approval for any node. Never
+  approve a join request on it: the first `allowedAgent` entry flips the graph
+  to agent-gated, and every plaintext SWM write is then rejected with "Sender
+  Key encrypted workspace payload required" until the allowlist is cleared
+  again. Both the dashboard approver loop and `curate auto-accept` carry a
+  guard that idles on an open graph for exactly this reason.
+- Join requests from consumers are harmless noise on the open graph (the
+  client re-sends one on every sync); they sit pending and must stay pending.
+- The curator and the managed staging node carry a local ops patch that keeps
+  DKG network admission open: a peer is admitted even when the
+  `/dkg/10.0.1/network-identity` probe fails (pre-10.0.5 nodes cannot
+  negotiate it at all), so no wallet is quarantined off the network. Both
+  nodes still answer identity probes, so strict peers keep admitting them.
+
+The admission patch lives in
+`@origintrail-official/dkg-agent/dist/p2p/network-admission.js` and
+`network-admission-coordinator.js`, in both the global npm install and
+`~/.hermes/blackbox-staging/dkg-cli`. Admission is open by default there; set
+`DKG_NETWORK_ADMISSION_MODE=strict` to restore stock gating. A `dkg` package
+upgrade overwrites the patch - re-apply it after upgrading.
+
+### SWM catch-up budgets (ops patch)
+
+Stock DKG v10.0.5 gives the whole catch-up a hardcoded 120s budget shared by
+every subscribed graph and all three SWM phases (meta, data, snapshot), so a
+fresh node can never finish one pass over the community graph's
+`_shared_memory_meta` (~178k triples at 20k entities) and stays at 0 community
+rows forever. See ORIGINTRAIL_SWM_CATCHUP_ISSUE.md (2026-07-10 addendum).
+
+The installer patches the Blackbox-owned DKG CLI after `npm install`
+(`patch_dkg_sync_budgets` in `scripts/blackbox-install.sh`; same step in the
+PowerShell installer): `SYNC_TOTAL_TIMEOUT_MS` 120s -> 600s,
+`SYNC_PAGE_TIMEOUT_MS` 45s -> 90s, `SYNC_MIN_GRAPH_BUDGET_MS` 10s -> 120s in
+`dkg-agent/dist/dkg-agent-constants.js`, and the responder session TTL 10min
+-> 60min in `dkg-agent/dist/sync/durable-session.js`. All env-overridable
+(`DKG_SYNC_TOTAL_TIMEOUT_MS`, `DKG_SYNC_PAGE_TIMEOUT_MS`,
+`DKG_SYNC_MIN_GRAPH_BUDGET_MS`, `DKG_SYNC_SESSION_TTL_MS`). The curator and
+staging installs on the curator machine carry the same patch. A `dkg` upgrade
+overwrites it - re-run the installer or the patch step after upgrading.
 
 `hermes blackbox chat` bootstraps a managed `blackbox` profile, writes a
 Blackbox-specific `SOUL.md`, pins `context_file_max_chars` high enough for this

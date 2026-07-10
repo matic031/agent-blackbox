@@ -1624,12 +1624,6 @@
     return isFinite(n) ? n.toLocaleString() : "-";
   }
 
-  function shortAddr(a) {
-    a = String(a || "");
-    if (a.length <= 12) return a;
-    return a.slice(0, 6) + "…" + a.slice(-4);
-  }
-
   function setBanner(down) {
     var el = $("conn-banner");
     if (down) el.classList.add("show"); else el.classList.remove("show");
@@ -1728,19 +1722,38 @@
       return;
     }
 
+    // Slug subtitles: workspace dir name when attached, framework name for
+    // the rest; the wallet lives only in the hover tooltip. Cards sharing a
+    // base slug get -1/-2/... suffixes assigned in address order, so two
+    // remote OpenClaws keep the same numbers regardless of API row order.
+    var slugGroups = {};
+    list.forEach(function (a) {
+      var fw = String(a.framework || "").toLowerCase();
+      var base = a.workspace_label || (fw && fw !== "unknown" ? fw : "agent");
+      (slugGroups[base] = slugGroups[base] || []).push(a);
+    });
+    Object.keys(slugGroups).forEach(function (base) {
+      var group = slugGroups[base];
+      if (group.length === 1) { group[0]._slug = base; return; }
+      group.slice().sort(function (x, y) {
+        var kx = String(x.address || "").toLowerCase() + "|" + String(x.workspace || "");
+        var ky = String(y.address || "").toLowerCase() + "|" + String(y.workspace || "");
+        return kx < ky ? -1 : kx > ky ? 1 : 0;
+      }).forEach(function (a, i) { a._slug = base + "-" + (i + 1); });
+    });
+
     var cards = list.map(function (a) {
       var isLocal = !!a.is_local;
       var reports = Number(a.reports) || 0;
       var reportsHtml = SHOW_AGENT_REPORTS
         ? '<div class="agent-reports"><strong>' + num(reports) + '</strong> report' + (reports === 1 ? '' : 's') + '</div>'
         : '';
-      var wsLabel = a.workspace_label ? '<div class="agent-addr" title="' + esc(a.workspace || '') + '">' + esc(a.workspace_label) + '</div>' : '';
+      var tip = [a.workspace, a.address].filter(Boolean).join("\n");
       return '<div class="agent-card' + (isLocal ? ' local' : '') + '">' +
         '<span class="agent-avatar" style="--fw:' + fwColor(a.framework) + '">' + fwIcon(a.framework) + '</span>' +
         '<div class="agent-info">' +
           '<div class="agent-fw">' + esc(fwLabel(a.framework)) + '</div>' +
-          '<div class="agent-addr" title="' + esc(a.address) + '">' + esc(shortAddr(a.address)) + '</div>' +
-          wsLabel +
+          '<div class="agent-addr" title="' + esc(tip) + '">' + esc(a._slug) + '</div>' +
           reportsHtml +
         '</div>' +
       '</div>';
@@ -2506,8 +2519,9 @@
           (span ? '<div class="t-id">' + esc(span) + '</div>' : '') + '</div>';
       }
 	      if (node.kind === "hub") {
+	        var action = graphDetailMode[activeTier] === "explore" ? "click to focus" : "click for details";
 	        var hc = node.count != null
-	          ? (node.count.toLocaleString() + ' threat' + (node.count === 1 ? '' : 's') + ' · click for details')
+	          ? (node.count.toLocaleString() + ' threat' + (node.count === 1 ? '' : 's') + ' · ' + action)
 	          : 'category hub';
 	        return '<div class="graph-tip"><div class="t-name">' + esc(node.label) + '</div>' +
 	          '<div class="t-cat">' + hc + '</div></div>';
@@ -3055,11 +3069,14 @@
     if (node.kind === "leaf") { openThreatModal(node); return; }
     if (node.kind === "gmore") { loadMoreGraph(node.focus || null); return; }
     if (node.kind === "hub" && activeTier !== "local" && node.focus) {
-      if (graphDetailMode[activeTier] === "explore" && !graphSameFocus(graphFocus[activeTier], node.focus)) {
-        graphFocus[activeTier] = node.focus;
-        graphLeafLimit[activeTier] = Math.max(graphCap(activeTier), graphPreset(activeTier).focusCap);
-        invalidateGraphTier(activeTier);
-        renderGraphTab();
+      if (graphDetailMode[activeTier] === "explore") {
+        if (!graphSameFocus(graphFocus[activeTier], node.focus)) {
+          graphFocus[activeTier] = node.focus;
+          graphLeafLimit[activeTier] = Math.max(graphCap(activeTier), graphPreset(activeTier).focusCap);
+          invalidateGraphTier(activeTier);
+          renderGraphTab();
+        }
+        return;
       }
       openCategoryModal(node);
       return;

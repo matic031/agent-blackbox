@@ -43,9 +43,17 @@ SUSPICIOUS_SKILL_THREAT_TYPE_IRI = f"{BLACKBOX_ONTOLOGY}SuspiciousSkillThreat"
 IOC_THREAT_TYPE_IRI = f"{BLACKBOX_ONTOLOGY}IndicatorThreat"
 REPORT_TYPE_IRI = f"{BLACKBOX_ONTOLOGY}ThreatReport"
 FALSE_POSITIVE_TYPE_IRI = f"{BLACKBOX_ONTOLOGY}FalsePositive"
+#: Curation proof: raw threat data lives in SWM; the VM carries only these
+#: compact anchors (batch root + member identifiers). One paid publish proves
+#: a whole batch of curated threats, and consumers verify their synced SWM
+#: rows against it before granting the blockable public tier.
+CURATION_PROOF_TYPE_IRI = f"{BLACKBOX_ONTOLOGY}CurationProof"
 
 # Blackbox predicates -------------------------------------------------------
 IDENTIFIER_PRED = f"{BLACKBOX_ONTOLOGY}identifier"
+ANCHOR_ROOT_PRED = f"{BLACKBOX_ONTOLOGY}anchorRoot"
+ANCHOR_MEMBER_PRED = f"{BLACKBOX_ONTOLOGY}anchorMember"
+ANCHOR_COUNT_PRED = f"{BLACKBOX_ONTOLOGY}anchorCount"
 CURATED_PRED = f"{BLACKBOX_ONTOLOGY}curated"
 SEVERITY_PRED = f"{BLACKBOX_ONTOLOGY}severity"
 PATTERN_PRED = f"{BLACKBOX_ONTOLOGY}pattern"
@@ -115,6 +123,13 @@ LEGACY_CONTEXT_GRAPH_IDS = frozenset({
 #: Default Blackbox-managed local DKG node HTTP endpoint. Deliberately not the
 #: DKG CLI's default 9200, so Agent Blackbox never collides with a user's own
 #: DKG node/cache.
+#: Curated threats per curation-proof KA (each member is ~1 RDF triple).
+#: One paid VM publish anchors this many SWM rows; consumers verify per batch,
+#: so partial SWM sync still confirms every fully-synced batch. Kept small on
+#: purpose: a large single assertion (~1000+ triples) can stall the node's
+#: seal path under concurrent sync load, so we favour more, lighter proofs.
+DEFAULT_ANCHOR_BATCH_SIZE = 250
+
 DEFAULT_DKG_PORT = 9320
 DEFAULT_DKG_URL = f"http://127.0.0.1:{DEFAULT_DKG_PORT}"
 

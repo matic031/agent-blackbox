@@ -102,7 +102,7 @@ class BlackboxConfig:
     dkg_url: str = constants.DEFAULT_DKG_URL
     dkg_home: str = field(default_factory=lambda: str(constants.blackbox_dkg_home()))
     dkg_bin: str = field(default_factory=lambda: str(constants.blackbox_dkg_bin()))
-    sync_interval: int = 300
+    sync_interval: int = 60
     report: bool = True
     daily_report_limit: int = 9999
     report_min_severity: str = "high"
@@ -302,7 +302,7 @@ def load_blackbox_config() -> BlackboxConfig:
         dkg_home=dkg_home,
         dkg_bin=dkg_bin,
         sync_interval=_as_int(
-            _env_or(entry, env="BLACKBOX_SYNC_INTERVAL", key="sync_interval", default=300), 300
+            _env_or(entry, env="BLACKBOX_SYNC_INTERVAL", key="sync_interval", default=60), 60
         ),
         report=_as_bool(_env_or(entry, env="BLACKBOX_REPORT", key="report", default=True), True),
         daily_report_limit=_as_int(
