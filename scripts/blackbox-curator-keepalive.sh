@@ -76,7 +76,12 @@ oxi_binary() {
     echo "${BLACKBOX_DKG_OXI_BIN:-$b}"
 }
 
-api_up() { curl -fsS -m 5 "$API_URL/api/status" >/dev/null 2>&1; }
+# Health = the HTTP server answers AT ALL. /api/status returns 400 for an
+# authless/!200 probe and gets slow under the join-request flood, so `-fsS -m5`
+# (fail-on-4xx + tight timeout) falsely declared a healthy-but-busy node "down"
+# and restarted it every ~45s. Treat any HTTP status as up; only a real
+# connection failure/timeout (curl code 000) counts as down.
+api_up() { local c; c="$(curl -s -o /dev/null -w '%{http_code}' -m 12 "$API_URL/api/status" 2>/dev/null)"; [ -n "$c" ] && [ "$c" != "000" ]; }
 
 # Stop ONLY this node, never another DKG node on the same machine. Order:
 #   1. `dkg stop` (home-specific — signals via $DKG_HOME/daemon.pid; also stops
