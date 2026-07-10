@@ -30,7 +30,7 @@ _TIMEOUT = 3.0
 # background refresh and the dashboard hit it, never the cached hot hook path.
 _QUERY_TIMEOUT = 30.0
 # Community tier reads scale with the pool, so a longer ceiling than the node API.
-_STORE_TIMEOUT = 60.0
+_STORE_TIMEOUT = 150.0
 # On-chain ops (CG register, VM publish) wait for block confirmation.
 _ONCHAIN_TIMEOUT = 180.0
 Quad = Dict[str, str]

@@ -107,3 +107,17 @@ Very high-frequency background error from the promote worker (tight retry loop).
 ## D. Chain RPC heavily degraded
 
 `429 Too Many Requests` — **×4,683**; `request timeout (code=TIMEOUT)` — **×2,985**; `[chain] provider error … rpc=base-mainnet.core.chainstack.com: failed to bootstrap network detection` — **×433**; `RPC endpoints exhausted` — **×27**. Partly provider-dependent (rate limits), but the **volume** suggests the node issues a very high number of chain calls under load. Worth checking `eth_call` / `eth_getLogs` batching and poll cadence to reduce RPC pressure (this compounds the publish failures in A, since publish needs chain reads).
+
+## Addendum 2026-07-10 — reproduced unchanged on v10.0.5, root cause narrowed to hardcoded budgets
+
+Re-tested with the published `@origintrail-official/dkg@10.0.5` (npm, mainnet-base) on a fresh consumer: `shared memory: 0 data + 127500 meta triples fetched`, then `Sync timeout for shared-memory meta phase … data phase (0 triples) … snapshot phase (0 triples)` — all three phases die on the same shared deadline.
+
+The v10.0.5 numbers make the failure arithmetic, not environmental:
+
+- `dkg-agent/dist/dkg-agent-constants.js`: `SYNC_TOTAL_TIMEOUT_MS = 120_000` — the **entire catch-up run** (every subscribed graph, and all three SWM phases of each) shares a 120s budget (`createContextGraphSyncDeadline` divides it by remaining graphs, floor `SYNC_MIN_GRAPH_BUDGET_MS = 10_000`).
+- Our public graph's `_shared_memory_meta` is ~178k triples; observed transfer is ~1k triples/s over relayed mainnet links. One meta pass needs ~3 min > the whole budget, **so a fresh node can never complete it regardless of link quality**. We measured 127.5k/178k (71%) fetched at deadline, every attempt, forever.
+- The new public-snapshot phase (`syncPublicSnapshotsForMeta`) only runs **after** the meta phase inside the **same** deadline, so the bulk-distribution lane added in 10.0.5 is starved by the exact defect it presumably exists to mitigate.
+- Cross-restart resume is still broken as originally reported: checkpoints are now SQLite-persisted, but SWM resume additionally requires the requester-side responder-session entry, which is still an in-memory `Map` (`sync/requester/page-fetch.js`), so `offset` resets to 0 on restart.
+- The responder paging session TTL (`DURABLE_DATA_SYNC_SESSION_TTL_MS = 10 min`) bounds any single-session pull; combined with the 120s requester budget the effective ceiling per pass is the 120s.
+
+Workaround we now deploy (requester-side, no protocol change): raise `SYNC_TOTAL_TIMEOUT_MS` to 600s, `SYNC_PAGE_TIMEOUT_MS` to 90s, `SYNC_MIN_GRAPH_BUDGET_MS` to 120s (env-overridable) in the installed `dkg-agent` dist. With a 600s budget one meta pass fits inside the stock 10-min responder TTL and a fresh consumer completes SWM catch-up. This confirms suggested fix #3 (configurable budgets) unblocks real deployments even before #1/#2 (incremental commit / persisted resume) land — but #1/#2 remain the correct fixes, since any graph whose meta outgrows one responder-TTL window will hit the wall again.

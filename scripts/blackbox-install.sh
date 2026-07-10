@@ -41,7 +41,7 @@ BLACKBOX_DKG_BIN="${BLACKBOX_DKG_BIN:-$BLACKBOX_DKG_CLI_DIR/node_modules/.bin/dk
 BLACKBOX_DKG_PACKAGE="${BLACKBOX_DKG_PACKAGE:-@origintrail-official/dkg@latest}"
 BLACKBOX_DKG_DAEMON_URL="${BLACKBOX_DKG_DAEMON_URL:-${BLACKBOX_DKG_URL:-http://127.0.0.1:$BLACKBOX_DKG_PORT}}"
 NODE_MAJOR="${BLACKBOX_NODE_MAJOR:-22}"
-BLACKBOX_CONTEXT_GRAPH_ID="${BLACKBOX_CONTEXT_GRAPH_ID:-umanitek/guardian-threats-staging}"
+BLACKBOX_CONTEXT_GRAPH_ID="${BLACKBOX_CONTEXT_GRAPH_ID:-umanitek/blackbox-threats-staging}"
 BLACKBOX_DKG_CATCHUP_TIMEOUT="${BLACKBOX_DKG_CATCHUP_TIMEOUT:-180}"
 BLACKBOX_LLM_PROVIDER="${BLACKBOX_LLM_PROVIDER:-}"
 BLACKBOX_LLM_MODEL="${BLACKBOX_LLM_MODEL:-}"
@@ -231,6 +231,22 @@ data["apiPort"] = api_port
 data.setdefault("listenPort", 0)
 data["nodeRole"] = "edge"
 data["networkConfig"] = "mainnet-base"
+# Relay reachability: an edge node behind NAT must hold circuit-relay
+# reservations so other members can dial it (and so it can dial them). DKG
+# only builds its relay set from `relayPeers`; with that empty, the network-
+# isolation gate denies EVERY relayed connection and the node holds 0
+# reservations ("No reachable curator found" for anyone trying to join).
+# Seed the mainnet-base core relays explicitly so every install is reachable.
+MAINNET_BASE_RELAYS = [
+    "/ip4/178.104.98.10/tcp/9090/p2p/12D3KooWFWm8sg6dkitmdBd5Uxaqp3CDRL27mFcM7vEHK92Xapyy",
+    "/ip4/168.119.127.54/tcp/9090/p2p/12D3KooWMasqzRrim48ZJM64UyTfHufDTmSG3n3jqwsS5phz8m91",
+    "/ip4/178.156.237.133/tcp/9090/p2p/12D3KooWDgTunUpkGaE7dYCaDP1CCBT6Dm2HPMXSZhJn2KXYLH15",
+    "/ip4/178.105.211.42/tcp/9090/p2p/12D3KooWCodgXHMwybaEe93rbKgWMfGXQvUb6cpT3VCrjCbbnyEu",
+]
+existing_relays = data.get("relayPeers") if isinstance(data.get("relayPeers"), list) else []
+merged_relays = list(dict.fromkeys([*existing_relays, *MAINNET_BASE_RELAYS]))
+data["relayPeers"] = merged_relays
+data["relayReservationCount"] = int(data.get("relayReservationCount") or 4)
 graphs = data.get("contextGraphs")
 if not isinstance(graphs, list):
     graphs = []
@@ -864,6 +880,14 @@ edits = [  # (relative glob, stock line, replacement)
      "const _ttlEnv = Number(process.env.DKG_SYNC_SESSION_TTL_MS ?? '');\n"
      "export const DURABLE_DATA_SYNC_SESSION_TTL_MS = "
      "Number.isFinite(_ttlEnv) && _ttlEnv > 0 ? _ttlEnv : 60 * 60_000;"),
+    # An agent gate whose effective member set is empty (every allowedAgent
+    # also revoked — e.g. an allowlist cleared via remove-participant, which
+    # revokes rather than deletes) must collapse to PUBLIC, else the public
+    # graph deadlocks every SWM gossip write ("no local allowed signing agent
+    # key"). Aligns local gating with the open on-chain policy.
+    ("dkg-agent-crypto.js",
+     "return sawAgentGate ? agents : null;",
+     "return (sawAgentGate && agents.length > 0) ? agents : null;"),
 ]
 roots = sorted(cli_dir.glob("node_modules/**/dkg-agent/dist"))
 if not roots:
@@ -942,7 +966,7 @@ blackbox = entries.setdefault("blackbox", {})
 # Idempotent for custom user edits, but migrate deprecated defaults that point
 # at the user's shared DKG install or a retired community graph.
 legacy_dkg_urls = {"http://127.0.0.1:9200", "http://localhost:9200"}
-legacy_graphs = {"umanitek/blackbox-threats-staging", "umanitek/guardian-threats"}
+legacy_graphs = {"umanitek/guardian-threats-staging", "umanitek/guardian-threats"}
 default_dkg_home = os.path.abspath(os.path.expanduser("~/.dkg"))
 added = []
 current_dkg_url = str(blackbox.get("dkg_url") or blackbox.get("dkgUrl") or "").rstrip("/")

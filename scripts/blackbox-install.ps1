@@ -48,7 +48,7 @@ $DkgBin      = if ($env:BLACKBOX_DKG_BIN)     { $env:BLACKBOX_DKG_BIN }     else
 $DkgPackage  = if ($env:BLACKBOX_DKG_PACKAGE) { $env:BLACKBOX_DKG_PACKAGE } else { "@origintrail-official/dkg@latest" }
 $DkgDaemonUrl = if ($env:BLACKBOX_DKG_DAEMON_URL) { $env:BLACKBOX_DKG_DAEMON_URL } elseif ($env:BLACKBOX_DKG_URL) { $env:BLACKBOX_DKG_URL } else { "http://127.0.0.1:$DkgPort" }
 $NodeMajor   = if ($env:BLACKBOX_NODE_MAJOR)  { [int]$env:BLACKBOX_NODE_MAJOR } else { 22 }
-$ContextGraphId = if ($env:BLACKBOX_CONTEXT_GRAPH_ID) { $env:BLACKBOX_CONTEXT_GRAPH_ID } else { "umanitek/guardian-threats-staging" }
+$ContextGraphId = if ($env:BLACKBOX_CONTEXT_GRAPH_ID) { $env:BLACKBOX_CONTEXT_GRAPH_ID } else { "umanitek/blackbox-threats-staging" }
 $CatchupTimeout = if ($env:BLACKBOX_DKG_CATCHUP_TIMEOUT) { [int]$env:BLACKBOX_DKG_CATCHUP_TIMEOUT } else { 180 }
 $script:InstallIncomplete = $false
 $script:DkgAlreadyRunning = $false
@@ -322,6 +322,19 @@ data["apiPort"] = api_port
 data.setdefault("listenPort", 0)
 data["nodeRole"] = "edge"
 data["networkConfig"] = "mainnet-base"
+# Relay reachability (see the .sh installer for the full rationale): DKG builds
+# its relay set from `relayPeers`; empty -> network-isolation denies every
+# relayed connection and the node holds 0 reservations, so no one can reach it.
+MAINNET_BASE_RELAYS = [
+    "/ip4/178.104.98.10/tcp/9090/p2p/12D3KooWFWm8sg6dkitmdBd5Uxaqp3CDRL27mFcM7vEHK92Xapyy",
+    "/ip4/168.119.127.54/tcp/9090/p2p/12D3KooWMasqzRrim48ZJM64UyTfHufDTmSG3n3jqwsS5phz8m91",
+    "/ip4/178.156.237.133/tcp/9090/p2p/12D3KooWDgTunUpkGaE7dYCaDP1CCBT6Dm2HPMXSZhJn2KXYLH15",
+    "/ip4/178.105.211.42/tcp/9090/p2p/12D3KooWCodgXHMwybaEe93rbKgWMfGXQvUb6cpT3VCrjCbbnyEu",
+]
+existing_relays = data.get("relayPeers") if isinstance(data.get("relayPeers"), list) else []
+merged_relays = list(dict.fromkeys([*existing_relays, *MAINNET_BASE_RELAYS]))
+data["relayPeers"] = merged_relays
+data["relayReservationCount"] = int(data.get("relayReservationCount") or 4)
 graphs = data.get("contextGraphs")
 if not isinstance(graphs, list):
     graphs = []
@@ -531,6 +544,10 @@ edits = [
      "const _ttlEnv = Number(process.env.DKG_SYNC_SESSION_TTL_MS ?? '');\n"
      "export const DURABLE_DATA_SYNC_SESSION_TTL_MS = "
      "Number.isFinite(_ttlEnv) && _ttlEnv > 0 ? _ttlEnv : 60 * 60_000;"),
+    # Effectively-empty agent gate -> PUBLIC (see the .sh installer for why).
+    ("dkg-agent-crypto.js",
+     "return sawAgentGate ? agents : null;",
+     "return (sawAgentGate && agents.length > 0) ? agents : null;"),
 ]
 roots = sorted(cli_dir.glob("node_modules/**/dkg-agent/dist"))
 if not roots:
@@ -611,7 +628,7 @@ plugins = data.setdefault("plugins", {})
 entries = plugins.setdefault("entries", {})
 blackbox = entries.setdefault("blackbox", {})
 legacy_dkg_urls = {"http://127.0.0.1:9200", "http://localhost:9200"}
-legacy_graphs = {"umanitek/blackbox-threats-staging", "umanitek/guardian-threats"}
+legacy_graphs = {"umanitek/guardian-threats-staging", "umanitek/guardian-threats"}
 default_dkg_home = os.path.abspath(os.path.expanduser("~/.dkg"))
 added = []
 current_dkg_url = str(blackbox.get("dkg_url") or blackbox.get("dkgUrl") or "").rstrip("/")
@@ -631,14 +648,14 @@ if not current_dkg_bin or current_dkg_bin == "dkg":
     blackbox["dkg_bin"] = dkg_bin
     added.append("dkg_bin")
 if current_graph in legacy_graphs:
-    blackbox["context_graph_id"] = os.environ.get("BLACKBOX_CONTEXT_GRAPH_ID", "umanitek/guardian-threats-staging")
+    blackbox["context_graph_id"] = os.environ.get("BLACKBOX_CONTEXT_GRAPH_ID", "umanitek/blackbox-threats-staging")
     added.append("context_graph_id")
 defaults = {
     "mode": "audit",
     # PUBLIC staging graph: open reads/SWM for every node, publish authority
     # stays with the curator wallet, and Verifiable Memory publishing works
     # (impossible on the retired private CG). TODO(launch): production graph.
-    "context_graph_id": os.environ.get("BLACKBOX_CONTEXT_GRAPH_ID", "umanitek/guardian-threats-staging"),
+    "context_graph_id": os.environ.get("BLACKBOX_CONTEXT_GRAPH_ID", "umanitek/blackbox-threats-staging"),
     "sync_interval": 60,
     "report": True,
     "daily_report_limit": 9999,
