@@ -92,6 +92,42 @@ def test_ruleset_sync_once_requests_join_when_subscribe_fails():
     ]
 
 
+def test_dashboard_approver_skips_open_access_graph():
+    approved = []
+
+    class OpenClient:
+        def list_context_graph_agents(self, cg_id):
+            return []
+
+        def list_join_requests(self, cg_id):
+            return [{"agentAddress": "0x" + "1" * 40}]
+
+        def approve_join(self, cg_id, addr):
+            approved.append(addr)
+
+    assert server._approve_joins_once(OpenClient(), "umanitek/guardian-threats-staging") == []
+    assert approved == []
+
+
+def test_dashboard_approver_still_admits_legacy_private_graph():
+    approved = []
+
+    class PrivateClient:
+        def list_context_graph_agents(self, cg_id):
+            return ["0x" + "c" * 40]
+
+        def list_join_requests(self, cg_id):
+            return [{"agentAddress": "0x" + "1" * 40, "name": "fresh-node"}]
+
+        def approve_join(self, cg_id, addr):
+            approved.append(addr)
+
+    out = server._approve_joins_once(PrivateClient(), "some/private-cg")
+
+    assert out == [{"agentAddress": "0x" + "1" * 40, "name": "fresh-node"}]
+    assert approved == ["0x" + "1" * 40]
+
+
 def test_blackbox_dashboard_chat_starts_session(monkeypatch):
     calls = []
 

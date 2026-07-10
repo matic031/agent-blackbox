@@ -68,6 +68,28 @@ def _sync_ruleset_once(load_config: Any, dkg_client_cls: Any, ruleset_mod: Any) 
     return _ruleset_sync_counts(rs)
 
 
+def _approve_joins_once(client: Any, cg_id: str) -> List[Dict[str, Any]]:
+    """Approve pending joins only for legacy private graphs.
+
+    Open Guardian graphs have an empty allowlist. Approving the first join would
+    create an allowlist and make the graph invite-only, so this must no-op there.
+    """
+    try:
+        if not client.list_context_graph_agents(cg_id):
+            return []
+    except Exception:
+        return []
+    pending = client.list_join_requests(cg_id)
+    approved: List[Dict[str, Any]] = []
+    for req in pending:
+        addr = str(req.get("agentAddress") or "").strip()
+        if not addr:
+            continue
+        client.approve_join(cg_id, addr)
+        approved.append(req)
+    return approved
+
+
 def create_app():
     """Build and return the FastAPI application."""
     from fastapi import Body, FastAPI, Query
@@ -129,26 +151,17 @@ def create_app():
             try:
                 cfg = load_blackbox_config()
                 client = DkgClient(url=cfg.dkg_url, dkg_home=cfg.dkg_home)
-                # Open-access CGs (no allowlist) are left untouched: approving a
-                # join would write the first ``allowedAgent`` entry, and any
-                # non-empty allowlist flips the DKG's gossip/subscribe gates from
-                # open to invite-only for every other node. Joins are unnecessary
-                # there — reads and SWM fan-out are ungated.
-                if client.list_context_graph_agents(cfg.context_graph_id):
-                    pending = client.list_join_requests(cfg.context_graph_id)
-                    idle = 0
-                else:
-                    pending = []
-                    idle += 1
-                for req in pending:
-                    addr = str(req.get("agentAddress") or "").strip()
-                    if not addr:
-                        continue
-                    try:
-                        client.approve_join(cfg.context_graph_id, addr)
-                        logger.info("blackbox approver: auto-admitted %s", req.get("name") or addr)
-                    except Exception as exc:  # pragma: no cover - fail open
-                        logger.debug("blackbox approver: approve %s failed: %s", addr, exc)
+                # ``_approve_joins_once`` no-ops on open CGs (empty allowlist):
+                # approving the first join would write an ``allowedAgent`` entry
+                # and flip the DKG gates from open to invite-only. Back off when
+                # nothing was approved so open/idle graphs don't poll every 15s.
+                approved = _approve_joins_once(client, cfg.context_graph_id)
+                idle = 0 if approved else idle + 1
+                for req in approved:
+                    logger.info(
+                        "blackbox approver: auto-admitted %s",
+                        req.get("name") or req.get("agentAddress"),
+                    )
             except Exception:  # not curator / node down — back off and keep idling
                 idle += 1
             wait = 15 if idle < 3 else 120
