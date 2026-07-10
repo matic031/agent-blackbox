@@ -91,6 +91,46 @@ def test_unix_installer_uses_isolated_blackbox_dkg_node() -> None:
     assert '"dkg_url": "http://127.0.0.1:9200"' not in text
 
 
+# The 4 mainnet-base core relays the installer seeds into config.relayPeers.
+# On DKG <=10.0.4 an empty relayPeers left the node with 0 circuit reservations
+# ("No reachable curator found"); 10.0.5+ also resolves relays from
+# preferredRelays + the built-in mainnet-base network config, so this seeding is
+# now defensive belt-and-suspenders rather than the sole reachability path. It
+# stays because it is harmless (deduped) and protects pre-10.0.5 nodes; guard the
+# exact multiaddrs and the merge logic against silent regression either way.
+MAINNET_BASE_RELAYS = (
+    "/ip4/178.104.98.10/tcp/9090/p2p/12D3KooWFWm8sg6dkitmdBd5Uxaqp3CDRL27mFcM7vEHK92Xapyy",
+    "/ip4/168.119.127.54/tcp/9090/p2p/12D3KooWMasqzRrim48ZJM64UyTfHufDTmSG3n3jqwsS5phz8m91",
+    "/ip4/178.156.237.133/tcp/9090/p2p/12D3KooWDgTunUpkGaE7dYCaDP1CCBT6Dm2HPMXSZhJn2KXYLH15",
+    "/ip4/178.105.211.42/tcp/9090/p2p/12D3KooWCodgXHMwybaEe93rbKgWMfGXQvUb6cpT3VCrjCbbnyEu",
+)
+
+_RELAY_SEED_ASSERTS = (
+    'existing_relays = data.get("relayPeers")',
+    "merged_relays = list(dict.fromkeys([*existing_relays, *MAINNET_BASE_RELAYS]))",
+    'data["relayPeers"] = merged_relays',
+    'data["relayReservationCount"] = int(data.get("relayReservationCount") or 4)',
+)
+
+
+def test_unix_installer_seeds_relay_peers_for_reachability() -> None:
+    text = INSTALL_SH.read_text()
+
+    for relay in MAINNET_BASE_RELAYS:
+        assert relay in text, f"missing mainnet-base relay {relay}"
+    for line in _RELAY_SEED_ASSERTS:
+        assert line in text, f"relayPeers seeding line missing: {line}"
+
+
+def test_windows_installer_seeds_relay_peers_for_reachability() -> None:
+    text = INSTALL_PS1.read_text()
+
+    for relay in MAINNET_BASE_RELAYS:
+        assert relay in text, f"missing mainnet-base relay {relay}"
+    for line in _RELAY_SEED_ASSERTS:
+        assert line in text, f"relayPeers seeding line missing: {line}"
+
+
 def test_windows_installer_uses_isolated_blackbox_dkg_node() -> None:
     text = INSTALL_PS1.read_text()
 

@@ -391,6 +391,9 @@
      the pair without stretching it. */
   .section-htext { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
   .section-head.graph-head { align-items: center; }
+  /* Tabs + graph sync-refresh button, grouped so they stay together at the
+     right edge (space-between keeps the heading text on the left). */
+  .graph-head-right { display: flex; align-items: center; gap: 10px; }
 
   /* ---------- Segmented sort control ---------- */
   .sort-control {
@@ -841,6 +844,22 @@
     vertical-align: middle;
   }
 
+  /* Sync loader — a calm spinning ring shown in place of a count (or in the
+     graph body) while a tier is still catching up from the network, so a fresh
+     node reads as "syncing" rather than a settled 0. */
+  .bb-loader {
+    display: inline-block;
+    width: 14px; height: 14px;
+    border: 2px solid var(--border);
+    border-top-color: var(--muted);
+    border-radius: 50%;
+    animation: bb-spin 0.9s linear infinite;
+    vertical-align: middle;
+  }
+  .stat .value .bb-loader { width: 18px; height: 18px; }
+  .tab-count .bb-loader { width: 11px; height: 11px; border-width: 1.5px; }
+  .graph-empty .e-msg .bb-loader { border-top-color: var(--mint); margin-right: 9px; }
+
   @media (max-width: 1020px) {
     .stats { grid-template-columns: repeat(3, 1fr); }
   }
@@ -849,6 +868,8 @@
     .agent-card { min-width: 0; flex: 1 1 100%; }
     .brand-logo { height: 58px; }
     .section-head.graph-head { align-items: stretch; flex-direction: column; }
+    .graph-head-right { width: 100%; }
+    .graph-head-right .tabs { width: auto; flex: 1 1 auto; }
     .tabs { width: 100%; }
     .tab { flex: 1 1 0; justify-content: center; padding: 7px 10px; }
     .graph-controls { left: 10px; right: 10px; }
@@ -1400,15 +1421,20 @@
           <h2>Threat graph</h2>
           <div class="section-note" id="graph-tier-note">curated by Umanitek.</div>
         </div>
-        <div class="tabs" role="tablist" aria-label="Threat graph tier">
-          <button class="tab active" id="tab-public" role="tab" aria-selected="true" data-tier="public" title="Curated by Umanitek.">
-            Public<span class="tab-count" id="count-public">0</span>
-          </button>
-          <button class="tab" id="tab-community" role="tab" aria-selected="false" data-tier="community" title="Reported by agents across the network.">
-            Community<span class="tab-count" id="count-community">0</span>
-          </button>
-          <button class="tab" id="tab-local" role="tab" aria-selected="false" data-tier="local" title="Your local threat audit trail.">
-            Local<span class="tab-count" id="count-local">0</span>
+        <div class="graph-head-right">
+          <div class="tabs" role="tablist" aria-label="Threat graph tier">
+            <button class="tab active" id="tab-public" role="tab" aria-selected="true" data-tier="public" title="Curated by Umanitek.">
+              Public<span class="tab-count" id="count-public"><span class="bb-loader"></span></span>
+            </button>
+            <button class="tab" id="tab-community" role="tab" aria-selected="false" data-tier="community" title="Reported by agents across the network.">
+              Community<span class="tab-count" id="count-community"><span class="bb-loader"></span></span>
+            </button>
+            <button class="tab" id="tab-local" role="tab" aria-selected="false" data-tier="local" title="Your local threat audit trail.">
+              Local<span class="tab-count" id="count-local"><span class="bb-loader"></span></span>
+            </button>
+          </div>
+          <button type="button" class="gear-btn refresh-btn" id="graph-refresh" aria-label="Sync graphs" title="Sync the public and community graphs from the network">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 4v6h-6"/><path d="M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
           </button>
         </div>
       </div>
@@ -1579,6 +1605,10 @@
   var graphFocus = { public: null, community: null };
   var graphRenderMeta = { public: null, community: null, local: null };
 
+  // Latest /api/graph-status payload, so the graph renderer can read node
+  // reachability when deciding "still syncing" vs a settled 0. See countSyncing.
+  var lastStatus = null;
+
   // Findings: keep the latest fetched list so the sort toggle can re-render
   // without a network round-trip. Backend returns newest-first already.
   var findingsCache = null;
@@ -1635,6 +1665,38 @@
   function num(v) {
     var n = Number(v);
     return isFinite(n) ? n.toLocaleString() : "-";
+  }
+
+  // ---- Sync-aware counts -------------------------------------------------
+  // A graph tier's count shows a loader (not a bare 0) while it's still being
+  // caught up from the network. It's "syncing" when nothing has been fetched
+  // yet, or when the count is 0, the node is reachable, and we've never seen
+  // data for this source — i.e. a fresh node mid-sync. Once any positive count
+  // lands we latch that source, so a later genuine emptying shows "0" instead
+  // of spinning forever, and an unreachable node shows its last-known value
+  // (the offline pill already explains that case).
+  var LOADER_HTML = '<span class="bb-loader" role="status" aria-label="Syncing"></span>';
+  var loaderLatch = {};
+  function countSyncing(key, value) {
+    if (value == null) return true;
+    if (Number(value) > 0) { loaderLatch[key] = true; return false; }
+    if (loaderLatch[key]) return false;
+    return !(lastStatus && lastStatus.node_reachable === false);
+  }
+  // Render a count element as either the loader or the number. fmt adds
+  // thousands separators (stat cards); tab chips stay compact/raw. Leaves an
+  // existing loader in place so the poll doesn't restart its spin animation.
+  function showsLoader(el) {
+    return el.firstElementChild && el.firstElementChild.classList.contains("bb-loader");
+  }
+  function setCount(id, value, key, fmt) {
+    var el = $(id);
+    if (!el) return;
+    if (countSyncing(key, value)) {
+      if (!showsLoader(el)) el.innerHTML = LOADER_HTML;
+    } else {
+      el.textContent = fmt ? num(value) : (value == null ? 0 : value);
+    }
   }
 
   function setBanner(down) {
@@ -1872,6 +1934,25 @@
       if (btn) { btn.classList.remove("spinning"); btn.disabled = false; }
     }
     postJSON("/api/agents/rescan", {})
+      .catch(function () { /* fail-open: re-poll anyway */ })
+      .then(function () { return poll(); })
+      .then(done, done);
+  }
+
+  // Graph manual-refresh: force `hermes blackbox sync` (POST /api/sync) to
+  // catch up + rebuild the public and community rulesets, then re-poll so the
+  // counts and graph redraw. Same spin-while-busy pattern as refreshAgents.
+  var graphRefreshBusy = false;
+  function refreshGraphs() {
+    if (graphRefreshBusy) return;
+    graphRefreshBusy = true;
+    var btn = $("graph-refresh");
+    if (btn) { btn.classList.add("spinning"); btn.disabled = true; }
+    function done() {
+      graphRefreshBusy = false;
+      if (btn) { btn.classList.remove("spinning"); btn.disabled = false; }
+    }
+    postJSON("/api/sync", {})
       .catch(function () { /* fail-open: re-poll anyway */ })
       .then(function () { return poll(); })
       .then(done, done);
@@ -3273,7 +3354,10 @@
 	      graphNodesShown = [];
 	      var empty = $("graph-empty");
     if (empty) {
-      empty.querySelector(".e-msg").innerHTML = msgHTML;
+      var msgEl = empty.querySelector(".e-msg");
+      // Only rewrite when the message changed, so a persistent loader (shown
+      // every poll while a tier syncs) keeps spinning instead of restarting.
+      if (msgEl.innerHTML !== msgHTML) msgEl.innerHTML = msgHTML;
       empty.style.display = "flex";
     }
     var controls = $("graph-controls"); if (controls) controls.style.display = "none";
@@ -3289,9 +3373,18 @@
 
   function renderGraphTab() {
     // Tab counts — local counts its own detected threats, not graph rows.
+    // A network tier still catching up shows a loader instead of a bare 0.
     TIERS.forEach(function (t) {
-      if (t === "local") { if (localCache) $("count-local").textContent = localCache.threatCount || 0; return; }
-      if (graphCache[t]) $("count-" + t).textContent = asList(graphCache[t]).length;
+      if (t === "local") {
+        var lel = $("count-local");
+        if (!lel) return;
+        // Local is this machine's own log (fetched fast): loader only until the
+        // first payload lands, then the real count even when it's 0.
+        if (localCache == null) { if (!showsLoader(lel)) lel.innerHTML = LOADER_HTML; }
+        else lel.textContent = localCache.threatCount || 0;
+        return;
+      }
+      setCount("count-" + t, graphCache[t] != null ? asList(graphCache[t]).length : null, "tab:" + t, false);
     });
 
     // Every tier — including local — renders through the one force-graph stage.
@@ -3306,11 +3399,17 @@
       return;
     }
 
-    // empty state — centered message, no canvas noise
+    // empty state — centered message, no canvas noise. A fresh node still
+    // catching this tier up looks empty; show a syncing loader until rows land
+    // rather than the "nothing here" message.
     var hasContent = isLocal ? ((data.sessions || []).length > 0) : (asList(data).length > 0);
     if (!hasContent) {
-      var msg = TIER_EMPTY[activeTier] || "No threats yet.";
-      showGraphEmpty("<strong>Nothing to show</strong>" + msg);
+      if (!isLocal && countSyncing("tab:" + activeTier, asList(data).length)) {
+        showGraphEmpty('<span class="bb-loader"></span>Syncing ' +
+          (TIER_LABEL[activeTier] || "graph").toLowerCase() + " from the network&hellip;");
+      } else {
+        showGraphEmpty("<strong>Nothing to show</strong>" + (TIER_EMPTY[activeTier] || "No threats yet."));
+      }
       if (fg) fg.graphData({ nodes: [], links: [] });
       fgTierShown = null;
       fgSig[activeTier] = "__empty__";
@@ -3818,14 +3917,17 @@
   // ---------- Graph status (stats only) ----------
   function renderGraphStatus(data) {
     data = data || {};
+    lastStatus = data;
     var curated = data.curated_threats != null ? data.curated_threats
                 : data.curated != null ? data.curated
                 : data.threats;
     var interval = data.sync_interval != null ? data.sync_interval : data.syncInterval;
     var lastSync = data.last_sync != null ? data.last_sync : data.lastSync;
 
-    $("stat-threats").textContent = num(curated);
-    $("stat-community").textContent = num(data.community);
+    // Threats synced (curated VM count) and Community pool (SWM ruleset count)
+    // read a loader while a fresh node is still catching them up, not a bare 0.
+    setCount("stat-threats", curated, "stat:curated", true);
+    setCount("stat-community", data.community, "stat:community", true);
 
     // header status pills: node reachability + enforcement mode
     var nodePill = $("pill-node");
@@ -3916,6 +4018,10 @@
   // wire the Connected agents manual-refresh button
   var agentsRefreshBtn = $("agents-refresh");
   if (agentsRefreshBtn) agentsRefreshBtn.addEventListener("click", refreshAgents);
+
+  // wire the Threat graph sync-refresh button
+  var graphRefreshBtn = $("graph-refresh");
+  if (graphRefreshBtn) graphRefreshBtn.addEventListener("click", refreshGraphs);
 
   // wire finding rows (Live findings + Audit trail) → detail modal.
   // Delegated on the tbody, which survives the 4s poll's innerHTML rebuilds.

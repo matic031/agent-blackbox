@@ -792,6 +792,25 @@ def create_app():
         )
         return {"ok": True, "attached": len(touched), "newly_attached": newly}
 
+    @app.post("/api/sync")
+    def sync_graphs() -> Any:
+        """Force an immediate ruleset refresh from the DKG node — the graph
+        manual-refresh, same work as ``hermes blackbox sync``: subscribe/catch
+        up the public (VM) and community (SWM) graphs, then rebuild the local
+        ruleset. Runs the exact path the background sync loop uses. The frontend
+        re-polls /api/graph-status + /api/graph afterwards to redraw the counts.
+        Fail-open: never 500s the dashboard."""
+        try:
+            counts = _sync_ruleset_once(load_blackbox_config, DkgClient, ruleset)
+        except Exception as exc:  # pragma: no cover - fail open
+            logger.debug("blackbox dashboard: manual sync failed: %s", exc)
+            return JSONResponse({"ok": False, "error": str(exc)})
+        return {
+            "ok": True,
+            "total": int(counts.get("total", 0)),
+            "community": int(counts.get("community", 0)),
+        }
+
     def _tier_view(tier: str, default: str = "public") -> tuple:
         """Map a UI tier name to a DKG SPARQL view.
 
