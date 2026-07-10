@@ -101,36 +101,51 @@ def create_app():
 
     app = FastAPI(title="Agent Blackbox", docs_url=None, redoc_url=None)
 
-    _rescan_state: Dict[str, Any] = {"stop": False, "known": set()}
+    _rescan_state: Dict[str, Any] = {"stop": False, "known": set(), "lock": threading.Lock()}
+
+    def _rescan_once(*, force: bool = False) -> List[Dict[str, Any]]:
+        """Discover local Hermes/OpenClaw workspaces and hook Blackbox into them.
+
+        ``force`` re-attaches every discovered workspace — an idempotent
+        self-heal used by the manual refresh, so a freshly installed or upgraded
+        agent is (re-)protected at once. Otherwise only newly appeared
+        workspaces are attached: the cheap diff the background loop runs every
+        few seconds. Returns the attach-result row for each workspace it touched.
+        Serialized so the loop and a manual refresh never write one config at the
+        same time. Fail-open per target."""
+        with _rescan_state["lock"]:
+            current: Set[Tuple[str, str]] = set()
+            for h in attach.discover_hermes_homes():
+                current.add(("hermes", str(h)))
+            for w in attach.discover_openclaw_workspaces():
+                current.add(("openclaw", str(w)))
+            known: Set[Tuple[str, str]] = _rescan_state["known"]
+            removed = known - current
+            touched: List[Dict[str, Any]] = []
+            for kind, target in sorted(current if force else current - known):
+                try:
+                    if kind == "hermes":
+                        row = attach.attach_hermes(Path(target))
+                    else:
+                        row = attach.attach_openclaw(Path(target))
+                    touched.append(row)
+                    if row.get("error"):
+                        logger.warning("blackbox rescan: attach %s %s failed: %s", kind, target, row["error"])
+                    elif not row.get("already"):
+                        logger.info("blackbox rescan: auto-attached %s at %s", kind, target)
+                except Exception as exc:  # pragma: no cover - fail open
+                    logger.debug("blackbox rescan: attach %s %s raised: %s", kind, target, exc)
+            for kind, target in removed:
+                logger.info("blackbox rescan: %s workspace vanished at %s", kind, target)
+            _rescan_state["known"] = current
+            return touched
 
     def _rescan_loop() -> None:
-        """Every ``_RESCAN_INTERVAL_SEC`` seconds: attach any new Hermes/OpenClaw
-        workspaces on this machine, and log workspaces that disappeared."""
+        """Every ``_RESCAN_INTERVAL_SEC`` seconds, attach any newly appeared
+        Hermes/OpenClaw workspace and log ones that vanished."""
         while not _rescan_state["stop"]:
             try:
-                current: Set[Tuple[str, str]] = set()
-                for h in attach.discover_hermes_homes():
-                    current.add(("hermes", str(h)))
-                for w in attach.discover_openclaw_workspaces():
-                    current.add(("openclaw", str(w)))
-                known: Set[Tuple[str, str]] = _rescan_state["known"]
-                added = current - known
-                removed = known - current
-                for kind, target in added:
-                    try:
-                        if kind == "hermes":
-                            row = attach.attach_hermes(Path(target))
-                        else:
-                            row = attach.attach_openclaw(Path(target))
-                        if row.get("error"):
-                            logger.warning("blackbox rescan: attach %s %s failed: %s", kind, target, row["error"])
-                        elif not row.get("already"):
-                            logger.info("blackbox rescan: auto-attached %s at %s", kind, target)
-                    except Exception as exc:  # pragma: no cover - fail open
-                        logger.debug("blackbox rescan: attach %s %s raised: %s", kind, target, exc)
-                for kind, target in removed:
-                    logger.info("blackbox rescan: %s workspace vanished at %s", kind, target)
-                _rescan_state["known"] = current
+                _rescan_once()
             except Exception as exc:  # pragma: no cover - fail open
                 logger.debug("blackbox rescan: iteration failed: %s", exc)
             for _ in range(int(_RESCAN_INTERVAL_SEC * 10)):
@@ -741,6 +756,26 @@ def create_app():
                 rows.append(attach.attach_openclaw(Path(target)) if enabled else attach.detach_openclaw(Path(target)))
         ok = all(row.get("ok") for row in rows) if rows else False
         return JSONResponse({"ok": ok, "targets": rows}, status_code=200 if ok else 400)
+
+    @app.post("/api/agents/rescan")
+    def rescan_agents() -> Any:
+        """Force an immediate re-hook + agent-detection sweep (the manual refresh).
+
+        Re-attaches Blackbox to every local Hermes/OpenClaw workspace
+        (idempotent), so a just-installed or upgraded agent is protected and
+        shown without waiting for the background rescan loop. The frontend
+        re-polls ``/api/agents`` afterwards to render any new cards. Fail-open:
+        never 500s the dashboard."""
+        try:
+            touched = _rescan_once(force=True)
+        except Exception as exc:  # pragma: no cover - fail open
+            logger.debug("blackbox dashboard: manual rescan failed: %s", exc)
+            return JSONResponse({"ok": False, "error": str(exc), "attached": 0, "newly_attached": 0})
+        newly = sum(
+            1 for row in touched
+            if row.get("ok") and row.get("target") and not row.get("already") and not row.get("error")
+        )
+        return {"ok": True, "attached": len(touched), "newly_attached": newly}
 
     def _tier_view(tier: str, default: str = "public") -> tuple:
         """Map a UI tier name to a DKG SPARQL view.

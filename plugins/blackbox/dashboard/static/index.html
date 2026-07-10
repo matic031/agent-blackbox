@@ -147,6 +147,14 @@
   .gear-btn:hover svg { transform: rotate(35deg); transition: transform .3s ease; }
   .gear-btn:focus-visible { outline: 2px solid var(--mint); outline-offset: 2px; color: var(--text); }
   .chat-btn:hover svg { transform: none; }
+  /* Right-aligned header cluster: agent count + manual refresh. */
+  .head-right { display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
+  .section-head.agents-head { align-items: center; }
+  .refresh-btn:disabled { cursor: default; opacity: 0.6; }
+  .refresh-btn:disabled:hover svg { transform: none; }
+  /* While a refresh is in flight the icon spins; overrides the hover tilt. */
+  .refresh-btn.spinning svg { animation: bb-spin 0.8s linear infinite; }
+  @keyframes bb-spin { to { transform: rotate(360deg); } }
 
   /* ---------- Blackbox chat sidebar ---------- */
   .chat-scrim {
@@ -1369,9 +1377,14 @@
 
     <!-- Connected agents -->
     <section class="section" aria-label="Connected agents">
-      <div class="section-head">
+      <div class="section-head agents-head">
         <h2>Connected agents</h2>
-        <span class="section-note" id="agents-note"></span>
+        <div class="head-right">
+          <span class="section-note" id="agents-note"></span>
+          <button type="button" class="gear-btn refresh-btn" id="agents-refresh" aria-label="Refresh agents" title="Re-hook plugins and detect new agents">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 4v6h-6"/><path d="M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+          </button>
+        </div>
       </div>
       <div class="panel">
         <div class="agents-strip" id="agents-strip">
@@ -1842,6 +1855,26 @@
     if (!overlay) return;
     overlay.classList.remove("open");
     overlay.setAttribute("aria-hidden", "true");
+  }
+
+  // Manual agent refresh: force an immediate server-side re-hook sweep (the
+  // background loop already does this every few seconds), then re-poll so any
+  // newly attached agent renders. Guarded against double-clicks; fail-open so a
+  // dead node still re-polls and clears the spinner.
+  var agentsRefreshBusy = false;
+  function refreshAgents() {
+    if (agentsRefreshBusy) return;
+    agentsRefreshBusy = true;
+    var btn = $("agents-refresh");
+    if (btn) { btn.classList.add("spinning"); btn.disabled = true; }
+    function done() {
+      agentsRefreshBusy = false;
+      if (btn) { btn.classList.remove("spinning"); btn.disabled = false; }
+    }
+    postJSON("/api/agents/rescan", {})
+      .catch(function () { /* fail-open: re-poll anyway */ })
+      .then(function () { return poll(); })
+      .then(done, done);
   }
 
   // ---------- Threat graph (force-directed) ----------
@@ -3830,7 +3863,7 @@
   // ---------- Poll loop ----------
   function poll() {
     loadAudit();   // full history refresh (independent of the fixed-index batch below)
-    Promise.allSettled([
+    return Promise.allSettled([
       getJSON("/api/findings?limit=10"),
       getJSON("/api/graph-status"),
       getJSON("/api/reports"),
@@ -3879,6 +3912,10 @@
   }
   $("sort-newest").addEventListener("click", function () { setFindingsSort("newest"); });
   $("sort-severity").addEventListener("click", function () { setFindingsSort("severity"); });
+
+  // wire the Connected agents manual-refresh button
+  var agentsRefreshBtn = $("agents-refresh");
+  if (agentsRefreshBtn) agentsRefreshBtn.addEventListener("click", refreshAgents);
 
   // wire finding rows (Live findings + Audit trail) → detail modal.
   // Delegated on the tbody, which survives the 4s poll's innerHTML rebuilds.
