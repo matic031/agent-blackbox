@@ -143,7 +143,7 @@ DEFAULT_DKG_URL = f"http://127.0.0.1:{DEFAULT_DKG_PORT}"
 #: join approval; this remains as a legacy fallback for older private graphs
 #: where a fresh member has to request curator admission before subscribing.
 #: Override with ``BLACKBOX_CURATOR_PEER_ID``.
-DEFAULT_CURATOR_PEER_ID = "12D3KooWBY9jmNATMPv1DZcKbFas5RtjpkhT69pPwvkUBY2MMnDX"
+DEFAULT_CURATOR_PEER_ID = "12D3KooWQHQd1SNecrRxwceqPJkXSKEYn8vrV4QyJ2AfqeYwXz1E"
 
 #: Stale/wrong curator peer ids that must NOT be used as the join target. A
 #: config still pointed at one of these (e.g. a machine that hand-set the peer
@@ -155,7 +155,7 @@ DEFAULT_CURATOR_PEER_ID = "12D3KooWBY9jmNATMPv1DZcKbFas5RtjpkhT69pPwvkUBY2MMnDX"
 #: with a "mismatched envelope" denial. A genuinely custom peer (not in this
 #: set) is always left untouched.
 LEGACY_CURATOR_PEER_IDS = frozenset({
-    "12D3KooWQHQd1SNecrRxwceqPJkXSKEYn8vrV4QyJ2AfqeYwXz1E",
+    "12D3KooWBY9jmNATMPv1DZcKbFas5RtjpkhT69pPwvkUBY2MMnDX",
 })
 
 # ---------------------------------------------------------------------------
