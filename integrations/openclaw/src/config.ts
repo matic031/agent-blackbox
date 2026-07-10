@@ -113,8 +113,9 @@ const DEFAULT_DKG_URL = `http://127.0.0.1:${DEFAULT_DKG_PORT}`;
 
 const DEFAULTS: BlackboxConfig = {
   mode: "audit",
-  // TEMPORARY: default to the private STAGING graph while production is still
-  // being seeded. TODO(launch): switch to "umanitek/blackbox-threats" (production).
+  // Current live default: the blackbox staging community graph. This is the
+  // correct graph — NOT the old "umanitek/guardian-threats-staging". A dedicated
+  // "umanitek/blackbox-threats" production graph may replace it later.
   contextGraphId: "umanitek/blackbox-threats-staging",
   dkgUrl: DEFAULT_DKG_URL,
   dkgHome: "",

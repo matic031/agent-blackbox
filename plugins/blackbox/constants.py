@@ -109,6 +109,9 @@ SCHEMA_CONTRIBUTOR_PRED = "http://schema.org/contributor"
 #: members hold the sender key, so they both READ and PUBLISH to SWM. VM
 #: publishing is out of scope on this graph (its ciphertext can't satisfy core
 #: ACKs) — the community pool is the product.
+# Old default, parked for now: the correct graph is the blackbox one below, NOT
+# the guardian one. Do not re-enable without discussion.
+# DEFAULT_CONTEXT_GRAPH_ID = "umanitek/guardian-threats-staging"
 DEFAULT_CONTEXT_GRAPH_ID = "umanitek/blackbox-threats-staging"
 
 #: Legacy graph ids from earlier defaults. A node still pointed at one of these
@@ -141,6 +144,19 @@ DEFAULT_DKG_URL = f"http://127.0.0.1:{DEFAULT_DKG_PORT}"
 #: where a fresh member has to request curator admission before subscribing.
 #: Override with ``BLACKBOX_CURATOR_PEER_ID``.
 DEFAULT_CURATOR_PEER_ID = "12D3KooWBY9jmNATMPv1DZcKbFas5RtjpkhT69pPwvkUBY2MMnDX"
+
+#: Stale/wrong curator peer ids that must NOT be used as the join target. A
+#: config still pointed at one of these (e.g. a machine that hand-set the peer
+#: to a member node that is not the graph owner) is transparently switched to
+#: ``DEFAULT_CURATOR_PEER_ID`` at config-load time, so join requests always
+#: reach the real curator and SWM sync is authorised. Only the OWNER node can
+#: approve joins / redeliver approvals; a member node (e.g. the 9321 staging
+#: node ...qeYwXz1E) cannot, so a node targeting it gets stuck at 0 SWM rows
+#: with a "mismatched envelope" denial. A genuinely custom peer (not in this
+#: set) is always left untouched.
+LEGACY_CURATOR_PEER_IDS = frozenset({
+    "12D3KooWQHQd1SNecrRxwceqPJkXSKEYn8vrV4QyJ2AfqeYwXz1E",
+})
 
 # ---------------------------------------------------------------------------
 # DKG networks — Blackbox is MAINNET ONLY (never publishes to a testnet)
