@@ -118,10 +118,10 @@ LEGACY_CONTEXT_GRAPH_IDS = frozenset({
 DEFAULT_DKG_PORT = 9320
 DEFAULT_DKG_URL = f"http://127.0.0.1:{DEFAULT_DKG_PORT}"
 
-#: Community curator's node peer id. On a private community CG a fresh member
-#: sends its join request here; the curator running ``blackbox curate
-#: auto-accept`` admits it, after which subscribe + catch-up work. Makes
-#: onboarding zero-touch. Override with ``BLACKBOX_CURATOR_PEER_ID``.
+#: Community curator's node peer id. Public Guardian threat graphs do not need
+#: join approval; this remains as a legacy fallback for older private graphs
+#: where a fresh member has to request curator admission before subscribing.
+#: Override with ``BLACKBOX_CURATOR_PEER_ID``.
 DEFAULT_CURATOR_PEER_ID = "12D3KooWBY9jmNATMPv1DZcKbFas5RtjpkhT69pPwvkUBY2MMnDX"
 
 # ---------------------------------------------------------------------------

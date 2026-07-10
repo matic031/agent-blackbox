@@ -72,7 +72,7 @@ evidence stays in the node's private WM audit KA.
 | key | default | env |
 |-----|---------|-----|
 | `mode` | `audit` | `BLACKBOX_MODE` |
-| `context_graph_id` | `umanitek/blackbox-threats-staging` | `BLACKBOX_CONTEXT_GRAPH_ID` |
+| `context_graph_id` | `umanitek/guardian-threats-staging` | `BLACKBOX_CONTEXT_GRAPH_ID` |
 | `dkg_url` | `http://127.0.0.1:9320` | `BLACKBOX_DKG_DAEMON_URL` / `BLACKBOX_DKG_URL` |
 | `dkg_home` | `$HERMES_HOME/blackbox/dkg` | `BLACKBOX_DKG_HOME` |
 | `dkg_bin` | `$HERMES_HOME/blackbox/dkg-cli/node_modules/.bin/dkg` | `BLACKBOX_DKG_BIN` |
@@ -218,14 +218,14 @@ hermes blackbox sync --wait            # force a ruleset refresh after DKG catch
 hermes blackbox chat                   # dedicated Blackbox operator chat
 hermes blackbox report --type ...      # submit a NEW candidate threat to SWM
                                        #   (injection|escalation|dependency|fileaccess|skill)
-hermes blackbox setup-graph            # curator: create + register the private/community CG
+hermes blackbox setup-graph            # curator: create + register the public/community CG
 hermes blackbox curate list --pending  # candidate threats grouped by distinct reporters
 hermes blackbox curate show <id>       # one threat + its reporters
 hermes blackbox curate approve <id>    # promote to curated threat, any of the five
                                        #   categories (share + vm/publish)
 hermes blackbox curate reject <id>     # reject locally (+ optional SWM false-positive)
 hermes blackbox curate auto-accept --once
-                                       # curator: approve pending DKG graph join requests
+                                       # legacy private graph: approve pending DKG graph join requests
 hermes blackbox curate redeliver-approval --agent 0x...
                                        # curator: re-send approval when a member is stuck at 0 rows
 hermes blackbox curate import --file … # bulk import a catalog (OSV enrichment for deps)
@@ -235,9 +235,10 @@ hermes blackbox setup-llm --configure  # choose provider/key/model again
 hermes blackbox setup-llm --disable    # turn the LLM reviewer off
 ```
 
-### DKG Join Repair
+### Legacy Private-Graph Join Repair
 
-If a consumer node reports `Join request: this node is already a member` but
+Public Guardian threat graphs do not need join approval. If a legacy/private
+consumer node reports `Join request: this node is already a member` but
 `hermes blackbox sync --wait` still ends with `data 0, shared memory 0`, the DKG
 node may have missed the curator approval notification before syncing the graph
 `_meta` rows. Do not edit DKG SQLite state by hand. On the curator node, run:

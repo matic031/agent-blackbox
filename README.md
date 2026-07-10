@@ -202,7 +202,7 @@ Set under `plugins.entries.blackbox.*` in `config.yaml`.
 | `mode` | `audit` | `audit` or `block` |
 | `dkg_url` | `http://127.0.0.1:9320` | Blackbox-managed local DKG node |
 | `dkg_home` | `~/.hermes/blackbox/dkg` | isolated DKG node config, token, pid, and cache |
-| `context_graph_id` | `umanitek/blackbox-threats-staging` | staging curated threat graph until production is seeded |
+| `context_graph_id` | `umanitek/guardian-threats-staging` | staging Guardian threat graph until production is seeded |
 | `daily_report_limit` | `9999` | max threat reports sent to the community graph per day |
 | `report_min_severity` | `high` | minimum severity for heuristic candidates to be flagged and reported |
 | `detection.<category>.enabled` | `true` | turn a whole category on/off (`injection`, `escalation`, `dependency`, `fileaccess`, `skill`) |

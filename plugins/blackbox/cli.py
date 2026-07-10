@@ -175,7 +175,7 @@ def setup_cli(parser: argparse.ArgumentParser) -> None:
     report.add_argument("--description", default="", help="Human-readable description")
     report.set_defaults(func=_cmd_report)
 
-    setup_graph = sub.add_parser("setup-graph", help="Curator: create + register the private/community threat CG")
+    setup_graph = sub.add_parser("setup-graph", help="Curator: create + register the public/community threat CG")
     setup_graph.add_argument(
         "--network", default="mainnet-base", choices=("mainnet-base", "mainnet-gnosis"),
         help="Mainnet to register on (informational; the node's own network is what counts). No testnet.",
@@ -213,7 +213,7 @@ def setup_cli(parser: argparse.ArgumentParser) -> None:
     creject.add_argument("--dispute", action="store_true", help="Also publish a g:FalsePositive to SWM")
     creject.set_defaults(func=_cmd_curate_reject)
 
-    cauto = csub.add_parser("auto-accept", help="Curator: approve every agent that joins the private community CG")
+    cauto = csub.add_parser("auto-accept", help="Curator: approve every agent that joins a legacy private community CG")
     cauto.add_argument("--once", action="store_true", help="Approve current pending requests and exit (no loop)")
     cauto.add_argument("--interval", type=int, default=5, help="Seconds between polls when looping (default 5)")
     cauto.set_defaults(func=_cmd_curate_auto_accept)
@@ -545,20 +545,27 @@ def _cmd_sync(args: argparse.Namespace) -> int:
     cfg = load_blackbox_config()
     client = DkgClient(url=cfg.dkg_url, dkg_home=cfg.dkg_home)
     catchup_detail = ""
-    # Private community CG: ask the curator to admit this node before subscribing,
-    # so a fresh install auto-joins with zero manual steps. Best-effort + idempotent.
-    join_status = _request_join(client, cfg.context_graph_id, cfg.curator_peer_id)
-    if join_status:
-        print(join_status)
-    join_already_member = _join_status_is_already_member(join_status)
     # Subscribe before querying — a fresh install never subscribed the daemon, so
     # the store would be empty. Idempotent when already subscribed.
     subscribe_error = ""
+    join_status = None
     try:
         client.subscribe_context_graph(cfg.context_graph_id)
     except DkgError as exc:
         subscribe_error = str(exc)
         print(f"warning: could not subscribe to {cfg.context_graph_id}: {subscribe_error}")
+        # Public graphs need no join. Only fall back to the legacy private-graph
+        # join path when subscribe itself proves the node is gated.
+        join_status = _request_join(client, cfg.context_graph_id, cfg.curator_peer_id)
+        if join_status:
+            print(join_status)
+        try:
+            client.subscribe_context_graph(cfg.context_graph_id)
+            subscribe_error = ""
+        except DkgError as retry_exc:
+            subscribe_error = str(retry_exc)
+            print(f"warning: could not subscribe to {cfg.context_graph_id} after join request: {subscribe_error}")
+    join_already_member = _join_status_is_already_member(join_status)
     # Curator node auto-admits every pending joiner on each sync, so members are
     # approved with zero manual steps (open community by design). Fully fail-open:
     # a member node's calls hit the curator-only endpoint and are skipped, and any
@@ -684,11 +691,12 @@ def _print_empty_sync_repair_hint(
 
 
 def _request_join(client: DkgClient, cg_id: str, curator_peer_id: str) -> Optional[str]:
-    """Best-effort: ask the community curator to admit this node into the private
-    CG, via the node's own HTTP API (sign-join → request-join) — no ``dkg`` CLI
-    dependency, so it fires reliably on any fresh install. Idempotent: a repeat
-    request or an already-member is a no-op. The curator's auto-accept approves it,
-    after which subscribe + catch-up work. No-op if no curator peer id is set."""
+    """Best-effort legacy fallback for private CGs: ask the community curator to
+    admit this node via the node's HTTP API (sign-join → request-join) — no
+    ``dkg`` CLI dependency, so it fires reliably when a subscribe attempt proves
+    the graph is gated. Idempotent: a repeat request or an already-member is a
+    no-op. The curator's auto-accept approves it, after which subscribe +
+    catch-up work. No-op if no curator peer id is set."""
     if not curator_peer_id:
         return None
     try:
@@ -926,34 +934,22 @@ def _cmd_setup_graph(args: argparse.Namespace) -> int:
     except DkgError as exc:
         print(f"warning: could not read local DKG agent identity before create: {exc}")
     try:
-        # PRIVATE (access_policy=1 / allowlist): the community pool replicates over
-        # the curated-CG relay path (which scales), and only approved members read
-        # it. `curate auto-accept` admits every joiner, forming an OPEN community
-        # while shutting out agents that never joined. Public CGs use the plaintext
-        # SWM substrate whose bulk catch-up does not scale — see
-        # ORIGINTRAIL_SWM_CATCHUP_ISSUE.md.
+        # PUBLIC (access_policy=0 / empty allowlist): fresh installs can subscribe
+        # and catch up without any curator-side join approval. Publish authority
+        # remains owner-gated by publishPolicy=0 at registration time.
         client.create_context_graph(cg, name="Blackbox Threats",
                                     description="Curated agent-security threat intelligence.",
-                                    access_policy=1,
-                                    allowed_agents=[curator_agent] if curator_agent else None)
-        print(f"Created context graph {cg} as PRIVATE/community (or already existed).")
+                                    access_policy=0)
+        print(f"Created context graph {cg} as PUBLIC/community (or already existed).")
     except DkgError as exc:
         print(f"note: create returned: {exc}")
-    if curator_agent:
-        try:
-            agents = {agent.lower() for agent in client.list_context_graph_agents(cg)}
-            if curator_agent.lower() not in agents:
-                client.add_context_graph_agent(cg, curator_agent)
-                print(f"Added local curator agent {curator_agent} to the SWM allowlist.")
-        except DkgError as exc:
-            print(f"warning: could not verify/add local curator agent allowlist: {exc}")
     try:
-        client.register_context_graph(cg, access_policy=1, publish_policy=0)
-        print(f"Registered {cg} on-chain (accessPolicy=1 private, publishPolicy=0) on {args.network}.")
+        client.register_context_graph(cg, access_policy=0, publish_policy=0)
+        print(f"Registered {cg} on-chain (accessPolicy=0 public, publishPolicy=0) on {args.network}.")
     except DkgError as exc:
         print(f"error: register failed: {exc}")
         return 1
-    print("Next: run `hermes blackbox curate auto-accept` (curator) to admit every joiner.")
+    print("Fresh nodes can subscribe without join approval; no auto-accept loop is required for public graphs.")
     return 0
 
 
@@ -992,10 +988,11 @@ def _auto_approve_joins(client: DkgClient, cg_id: str) -> List[Dict[str, Any]]:
 
 
 def _cmd_curate_auto_accept(args: argparse.Namespace) -> int:
-    """Approve every pending join request on the private community CG, so any
-    agent that joins instantly becomes a member and can read/sync the community
-    pool. Loops on a tight poll until stopped; ``--once`` drains the current
-    backlog and exits."""
+    """Approve pending join requests for legacy private community CGs.
+
+    Public Guardian graphs do not need this path. For older private graphs,
+    ``--once`` drains the current backlog and exits; otherwise the command polls
+    until stopped."""
     cfg = load_blackbox_config()
     client = DkgClient(url=cfg.dkg_url, dkg_home=cfg.dkg_home)
     cg = cfg.context_graph_id
