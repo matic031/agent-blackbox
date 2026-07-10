@@ -7,6 +7,127 @@ from plugins.blackbox import attach
 from plugins.blackbox.dashboard import server
 
 
+def test_ruleset_sync_once_subscribes_and_refreshes():
+    class Cfg:
+        dkg_url = "http://127.0.0.1:9320"
+        dkg_home = "/tmp/blackbox-dkg"
+        context_graph_id = "umanitek/guardian-threats-staging"
+        curator_peer_id = "curator-peer"
+
+    events = []
+
+    class FakeClient:
+        def __init__(self, *, url, dkg_home):
+            self.url = url
+            self.dkg_home = dkg_home
+            events.append(("client", url, dkg_home))
+
+        def subscribe_context_graph(self, cg_id):
+            events.append(("subscribe", cg_id))
+
+        def request_join(self, cg_id, curator_peer_id):
+            events.append(("join", cg_id, curator_peer_id))
+
+    class FakeRuleset:
+        def counts(self):
+            return {"injection": 1, "dependency": 4}
+
+        def source_count(self, source):
+            return 0
+
+    class FakeRulesetModule:
+        @staticmethod
+        def refresh(cfg, client):
+            events.append(("refresh", cfg.context_graph_id, client.url, client.dkg_home))
+            return FakeRuleset()
+
+    total = server._sync_ruleset_once(lambda: Cfg(), FakeClient, FakeRulesetModule)
+
+    assert total == {"total": 5, "community": 0}
+    assert events == [
+        ("client", "http://127.0.0.1:9320", "/tmp/blackbox-dkg"),
+        ("subscribe", "umanitek/guardian-threats-staging"),
+        ("refresh", "umanitek/guardian-threats-staging", "http://127.0.0.1:9320", "/tmp/blackbox-dkg"),
+    ]
+
+
+def test_ruleset_sync_once_requests_join_when_subscribe_fails():
+    class Cfg:
+        dkg_url = "http://127.0.0.1:9320"
+        dkg_home = "/tmp/blackbox-dkg"
+        context_graph_id = "umanitek/guardian-threats-staging"
+        curator_peer_id = "curator-peer"
+
+    events = []
+
+    class FakeClient:
+        def __init__(self, *, url, dkg_home):
+            pass
+
+        def subscribe_context_graph(self, cg_id):
+            events.append(("subscribe", cg_id))
+            raise RuntimeError("not on the allowlist")
+
+        def request_join(self, cg_id, curator_peer_id):
+            events.append(("join", cg_id, curator_peer_id))
+
+    class FakeRuleset:
+        def counts(self):
+            return {"injection": 0}
+
+        def source_count(self, source):
+            return 0
+
+    class FakeRulesetModule:
+        @staticmethod
+        def refresh(cfg, client):
+            events.append(("refresh", cfg.context_graph_id))
+            return FakeRuleset()
+
+    assert server._sync_ruleset_once(lambda: Cfg(), FakeClient, FakeRulesetModule) == {"total": 0, "community": 0}
+    assert events == [
+        ("subscribe", "umanitek/guardian-threats-staging"),
+        ("join", "umanitek/guardian-threats-staging", "curator-peer"),
+        ("refresh", "umanitek/guardian-threats-staging"),
+    ]
+
+
+def test_dashboard_approver_skips_open_access_graph():
+    approved = []
+
+    class OpenClient:
+        def list_context_graph_agents(self, cg_id):
+            return []
+
+        def list_join_requests(self, cg_id):
+            return [{"agentAddress": "0x" + "1" * 40}]
+
+        def approve_join(self, cg_id, addr):
+            approved.append(addr)
+
+    assert server._approve_joins_once(OpenClient(), "umanitek/guardian-threats-staging") == []
+    assert approved == []
+
+
+def test_dashboard_approver_still_admits_legacy_private_graph():
+    approved = []
+
+    class PrivateClient:
+        def list_context_graph_agents(self, cg_id):
+            return ["0x" + "c" * 40]
+
+        def list_join_requests(self, cg_id):
+            return [{"agentAddress": "0x" + "1" * 40, "name": "fresh-node"}]
+
+        def approve_join(self, cg_id, addr):
+            approved.append(addr)
+
+    out = server._approve_joins_once(PrivateClient(), "some/private-cg")
+
+    assert out == [{"agentAddress": "0x" + "1" * 40, "name": "fresh-node"}]
+    assert approved == ["0x" + "1" * 40]
+
+
 def test_blackbox_dashboard_chat_starts_session(monkeypatch):
     calls = []
 

@@ -28,9 +28,66 @@ from typing import Any, Dict, List, Set, Tuple
 logger = logging.getLogger(__name__)
 
 _RESCAN_INTERVAL_SEC = 5.0
+_RULESET_EMPTY_RETRY_SEC = 30.0
+_RULESET_MIN_RETRY_SEC = 5.0
 
 _STATIC_DIR = Path(__file__).resolve().parent / "static"
 _ASSETS_DIR = Path(__file__).resolve().parent / "assets"
+
+
+def _ruleset_total(rs: Any) -> int:
+    try:
+        return sum(int(v) for v in rs.counts().values())
+    except Exception:
+        return 0
+
+
+def _ruleset_sync_counts(rs: Any) -> Dict[str, int]:
+    return {
+        "total": _ruleset_total(rs),
+        "community": int(rs.source_count("community") or 0),
+    }
+
+
+def _sync_ruleset_once(load_config: Any, dkg_client_cls: Any, ruleset_mod: Any) -> Dict[str, int]:
+    """Subscribe/catch up and refresh the VM/SWM ruleset once."""
+    cfg = load_config()
+    client = dkg_client_cls(url=cfg.dkg_url, dkg_home=cfg.dkg_home)
+    subscribe_failed = False
+    try:
+        client.subscribe_context_graph(cfg.context_graph_id)
+    except Exception as exc:  # pragma: no cover - best-effort self-heal
+        subscribe_failed = True
+        logger.debug("blackbox ruleset sync: subscribe %s failed: %s", cfg.context_graph_id, exc)
+    if subscribe_failed and getattr(cfg, "curator_peer_id", ""):
+        try:
+            client.request_join(cfg.context_graph_id, cfg.curator_peer_id)
+        except Exception as exc:  # pragma: no cover - best-effort self-heal
+            logger.debug("blackbox ruleset sync: join request %s failed: %s", cfg.context_graph_id, exc)
+    rs = ruleset_mod.refresh(cfg, client)
+    return _ruleset_sync_counts(rs)
+
+
+def _approve_joins_once(client: Any, cg_id: str) -> List[Dict[str, Any]]:
+    """Approve pending joins only for legacy private graphs.
+
+    Open Guardian graphs have an empty allowlist. Approving the first join would
+    create an allowlist and make the graph invite-only, so this must no-op there.
+    """
+    try:
+        if not client.list_context_graph_agents(cg_id):
+            return []
+    except Exception:
+        return []
+    pending = client.list_join_requests(cg_id)
+    approved: List[Dict[str, Any]] = []
+    for req in pending:
+        addr = str(req.get("agentAddress") or "").strip()
+        if not addr:
+            continue
+        client.approve_join(cg_id, addr)
+        approved.append(req)
+    return approved
 
 
 def create_app():
@@ -82,8 +139,9 @@ def create_app():
                 time.sleep(0.1)
 
     def _approver_loop() -> None:
-        """Curator-only: auto-approve every pending join request so members join
-        the private community CG with zero operator action. ``list_join_requests``
+        """Curator-only legacy fallback for private graphs.
+
+        Public Guardian graphs do not need join approval. ``list_join_requests``
         is server-side curator-gated, so on a non-curator node the call errors and
         this loop just idles — it self-selects to the curator's dashboard."""
         idle = 0
@@ -91,20 +149,52 @@ def create_app():
             try:
                 cfg = load_blackbox_config()
                 client = DkgClient(url=cfg.dkg_url, dkg_home=cfg.dkg_home)
-                pending = client.list_join_requests(cfg.context_graph_id)
+                approved = _approve_joins_once(client, cfg.context_graph_id)
                 idle = 0
-                for req in pending:
-                    addr = str(req.get("agentAddress") or "").strip()
-                    if not addr:
-                        continue
-                    try:
-                        client.approve_join(cfg.context_graph_id, addr)
-                        logger.info("blackbox approver: auto-admitted %s", req.get("name") or addr)
-                    except Exception as exc:  # pragma: no cover - fail open
-                        logger.debug("blackbox approver: approve %s failed: %s", addr, exc)
+                for req in approved:
+                    logger.info(
+                        "blackbox approver: auto-admitted %s",
+                        req.get("name") or req.get("agentAddress"),
+                    )
             except Exception:  # not curator / node down — back off and keep idling
                 idle += 1
             wait = 15 if idle < 3 else 120
+            for _ in range(int(wait * 10)):
+                if _rescan_state["stop"]:
+                    return
+                time.sleep(0.1)
+
+    def _ruleset_sync_loop() -> None:
+        """Keep VM/SWM threat rows syncing while the dashboard is running."""
+        last_total: Any = None
+        while not _rescan_state["stop"]:
+            wait = _RULESET_EMPTY_RETRY_SEC
+            try:
+                cfg = load_blackbox_config()
+                counts = _sync_ruleset_once(lambda: cfg, DkgClient, ruleset)
+                total = int(counts.get("total") or 0)
+                community = int(counts.get("community") or 0)
+                wait = max(_RULESET_MIN_RETRY_SEC, float(cfg.sync_interval or _RULESET_EMPTY_RETRY_SEC))
+                if total == 0 or community == 0:
+                    wait = min(_RULESET_EMPTY_RETRY_SEC, wait)
+                if total != last_total:
+                    logger.info(
+                        "blackbox ruleset sync: %d rule(s), %d community; next refresh in %.0fs",
+                        total,
+                        community,
+                        wait,
+                    )
+                    last_total = total
+                else:
+                    logger.debug(
+                        "blackbox ruleset sync: %d rule(s), %d community; next refresh in %.0fs",
+                        total,
+                        community,
+                        wait,
+                    )
+            except Exception as exc:  # pragma: no cover - fail open
+                logger.debug("blackbox ruleset sync: iteration failed: %s", exc)
+                wait = _RULESET_EMPTY_RETRY_SEC
             for _ in range(int(wait * 10)):
                 if _rescan_state["stop"]:
                     return
@@ -122,6 +212,8 @@ def create_app():
         # action. Self-gates via the curator-only join-requests endpoint.
         threading.Thread(target=_approver_loop, name="blackbox-approver", daemon=True).start()
         logger.info("blackbox approver: background auto-accept thread started")
+        threading.Thread(target=_ruleset_sync_loop, name="blackbox-ruleset-sync", daemon=True).start()
+        logger.info("blackbox ruleset sync: background thread started")
 
     @app.on_event("shutdown")
     def _stop_rescanner() -> None:

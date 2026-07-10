@@ -216,7 +216,7 @@ def test_seed_entries_no_publish_only_shares_full_swm(monkeypatch):
     assert client.publishes == []
 
 
-def test_setup_graph_seeds_local_agent_allowlist(monkeypatch):
+def test_setup_graph_registers_public_graph(monkeypatch):
     calls = []
 
     class FakeClient:
@@ -231,14 +231,6 @@ def test_setup_graph_seeds_local_agent_allowlist(monkeypatch):
 
         def create_context_graph(self, *args, **kwargs):
             calls.append(("create", args, kwargs))
-            return {}
-
-        def list_context_graph_agents(self, cg_id):
-            calls.append(("list_agents", cg_id))
-            return []
-
-        def add_context_graph_agent(self, cg_id, agent):
-            calls.append(("add_agent", cg_id, agent))
             return {}
 
         def register_context_graph(self, *args, **kwargs):
@@ -258,11 +250,11 @@ def test_setup_graph_seeds_local_agent_allowlist(monkeypatch):
 
     assert cli._cmd_setup_graph(SimpleNamespace(network="base")) == 0
     create = next(call for call in calls if call[0] == "create")
-    assert create[2]["access_policy"] == 1
-    assert create[2]["allowed_agents"] == ["0x0000000000000000000000000000000000000001"]
-    assert ("add_agent", "umanitek/blackbox-threats-staging", "0x0000000000000000000000000000000000000001") in calls
+    assert create[2]["access_policy"] == 0
+    assert "allowed_agents" not in create[2]
+    assert not [call for call in calls if call[0] == "add_agent"]
     register = next(call for call in calls if call[0] == "register")
-    assert register[2] == {"access_policy": 1, "publish_policy": 0}
+    assert register[2] == {"access_policy": 0, "publish_policy": 0}
 
 
 # A small bumblebee-shaped catalog: one package, three malicious versions.

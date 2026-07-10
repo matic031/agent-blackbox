@@ -105,6 +105,40 @@ def test_blackbox_sync_require_rules_fails_empty_ruleset(monkeypatch, capsys):
     assert "Required ruleset sync failed" in capsys.readouterr().out
 
 
+def test_blackbox_sync_does_not_join_when_subscribe_succeeds(monkeypatch):
+    join_calls = []
+
+    class FakeClient:
+        def __init__(self, url, **_kwargs):
+            self.url = url
+
+        def subscribe_context_graph(self, cg_id):
+            return {}
+
+    class FakeRuleset:
+        def counts(self):
+            return {
+                "injection": 0,
+                "escalation": 0,
+                "dependency": 1,
+                "fileaccess": 0,
+                "skill": 0,
+            }
+
+    monkeypatch.setattr(cli_mod, "_request_join", lambda *args, **kwargs: join_calls.append(args))
+    monkeypatch.setattr(cli_mod, "DkgClient", FakeClient)
+    monkeypatch.setattr(
+        cli_mod,
+        "load_blackbox_config",
+        lambda: config_mod.BlackboxConfig(context_graph_id="cg", dkg_url=constants.DEFAULT_DKG_URL),
+    )
+    monkeypatch.setattr(cli_mod.ruleset, "refresh", lambda cfg, client: FakeRuleset())
+
+    args = argparse.Namespace(wait=False, timeout=180, require_rules=True)
+    assert cli_mod._cmd_sync(args) == 0
+    assert join_calls == []
+
+
 def test_blackbox_sync_require_rules_fails_subscribe_error(monkeypatch, capsys):
     class FakeClient:
         def __init__(self, url, **_kwargs):
@@ -187,12 +221,16 @@ def test_blackbox_sync_empty_zero_data_prints_repair_hint(monkeypatch, capsys):
 def test_blackbox_sync_retries_already_member_zero_data(monkeypatch, capsys):
     join_calls = []
     refresh_calls = []
+    subscribe_calls = []
 
     class FakeClient:
         def __init__(self, url, **_kwargs):
             self.url = url
 
         def subscribe_context_graph(self, cg_id):
+            subscribe_calls.append(cg_id)
+            if len(subscribe_calls) == 1:
+                raise cli_mod.DkgError("403: not on the allowlist")
             return {}
 
     class FakeRuleset:
@@ -237,6 +275,7 @@ def test_blackbox_sync_retries_already_member_zero_data(monkeypatch, capsys):
     args = argparse.Namespace(wait=True, timeout=180, require_rules=True)
     assert cli_mod._cmd_sync(args) == 0
     assert len(join_calls) == 2
+    assert len(subscribe_calls) == 3
     assert len(refresh_calls) == 2
     out = capsys.readouterr().out
     assert "Attempting automatic join-approval handshake repair" in out
