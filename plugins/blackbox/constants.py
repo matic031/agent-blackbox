@@ -144,17 +144,18 @@ DEFAULT_DKG_URL = f"http://127.0.0.1:{DEFAULT_DKG_PORT}"
 #: 0xEbaf… is funded on Base to write the on-chain allowlist). A fresh member
 #: sends its join request here before it can subscribe + sync SWM. This is the
 #: ~/.dkg curator node on :9320. Override with ``BLACKBOX_CURATOR_PEER_ID``.
-DEFAULT_CURATOR_PEER_ID = "12D3KooWQHQd1SNecrRxwceqPJkXSKEYn8vrV4QyJ2AfqeYwXz1E"
+DEFAULT_CURATOR_PEER_ID = "12D3KooWBY9jmNATMPv1DZcKbFas5RtjpkhT69pPwvkUBY2MMnDX"
 
 #: Stale/wrong curator peer ids that must NOT be used as the join target. A
 #: config still pointed at one of these is transparently switched to
 #: ``DEFAULT_CURATOR_PEER_ID`` at config-load time, so join requests always
-#: reach the real owner and SWM sync is authorised. The old BY2MMnDX peer is
-#: not the recorded owner for ``umanitek/blackbox-threats-staging``; a node
-#: targeting it gets stuck at 0 SWM rows with a "not curator" denial. A
-#: genuinely custom peer (not in this set) is always left untouched.
+#: reach the real owner and SWM sync is authorised. The qeYwXz1E peer is the
+#: hermes MEMBER node (agent 0x089D), NOT the recorded owner of
+#: ``umanitek/blackbox-threats-staging`` (that is BY2MMnDX / ~/.dkg / 0xEbaf);
+#: a node targeting qeYwXz1E gets stuck at 0 SWM rows with dial-failed /
+#: "not curator". A genuinely custom peer (not in this set) is left untouched.
 LEGACY_CURATOR_PEER_IDS = frozenset({
-    "12D3KooWBY9jmNATMPv1DZcKbFas5RtjpkhT69pPwvkUBY2MMnDX",
+    "12D3KooWQHQd1SNecrRxwceqPJkXSKEYn8vrV4QyJ2AfqeYwXz1E",
 })
 
 # ---------------------------------------------------------------------------
