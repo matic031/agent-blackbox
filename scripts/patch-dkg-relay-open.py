@@ -68,24 +68,25 @@ def _patches(dist: Path):
     relay = [
         (
             net,
-            "void activeRelayPeerIds;",
-            """export function buildActiveRelayPathGate(activeRelayPeerIds, log = () => { }) {
-    const short = (id) => id.slice(-8);
-    return ({ direction, relayPeerId, remotePeerId, addr }) => {
-        if (activeRelayPeerIds.has(relayPeerId))
-            return false;
-        log(`Network isolation: denying ${direction} relayed connection ` +
-            `relay=${short(relayPeerId)}${remotePeerId ? ` remote=${short(remotePeerId)}` : ''}` +
-            `${addr ? ` addr=${addr}` : ''}`);
-        return true;
+            "BLACKBOX_RELAY_OPEN: fully disable the active-relay policy",
+            """export function buildActiveRelayNetworkPolicy(activeRelayPeerIds, log = () => { }) {
+    if (activeRelayPeerIds == null)
+        return undefined;
+    return {
+        discoveryFilter: buildActiveRelayDiscoveryFilter(activeRelayPeerIds),
+        relayPathGate: buildActiveRelayPathGate(activeRelayPeerIds, log),
+        connectionGater: buildActiveRelayConnectionGater(activeRelayPeerIds, log),
     };
 }""",
-            """export function buildActiveRelayPathGate(activeRelayPeerIds, log = () => { }) {
-    // BLACKBOX_RELAY_OPEN: network isolation disabled — allow relayed connections
-    // through ANY relay so members/curator reach each other over public relays.
+            """export function buildActiveRelayNetworkPolicy(activeRelayPeerIds, log = () => { }) {
+    // BLACKBOX_RELAY_OPEN: fully disable the active-relay policy — no isolation
+    // gate AND no discovery restriction, so a NAT'd node reserves on ANY relay it
+    // discovers (more reservations => reachable via more relays, fixing the
+    // intermittent "NO_RESERVATION" a member hits dialing the curator) and
+    // accepts/dials relayed connections through any relay.
     void activeRelayPeerIds;
     void log;
-    return () => false;
+    return undefined;
 }""",
         ),
         (
