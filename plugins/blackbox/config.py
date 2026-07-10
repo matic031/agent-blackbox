@@ -287,17 +287,28 @@ def load_blackbox_config() -> BlackboxConfig:
     has_configured_dkg_home = bool(configured_dkg_home)
     if not dkg_url_env and not has_configured_dkg_home and dkg_url in legacy_dkg_urls:
         dkg_url = _default_dkg_url()
+    curator_peer_id = str(
+        _env_or(
+            entry,
+            env="BLACKBOX_CURATOR_PEER_ID",
+            key="curator_peer_id",
+            default=constants.DEFAULT_CURATOR_PEER_ID,
+        )
+    ).strip()
+    # Auto-correct an install pointed at a known-wrong curator peer (a member
+    # node that is not the graph owner) so join requests always reach the real
+    # curator and SWM sync is authorised. A genuinely custom peer is untouched.
+    if curator_peer_id in constants.LEGACY_CURATOR_PEER_IDS:
+        logger.info(
+            "blackbox: switching stale curator_peer_id %s -> %s",
+            curator_peer_id,
+            constants.DEFAULT_CURATOR_PEER_ID,
+        )
+        curator_peer_id = constants.DEFAULT_CURATOR_PEER_ID
     return BlackboxConfig(
         mode=mode,
         context_graph_id=context_graph_id,
-        curator_peer_id=str(
-            _env_or(
-                entry,
-                env="BLACKBOX_CURATOR_PEER_ID",
-                key="curator_peer_id",
-                default=constants.DEFAULT_CURATOR_PEER_ID,
-            )
-        ),
+        curator_peer_id=curator_peer_id,
         dkg_url=dkg_url,
         dkg_home=dkg_home,
         dkg_bin=dkg_bin,
