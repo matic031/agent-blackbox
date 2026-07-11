@@ -86,11 +86,37 @@ run_detached() {
 }
 
 blackbox_dkg() {
-    DKG_HOME="$BLACKBOX_DKG_HOME" "$BLACKBOX_DKG_BIN" "$@"
+    # The npm shim uses `#!/usr/bin/env node`; pin the same Node selected by
+    # this installer so an older Homebrew/system Node cannot load native
+    # modules built by Node 22.  Sequential peer catch-up prevents overlapping
+    # sessions from superseding a long private-SWM recovery.  The larger page
+    # and total windows were exercised over reconnecting direct/relay paths.
+    local node_bin_dir
+    node_bin_dir="$(dirname "$(command -v node)")"
+    PATH="$node_bin_dir:$PATH" \
+    DKG_HOME="$BLACKBOX_DKG_HOME" \
+    DKG_CATCHUP_MAX_CONCURRENT_PEERS="${DKG_CATCHUP_MAX_CONCURRENT_PEERS:-1}" \
+    DKG_SYNC_PAGE_TIMEOUT_MS="${DKG_SYNC_PAGE_TIMEOUT_MS:-180000}" \
+    DKG_SYNC_TOTAL_TIMEOUT_MS="${DKG_SYNC_TOTAL_TIMEOUT_MS:-1200000}" \
+    "$BLACKBOX_DKG_BIN" "$@"
 }
 
 blackbox_has_dkg_state() {
     [ -f "$BLACKBOX_DKG_HOME/auth.token" ] || [ -f "$BLACKBOX_DKG_HOME/config.json" ]
+}
+
+clean_stale_dkg_subscriptions() {
+    local cleaner="$REPO_DIR/scripts/blackbox-clean-dkg-subscriptions.py"
+    if [ ! -f "$cleaner" ]; then
+        warn "DKG subscription cleaner is missing; stale graphs may keep syncing."
+        return 0
+    fi
+    if "$VENV_DIR/bin/python" "$cleaner" \
+        "$BLACKBOX_DKG_HOME" "$BLACKBOX_DKG_DAEMON_URL" "$BLACKBOX_CONTEXT_GRAPH_ID"; then
+        ok "Stale DKG graph subscriptions checked"
+    else
+        warn "Could not clean stale DKG graph subscriptions; Blackbox sync will continue."
+    fi
 }
 
 port_in_use() {
@@ -251,9 +277,16 @@ data["relayReservationCount"] = int(data.get("relayReservationCount") or 4)
 graphs = data.get("contextGraphs")
 if not isinstance(graphs, list):
     graphs = []
+# Do not keep subscribing a migrated Blackbox node to the retired Guardian
+# graph: each extra graph competes for the same catch-up budget.  Preserve it
+# when the operator explicitly selected it as the active graph.
+legacy_graphs = {"umanitek/guardian-threats-staging", "umanitek/guardian-threats"}
+graphs = [g for g in graphs if g not in legacy_graphs or g == context_graph]
 if context_graph not in graphs:
     graphs.append(context_graph)
 data["contextGraphs"] = graphs
+data["syncAgentsMeta"] = False
+data["syncGlobalMaxInflight"] = 1
 data.setdefault("autoUpdate", {"enabled": False})
 data["chain"] = {
     "type": "evm",
@@ -746,7 +779,19 @@ install_dkg() {
         return 0
     fi
     if [ "$BLACKBOX_DKG_ALREADY_RUNNING" = true ]; then
-        DKG_READY=true
+        ensure_blackbox_dkg_config
+        clean_stale_dkg_subscriptions
+        step "Restarting the Blackbox-owned DKG node to activate sync and relay updates ..."
+        if blackbox_dkg stop && blackbox_dkg start; then
+            ok "Blackbox DKG node restarted with the current sync settings"
+            clean_stale_dkg_subscriptions
+            DKG_READY=true
+        else
+            BLACKBOX_INSTALL_INCOMPLETE=true
+            BLACKBOX_THREAT_GRAPH_INCOMPLETE=true
+            warn "Could not restart the Blackbox DKG node; the updated sync settings are not active."
+            dkg_manual_hint
+        fi
         return 0
     fi
     if ! check_blackbox_store_port; then
@@ -762,6 +807,7 @@ install_dkg() {
     step "  (non-interactive; reading the public threat graph is free — no funds needed)"
     if blackbox_dkg start; then
         ok "DKG node bootstrapped on $DKG_NETWORK"
+        clean_stale_dkg_subscriptions
         DKG_READY=true
     else
         BLACKBOX_INSTALL_INCOMPLETE=true
@@ -847,75 +893,20 @@ wait_for_dkg_catchup() {
     return 1
 }
 
-# Stock DKG v10.0.5 gives the whole catch-up a 120s budget shared by every
-# graph and all three SWM phases, so a large public community graph
-# (~178k _shared_memory_meta triples at 20k entities) can never finish one
-# meta pass and a fresh node stays at 0 community rows forever. Patch the
-# requester budgets in the Blackbox-owned DKG CLI (env-overridable, larger
-# defaults). Idempotent; fails open with a warning if upstream moved the
-# constants (a future release may fix this properly).
+# DKG agent 10.0.5 has two independent large-SWM blockers: short requester
+# budgets and an unbounded Oxigraph metadata self-join on the responder.  Keep
+# the bridge in one version-gated, tested script; later releases are left
+# untouched so their upstream implementation wins.
 patch_dkg_sync_budgets() {
-    if "$VENV_DIR/bin/python" - "$BLACKBOX_DKG_CLI_DIR" <<'PYEOF'
-import pathlib, sys
-
-cli_dir = pathlib.Path(sys.argv[1])
-marker = "Ops patch (umanitek)"
-budgets = (
-    "const _envMs = (name, fallback) => {\n"
-    "    const v = Number(process.env[name] ?? '');\n"
-    "    return Number.isFinite(v) && v > 0 ? v : fallback;\n"
-    "};\n"
-)
-edits = [  # (relative glob, stock line, replacement)
-    ("dkg-agent-constants.js",
-     "export const SYNC_TOTAL_TIMEOUT_MS = 120_000;",
-     budgets + "export const SYNC_TOTAL_TIMEOUT_MS = _envMs('DKG_SYNC_TOTAL_TIMEOUT_MS', 600_000);"),
-    ("dkg-agent-constants.js",
-     "export const SYNC_PAGE_TIMEOUT_MS = 45_000;",
-     "export const SYNC_PAGE_TIMEOUT_MS = _envMs('DKG_SYNC_PAGE_TIMEOUT_MS', 90_000);"),
-    ("dkg-agent-constants.js",
-     "export const SYNC_MIN_GRAPH_BUDGET_MS = 10_000;",
-     "export const SYNC_MIN_GRAPH_BUDGET_MS = _envMs('DKG_SYNC_MIN_GRAPH_BUDGET_MS', 120_000);"),
-    ("sync/durable-session.js",
-     "export const DURABLE_DATA_SYNC_SESSION_TTL_MS = 10 * 60_000;",
-     "const _ttlEnv = Number(process.env.DKG_SYNC_SESSION_TTL_MS ?? '');\n"
-     "export const DURABLE_DATA_SYNC_SESSION_TTL_MS = "
-     "Number.isFinite(_ttlEnv) && _ttlEnv > 0 ? _ttlEnv : 60 * 60_000;"),
-    # An agent gate whose effective member set is empty (every allowedAgent
-    # also revoked — e.g. an allowlist cleared via remove-participant, which
-    # revokes rather than deletes) must collapse to PUBLIC, else the public
-    # graph deadlocks every SWM gossip write ("no local allowed signing agent
-    # key"). Aligns local gating with the open on-chain policy.
-    ("dkg-agent-crypto.js",
-     "return sawAgentGate ? agents : null;",
-     "return (sawAgentGate && agents.length > 0) ? agents : null;"),
-]
-roots = sorted(cli_dir.glob("node_modules/**/dkg-agent/dist"))
-if not roots:
-    print("dkg-agent dist not found under " + str(cli_dir), file=sys.stderr)
-    sys.exit(1)
-failed = False
-for root in roots:
-    for rel, stock, replacement in edits:
-        path = root / rel
-        if not path.is_file():
-            failed = True
-            print(f"missing {path}", file=sys.stderr)
-            continue
-        text = path.read_text()
-        if replacement.splitlines()[-1] in text:
-            continue  # already patched
-        if stock not in text:
-            failed = True
-            print(f"stock line not found in {path}: {stock}", file=sys.stderr)
-            continue
-        path.write_text(text.replace(stock, f"// {marker}: sync budget, env-overridable\n" + replacement, 1))
-sys.exit(1 if failed else 0)
-PYEOF
-    then
-        ok "DKG sync budgets patched for large community-graph catch-up"
+    local patcher="$REPO_DIR/scripts/patch-dkg-10.0.5-sync.py"
+    if [ ! -f "$patcher" ]; then
+        warn "DKG 10.0.5 sync patcher is missing; large community graphs may not fully catch up."
+        return 0
+    fi
+    if "$VENV_DIR/bin/python" "$patcher" "$BLACKBOX_DKG_CLI_DIR"; then
+        ok "DKG 10.0.5 large-SWM recovery bridge checked"
     else
-        warn "Could not patch DKG sync budgets; large community graphs may not fully catch up."
+        warn "Could not patch DKG 10.0.5 large-SWM recovery; catch-up may remain incomplete."
     fi
 }
 

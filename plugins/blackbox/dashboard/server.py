@@ -33,7 +33,6 @@ _RULESET_MIN_RETRY_SEC = 5.0
 
 _STATIC_DIR = Path(__file__).resolve().parent / "static"
 _ASSETS_DIR = Path(__file__).resolve().parent / "assets"
-_PRIVATE_AUTO_JOIN_GRAPH_IDS = {"umanitek/blackbox-threats-staging"}
 
 
 def _ruleset_total(rs: Any) -> int:
@@ -51,35 +50,11 @@ def _ruleset_sync_counts(rs: Any) -> Dict[str, int]:
 
 
 def _sync_ruleset_once(load_config: Any, dkg_client_cls: Any, ruleset_mod: Any) -> Dict[str, int]:
-    """Subscribe/catch up and refresh the VM/SWM ruleset once."""
+    """Refresh the VM/SWM ruleset without restarting an active catch-up."""
     cfg = load_config()
     client = dkg_client_cls(url=cfg.dkg_url, dkg_home=cfg.dkg_home)
-    subscribe_failed = False
-    try:
-        client.subscribe_context_graph(cfg.context_graph_id)
-    except Exception as exc:  # pragma: no cover - best-effort self-heal
-        subscribe_failed = True
-        logger.debug("blackbox ruleset sync: subscribe %s failed: %s", cfg.context_graph_id, exc)
-    if subscribe_failed and getattr(cfg, "curator_peer_id", ""):
-        try:
-            client.request_join(cfg.context_graph_id, cfg.curator_peer_id)
-        except Exception as exc:  # pragma: no cover - best-effort self-heal
-            logger.debug("blackbox ruleset sync: join request %s failed: %s", cfg.context_graph_id, exc)
     rs = ruleset_mod.refresh(cfg, client)
     counts = _ruleset_sync_counts(rs)
-    if (
-        counts["total"] == 0
-        and counts["community"] == 0
-        and getattr(cfg, "curator_peer_id", "")
-        and getattr(cfg, "context_graph_id", "") in _PRIVATE_AUTO_JOIN_GRAPH_IDS
-    ):
-        try:
-            client.request_join(cfg.context_graph_id, cfg.curator_peer_id)
-            client.subscribe_context_graph(cfg.context_graph_id)
-            rs = ruleset_mod.refresh(cfg, client)
-            counts = _ruleset_sync_counts(rs)
-        except Exception as exc:  # pragma: no cover - best-effort self-heal
-            logger.debug("blackbox ruleset sync: private join request %s failed: %s", cfg.context_graph_id, exc)
     return counts
 
 

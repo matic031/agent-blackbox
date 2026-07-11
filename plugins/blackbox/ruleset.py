@@ -20,11 +20,15 @@ path fails open to the last-good (or empty) ruleset.
 
 from __future__ import annotations
 
+import errno
+import hashlib
 import json
 import logging
+import os
 import re
 import threading
 import time
+import urllib.parse
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -531,31 +535,264 @@ def _fetch_tier(client: DkgClient, cg_id: str, view: str) -> Optional[List[Dict[
     return rows
 
 
-_last_subscribe_at = 0.0
-_SUBSCRIBE_RETRY_S = 300.0
+# The endpoint acknowledges before the async snapshot finishes. Large SWM
+# recoveries can exceed 15 minutes, so leave enough room to finish before a
+# successful request may be retried.
+_SUBSCRIBE_RETRY_S = 1800.0
+_SUBSCRIBE_FAILURE_RETRY_S = 30.0
+_JOIN_RETRY_S = 300.0
+_JOIN_FAILURE_RETRY_S = 30.0
 _EMPTY_RULESET_RETRY_S = 30.0
+_PRIVATE_AUTO_JOIN_GRAPH_IDS = {constants.DEFAULT_CONTEXT_GRAPH_ID}
+_subscribe_lock = threading.Lock()
+_subscribe_next_allowed_at: Dict[str, float] = {}
+_subscribe_inflight: set[str] = set()
+_join_next_allowed_at: Dict[str, float] = {}
+_join_inflight: set[str] = set()
+_LEASE_UNAVAILABLE = object()
 
 
-def _maybe_subscribe(client: DkgClient, cg_id: str) -> None:
-    """Throttled, best-effort subscribe when the local store is empty.
-
-    A fresh consumer node never subscribed the daemon, so every tier is empty;
-    subscribing kicks off the SWM catch-up. Fail-open; fires at most once per
-    ``_SUBSCRIBE_RETRY_S``.
-    """
-    global _last_subscribe_at
-    now = time.time()
-    if now - _last_subscribe_at < _SUBSCRIBE_RETRY_S:
-        return
-    _last_subscribe_at = now
+def _catchup_key(client: DkgClient, cg_id: str) -> str:
+    """Identify one daemon+home+graph subscription target."""
+    raw_url = str(getattr(client, "url", "") or "").rstrip("/")
     try:
-        client.subscribe_context_graph(cg_id)
-        logger.info(
-            "blackbox: local store empty for %s — subscribed daemon, catching up shared memory",
-            cg_id,
+        parsed = urllib.parse.urlsplit(raw_url)
+        host = (parsed.hostname or "").lower().rstrip(".")
+        if host in {"localhost", "::1"}:
+            host = "127.0.0.1"
+        if ":" in host:
+            host = f"[{host}]"
+        netloc = f"{host}:{parsed.port}" if parsed.port is not None else host
+        url = urllib.parse.urlunsplit(
+            (parsed.scheme.lower(), netloc, parsed.path.rstrip("/"), "", "")
         )
-    except Exception as exc:  # fail-open: auto-subscribe is a best-effort self-heal
-        logger.debug("blackbox: auto-subscribe to %s failed: %s", cg_id, exc)
+    except Exception:
+        url = raw_url
+    raw_home = str(getattr(client, "dkg_home", "") or "")
+    try:
+        dkg_home = str(Path(raw_home).expanduser().resolve()) if raw_home else ""
+    except Exception:
+        dkg_home = raw_home
+    return json.dumps((url, dkg_home, str(cg_id)), separators=(",", ":"))
+
+
+def _catchup_lease_path(client: DkgClient, key: str) -> Path:
+    """Place the lease beside the target DKG home so profiles share it."""
+    digest = hashlib.sha256(key.encode("utf-8")).hexdigest()
+    raw_home = str(getattr(client, "dkg_home", "") or "")
+    try:
+        root = Path(raw_home).expanduser().resolve() if raw_home else constants.blackbox_home()
+    except Exception:
+        root = constants.blackbox_home()
+    return root / ".blackbox-catchup-leases" / f"{digest}.json"
+
+
+def _try_acquire_catchup_lease(client: DkgClient, key: str) -> Any:
+    """Non-blocking cross-process lease lock, with in-process fallback."""
+    state_path = _catchup_lease_path(client, key)
+    lock_path = state_path.with_suffix(".lock")
+    try:
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        handle = open(lock_path, "a+", encoding="utf-8")
+    except Exception as exc:
+        logger.debug("blackbox: catch-up lease unavailable: %s", exc)
+        return _LEASE_UNAVAILABLE
+
+    try:
+        if os.name == "nt":
+            import msvcrt
+
+            handle.seek(0, os.SEEK_END)
+            if handle.tell() == 0:
+                handle.write("{}")
+                handle.flush()
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return handle, state_path
+    except OSError as exc:
+        handle.close()
+        if exc.errno in (errno.EACCES, errno.EAGAIN):
+            return None
+        logger.debug("blackbox: cross-process catch-up lock unavailable: %s", exc)
+        return _LEASE_UNAVAILABLE
+    except Exception as exc:
+        logger.debug("blackbox: cross-process catch-up lock unavailable: %s", exc)
+        handle.close()
+        return _LEASE_UNAVAILABLE
+
+
+def _release_catchup_lease(handle: Any) -> None:
+    if handle is _LEASE_UNAVAILABLE:
+        return
+    lock_handle, _state_path = handle
+    try:
+        if os.name == "nt":
+            import msvcrt
+
+            lock_handle.seek(0)
+            msvcrt.locking(lock_handle.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+    except Exception:
+        pass
+    finally:
+        lock_handle.close()
+
+
+def _read_catchup_lease(handle: Any) -> float:
+    if handle is _LEASE_UNAVAILABLE:
+        return 0.0
+    _lock_handle, state_path = handle
+    try:
+        data = json.loads(state_path.read_text(encoding="utf-8"))
+        return float(data.get("nextSubscribeAt", 0.0)) if isinstance(data, dict) else 0.0
+    except Exception:
+        return 0.0
+
+
+def _write_catchup_lease(handle: Any, next_subscribe_at: float) -> None:
+    if handle is _LEASE_UNAVAILABLE:
+        return
+    _lock_handle, state_path = handle
+    temp_path = state_path.with_name(
+        f".{state_path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
+    )
+    try:
+        with temp_path.open("w", encoding="utf-8") as state_file:
+            json.dump({"nextSubscribeAt": float(next_subscribe_at)}, state_file)
+            state_file.flush()
+            os.fsync(state_file.fileno())
+        os.replace(temp_path, state_path)
+    except Exception as exc:
+        logger.debug("blackbox: catch-up lease write failed: %s", exc)
+    finally:
+        try:
+            temp_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+
+def _maybe_request_join(client: DkgClient, cg_id: str, curator_peer_id: str) -> bool:
+    """Send one independently-throttled, idempotent private-graph join request."""
+    key = _catchup_key(client, cg_id)
+    now = time.monotonic()
+    with _subscribe_lock:
+        if key in _join_inflight or now < _join_next_allowed_at.get(key, 0.0):
+            return False
+        _join_inflight.add(key)
+
+    joined = False
+    try:
+        client.request_join(cg_id, curator_peer_id)
+        joined = True
+    except Exception as exc:  # pragma: no cover - best-effort relay delivery
+        logger.debug("blackbox: community join request for %s failed: %s", cg_id, exc)
+    finally:
+        retry_after = _JOIN_RETRY_S if joined else _JOIN_FAILURE_RETRY_S
+        with _subscribe_lock:
+            _join_inflight.discard(key)
+            _join_next_allowed_at[key] = time.monotonic() + retry_after
+    return True
+
+
+def ensure_community_catchup(
+    client: DkgClient,
+    cg_id: str,
+    *,
+    curator_peer_id: str = "",
+) -> bool:
+    """Queue at most one community catch-up per graph and retry window.
+
+    The DKG subscribe endpoint returns while catch-up continues asynchronously.
+    Calling it on every cache refresh therefore starts overlapping SWM recovery
+    jobs, which supersede each other's responder sessions.  Reserve the graph's
+    retry slot *before* the network call. A target-global OS-locked lease in the
+    DKG home keeps concurrent profiles/processes and dashboard restarts
+    single-flight too. Successful requests get the full recovery window;
+    immediate failures use a shorter retry so a temporarily-down local daemon
+    still self-heals promptly.
+
+    Returns ``True`` only when this call made the subscription attempt.  All
+    failures remain best-effort/fail-open.
+    """
+    key = _catchup_key(client, cg_id)
+    now = time.monotonic()
+    should_subscribe = False
+    maybe_join = False
+    with _subscribe_lock:
+        if key in _subscribe_inflight or now < _subscribe_next_allowed_at.get(key, 0.0):
+            if curator_peer_id and cg_id in _PRIVATE_AUTO_JOIN_GRAPH_IDS:
+                maybe_join = True
+        else:
+            _subscribe_inflight.add(key)
+            should_subscribe = True
+
+    if not should_subscribe:
+        if maybe_join:
+            _maybe_request_join(client, cg_id, curator_peer_id)
+        return False
+
+    lease = _try_acquire_catchup_lease(client, key)
+    if lease is None:
+        # A sibling process owns the lease and is currently submitting the
+        # catch-up. The OS releases this automatically if that process dies.
+        with _subscribe_lock:
+            _subscribe_inflight.discard(key)
+        if curator_peer_id and cg_id in _PRIVATE_AUTO_JOIN_GRAPH_IDS:
+            _maybe_request_join(client, cg_id, curator_peer_id)
+        return False
+
+    subscribed = False
+    attempted = False
+    retry_after = 0.0
+    persisted_delay = 0.0
+    try:
+        wall_now = time.time()
+        persisted_next = _read_catchup_lease(lease)
+        if persisted_next > wall_now:
+            persisted_delay = min(_SUBSCRIBE_RETRY_S, persisted_next - wall_now)
+        else:
+            attempted = True
+            # Persist the long reservation before the HTTP call. If this
+            # process exits after the daemon accepts but before we can update
+            # the file, a restart still cannot immediately supersede recovery.
+            _write_catchup_lease(lease, wall_now + _SUBSCRIBE_RETRY_S)
+            try:
+                client.subscribe_context_graph(cg_id)
+                subscribed = True
+                logger.info(
+                    "blackbox: community tier missing for %s — subscribed daemon, catching up shared memory",
+                    cg_id,
+                )
+            except Exception as exc:  # fail-open: auto-subscribe is a best-effort self-heal
+                logger.debug("blackbox: auto-subscribe to %s failed: %s", cg_id, exc)
+
+            retry_after = _SUBSCRIBE_RETRY_S if subscribed else _SUBSCRIBE_FAILURE_RETRY_S
+            _write_catchup_lease(lease, time.time() + retry_after)
+    finally:
+        _release_catchup_lease(lease)
+        with _subscribe_lock:
+            _subscribe_inflight.discard(key)
+            if attempted:
+                _subscribe_next_allowed_at[key] = time.monotonic() + retry_after
+            elif persisted_delay:
+                _subscribe_next_allowed_at[key] = time.monotonic() + persisted_delay
+
+    # A denied custom graph needs admission before a retry. The default
+    # community graph is private-but-auto-admitted, so request admission even
+    # when subscribe returned before membership became visible. Admission has
+    # its own retry gate and never restarts the DKG catch-up job.
+    if curator_peer_id and (
+        (attempted and not subscribed) or cg_id in _PRIVATE_AUTO_JOIN_GRAPH_IDS
+    ):
+        _maybe_request_join(client, cg_id, curator_peer_id)
+    return attempted
 
 
 def refresh(config: Optional[BlackboxConfig] = None, client: Optional[DkgClient] = None) -> Ruleset:
@@ -577,10 +814,20 @@ def refresh(config: Optional[BlackboxConfig] = None, client: Optional[DkgClient]
     )
     fetched = {tier: _fetch_tier(client, config.context_graph_id, view) for view, tier in tiers}
 
-    # Empty store usually means the daemon was never subscribed — self-heal.
+    # Missing community data means SWM catch-up is incomplete even when durable
+    # VM rows already made the overall ruleset non-empty.  Keep cache refreshes
+    # frequent, but queue the asynchronous DKG catch-up through one shared
+    # per-graph throttle so refreshers cannot restart it every 30 seconds.
+    community_empty = fetched.get("community") == []
+    if community_empty:
+        ensure_community_catchup(
+            client,
+            config.context_graph_id,
+            curator_peer_id=str(getattr(config, "curator_peer_id", "") or ""),
+        )
+
+    # An entirely empty store gets an early cache-expiry below as well.
     empty_success = all(rows == [] for rows in fetched.values())
-    if empty_success:
-        _maybe_subscribe(client, config.context_graph_id)
 
     if all(rows is None for rows in fetched.values()):
         # Every tier failed — keep the last-good ruleset instead of emptying.

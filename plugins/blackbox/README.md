@@ -72,7 +72,7 @@ evidence stays in the node's private WM audit KA.
 | key | default | env |
 |-----|---------|-----|
 | `mode` | `audit` | `BLACKBOX_MODE` |
-| `context_graph_id` | `umanitek/guardian-threats-staging` | `BLACKBOX_CONTEXT_GRAPH_ID` |
+| `context_graph_id` | `umanitek/blackbox-threats-staging` | `BLACKBOX_CONTEXT_GRAPH_ID` |
 | `dkg_url` | `http://127.0.0.1:9320` | `BLACKBOX_DKG_DAEMON_URL` / `BLACKBOX_DKG_URL` |
 | `dkg_home` | `$HERMES_HOME/blackbox/dkg` | `BLACKBOX_DKG_HOME` |
 | `dkg_bin` | `$HERMES_HOME/blackbox/dkg-cli/node_modules/.bin/dkg` | `BLACKBOX_DKG_BIN` |
@@ -252,54 +252,50 @@ hermes blackbox curate redeliver-approval --agent <consumer-agent-address>
 
 Then rerun `hermes blackbox sync --wait --timeout 180` on the consumer.
 
-### Open access model (curator ops)
+### Private community access and relay reachability
 
-The access model is: every user can read the verifiable memory and the
-community graph and push reports to the community graph; publishing to the
-verifiable memory stays gated to the curator wallet, so curators choose what
-gets promoted from the community pool. Three things keep the "everyone gets
-in" half true:
+The default community graph is private and agent-gated. A fresh member sends a
+join request to the configured curator; after admission, SWM recovery is
+authorized from the request's signed agent identity and the graph allowlist.
+Do not force `SWM_SYNC_OPEN`: bypassing that check exposes private snapshots and
+also skips the member-recovery authorization path that serves the snapshot.
+Normal unsigned requests denied by the curator are expected; an admitted
+member's signed recovery request is the path that matters.
 
-- The community graph is a PUBLIC context graph with an EMPTY allowlist.
-  Reads, SWM pushes, and fan-out need no join or approval for any node. Never
-  approve a join request on it: the first `allowedAgent` entry flips the graph
-  to agent-gated, and every plaintext SWM write is then rejected with "Sender
-  Key encrypted workspace payload required" until the allowlist is cleared
-  again. Both the dashboard approver loop and `curate auto-accept` carry a
-  guard that idles on an open graph for exactly this reason.
-- Join requests from consumers are harmless noise on the open graph (the
-  client re-sends one on every sync); they sit pending and must stay pending.
-- The curator and the managed staging node carry a local ops patch that keeps
-  DKG network admission open: a peer is admitted even when the
-  `/dkg/10.0.1/network-identity` probe fails (pre-10.0.5 nodes cannot
-  negotiate it at all), so no wallet is quarantined off the network. Both
-  nodes still answer identity probes, so strict peers keep admitting them.
+Members do not need to share a LAN with the curator. The installers seed the
+four mainnet-base circuit relays, request four relay reservations, and retain
+DKG's normal direct-connection upgrade when one is possible. A recovery can
+therefore continue through relay/reconnect churn without turning the VM or a
+custom relay into the data plane.
 
-The admission patch lives in
-`@origintrail-official/dkg-agent/dist/p2p/network-admission.js` and
-`network-admission-coordinator.js`, in both the global npm install and
-`~/.hermes/blackbox-staging/dkg-cli`. Admission is open by default there; set
-`DKG_NETWORK_ADMISSION_MODE=strict` to restore stock gating. A `dkg` package
-upgrade overwrites the patch - re-apply it after upgrading.
+### DKG 10.0.5 large-SWM recovery bridge
 
-### SWM catch-up budgets (ops patch)
+In stock DKG 10.0.5, the responder constructs the first metadata page with an
+unbounded variable-graph self-join. On a large fragmented SWM graph, Oxigraph
+can spend minutes on that query while the requester times out; repeated
+subscriptions then supersede the unfinished session. Increasing timeouts alone
+does not fix the query.
 
-Stock DKG v10.0.5 gives the whole catch-up a hardcoded 120s budget shared by
-every subscribed graph and all three SWM phases (meta, data, snapshot), so a
-fresh node can never finish one pass over the community graph's
-`_shared_memory_meta` (~178k triples at 20k entities) and stays at 0 community
-rows forever. See ORIGINTRAIL_SWM_CATCHUP_ISSUE.md (2026-07-10 addendum).
+After `npm install`, both installers run
+`scripts/patch-dkg-10.0.5-sync.py` against the Blackbox-owned CLI. The patch is
+strictly version-gated and:
 
-The installer patches the Blackbox-owned DKG CLI after `npm install`
-(`patch_dkg_sync_budgets` in `scripts/blackbox-install.sh`; same step in the
-PowerShell installer): `SYNC_TOTAL_TIMEOUT_MS` 120s -> 600s,
-`SYNC_PAGE_TIMEOUT_MS` 45s -> 90s, `SYNC_MIN_GRAPH_BUDGET_MS` 10s -> 120s in
-`dkg-agent/dist/dkg-agent-constants.js`, and the responder session TTL 10min
--> 60min in `dkg-agent/dist/sync/durable-session.js`. All env-overridable
-(`DKG_SYNC_TOTAL_TIMEOUT_MS`, `DKG_SYNC_PAGE_TIMEOUT_MS`,
-`DKG_SYNC_MIN_GRAPH_BUDGET_MS`, `DKG_SYNC_SESSION_TTL_MS`). The curator and
-staging installs on the curator machine carry the same patch. A `dkg` upgrade
-overwrites it - re-run the installer or the patch step after upgrading.
+- reads fresh metadata with fast explicit-graph `FILTER EXISTS` queries before
+  stable in-memory ordering and wire paging;
+- replaces large array spreads that can overflow the JavaScript stack;
+- serializes catch-up peers and uses 180-second page / 20-minute total recovery
+  windows, a 120-second minimum graph budget, and a 60-minute responder session;
+- restores strict private recovery authorization if an older forced-open
+  experiment is present.
+
+The config writer also removes an unselected retired Guardian graph, disables
+unneeded `agents` metadata catch-up, and caps all background sync work at one
+in-flight operation. On a migrated isolated Blackbox node, the installer
+non-destructively unsubscribes any persisted graph absent from `contextGraphs`;
+its stored triples remain intact. This leaves the selected community graph with
+the recovery budget. Every modified DKG file receives a one-time backup. Later
+agent versions are detected and left untouched so the upstream implementation
+wins; rerun the installer after replacing a 10.0.5 npm install.
 
 `hermes blackbox chat` bootstraps a managed `blackbox` profile, writes a
 Blackbox-specific `SOUL.md`, pins `context_file_max_chars` high enough for this

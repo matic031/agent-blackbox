@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import re
+import subprocess
+import sys
 from pathlib import Path
 
 
@@ -20,6 +23,18 @@ def _extract_function_body(name: str) -> str:
     )
     assert match is not None, f"{name}() not found in scripts/blackbox-install.sh"
     return match["body"]
+
+
+def _extract_unix_config_writer() -> str:
+    text = INSTALL_SH.read_text(encoding="utf-8")
+    match = re.search(
+        r"^ensure_blackbox_dkg_config\(\)\s*\{.*?<<'PYEOF'\n"
+        r"(?P<code>.*?)^PYEOF\n^\}",
+        text,
+        re.MULTILINE | re.DOTALL,
+    )
+    assert match is not None
+    return match["code"]
 
 
 def test_llm_setup_reuses_existing_config_without_prompting() -> None:
@@ -151,3 +166,89 @@ def test_windows_installer_uses_isolated_blackbox_dkg_node() -> None:
     assert "npm i -g" not in text
     assert "npm install -g" not in text
     assert '"dkg_url": "http://127.0.0.1:9200"' not in text
+
+
+def test_dkg_config_migration_removes_only_unselected_legacy_graphs(tmp_path: Path) -> None:
+    home = tmp_path / "dkg"
+    home.mkdir()
+    config = home / "config.json"
+    config.write_text(
+        json.dumps(
+            {
+                "contextGraphs": [
+                    "umanitek/guardian-threats-staging",
+                    "custom/private-graph",
+                ],
+                "syncAgentsMeta": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+    writer = _extract_unix_config_writer()
+
+    subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            writer,
+            str(home),
+            "9320",
+            "7879",
+            "umanitek/blackbox-threats-staging",
+        ],
+        check=True,
+    )
+    migrated = json.loads(config.read_text(encoding="utf-8"))
+
+    assert migrated["contextGraphs"] == [
+        "custom/private-graph",
+        "umanitek/blackbox-threats-staging",
+    ]
+    assert migrated["syncAgentsMeta"] is False
+    assert migrated["syncGlobalMaxInflight"] == 1
+
+    subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            writer,
+            str(home),
+            "9320",
+            "7879",
+            "umanitek/guardian-threats-staging",
+        ],
+        check=True,
+    )
+    explicitly_selected = json.loads(config.read_text(encoding="utf-8"))
+    assert "umanitek/guardian-threats-staging" in explicitly_selected["contextGraphs"]
+
+
+def test_installers_apply_relay_safe_serial_swm_recovery_defaults() -> None:
+    unix = INSTALL_SH.read_text(encoding="utf-8")
+    windows = INSTALL_PS1.read_text(encoding="utf-8")
+
+    for text in (unix, windows):
+        assert "patch-dkg-10.0.5-sync.py" in text
+        assert "blackbox-clean-dkg-subscriptions.py" in text
+        assert "DKG_CATCHUP_MAX_CONCURRENT_PEERS" in text
+        assert "DKG_SYNC_PAGE_TIMEOUT_MS" in text and "180000" in text
+        assert "DKG_SYNC_TOTAL_TIMEOUT_MS" in text and "1200000" in text
+        assert 'data["syncAgentsMeta"] = False' in text
+        assert 'data["syncGlobalMaxInflight"] = 1' in text
+
+
+def test_installers_restart_running_owned_dkg_after_patch_and_config_update() -> None:
+    unix = _extract_function_body("install_dkg")
+    windows = INSTALL_PS1.read_text(encoding="utf-8")
+
+    running_branch = unix.split(
+        'if [ "$BLACKBOX_DKG_ALREADY_RUNNING" = true ]; then', maxsplit=1
+    )[1].split("return 0", maxsplit=1)[0]
+    assert "ensure_blackbox_dkg_config" in running_branch
+    assert "blackbox_dkg stop && blackbox_dkg start" in running_branch
+    assert "DKG_READY=true" in running_branch
+
+    assert "if ($script:DkgAlreadyRunning)" in windows
+    assert "Invoke-BlackboxDkg stop" in windows
+    assert "Invoke-BlackboxDkg start" in windows
+    assert "updated sync settings are not active" in windows

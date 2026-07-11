@@ -179,21 +179,54 @@ function Test-NodeJs {
 
 function Invoke-BlackboxDkg {
     param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Args)
-    $prev = $env:DKG_HOME
+    $names = @(
+        "DKG_HOME",
+        "DKG_CATCHUP_MAX_CONCURRENT_PEERS",
+        "DKG_SYNC_PAGE_TIMEOUT_MS",
+        "DKG_SYNC_TOTAL_TIMEOUT_MS",
+        "Path"
+    )
+    $previous = @{}
+    foreach ($name in $names) {
+        $previous[$name] = [System.Environment]::GetEnvironmentVariable($name, "Process")
+    }
     try {
+        $nodeCommand = Get-Command node -ErrorAction SilentlyContinue
+        if ($nodeCommand -and $nodeCommand.Source) {
+            $env:Path = "$(Split-Path -Parent $nodeCommand.Source);$env:Path"
+        }
         $env:DKG_HOME = $DkgHome
+        if (-not $env:DKG_CATCHUP_MAX_CONCURRENT_PEERS) { $env:DKG_CATCHUP_MAX_CONCURRENT_PEERS = "1" }
+        if (-not $env:DKG_SYNC_PAGE_TIMEOUT_MS) { $env:DKG_SYNC_PAGE_TIMEOUT_MS = "180000" }
+        if (-not $env:DKG_SYNC_TOTAL_TIMEOUT_MS) { $env:DKG_SYNC_TOTAL_TIMEOUT_MS = "1200000" }
         & $DkgBin @Args
     } finally {
-        if ($null -eq $prev) {
-            Remove-Item Env:DKG_HOME -ErrorAction SilentlyContinue
-        } else {
-            $env:DKG_HOME = $prev
+        foreach ($name in $names) {
+            if ($null -eq $previous[$name]) {
+                Remove-Item "Env:$name" -ErrorAction SilentlyContinue
+            } else {
+                Set-Item "Env:$name" $previous[$name]
+            }
         }
     }
 }
 
 function Test-BlackboxDkgState {
     return ((Test-Path (Join-Path $DkgHome "auth.token")) -or (Test-Path (Join-Path $DkgHome "config.json")))
+}
+
+function Remove-StaleDkgSubscriptions {
+    $cleaner = Join-Path $RepoDir "scripts\blackbox-clean-dkg-subscriptions.py"
+    if (-not (Test-Path $cleaner)) {
+        Write-Warn2 "DKG subscription cleaner is missing; stale graphs may keep syncing."
+        return
+    }
+    & $script:VenvPython $cleaner $DkgHome $DkgDaemonUrl $ContextGraphId
+    if ($LASTEXITCODE -eq 0) {
+        Write-Ok "Stale DKG graph subscriptions checked"
+    } else {
+        Write-Warn2 "Could not clean stale DKG graph subscriptions; Blackbox sync will continue."
+    }
 }
 
 function Set-BlackboxDkgPort {
@@ -339,9 +372,15 @@ data["relayReservationCount"] = int(data.get("relayReservationCount") or 4)
 graphs = data.get("contextGraphs")
 if not isinstance(graphs, list):
     graphs = []
+# Keep catch-up focused on the selected Blackbox graph after migrating from
+# the retired Guardian default. Preserve it when explicitly selected.
+legacy_graphs = {"umanitek/guardian-threats-staging", "umanitek/guardian-threats"}
+graphs = [g for g in graphs if g not in legacy_graphs or g == context_graph]
 if context_graph not in graphs:
     graphs.append(context_graph)
 data["contextGraphs"] = graphs
+data["syncAgentsMeta"] = False
+data["syncGlobalMaxInflight"] = 1
 data.setdefault("autoUpdate", {"enabled": False})
 data["chain"] = {
     "type": "evm",
@@ -469,7 +508,22 @@ function Install-Dkg {
         return
     }
     if ($script:DkgAlreadyRunning) {
-        $script:DkgReady = $true
+        Ensure-BlackboxDkgConfig
+        Remove-StaleDkgSubscriptions
+        Write-Step "Restarting the Blackbox-owned DKG node to activate sync and relay updates ..."
+        try {
+            Invoke-BlackboxDkg stop
+            if ($LASTEXITCODE -ne 0) { throw "dkg stop exit $LASTEXITCODE" }
+            Invoke-BlackboxDkg start
+            if ($LASTEXITCODE -ne 0) { throw "dkg start exit $LASTEXITCODE" }
+            Write-Ok "Blackbox DKG node restarted with the current sync settings"
+            Remove-StaleDkgSubscriptions
+            $script:DkgReady = $true
+        } catch {
+            $script:InstallIncomplete = $true
+            Write-Warn2 "Could not restart the Blackbox DKG node; the updated sync settings are not active."
+            Show-DkgManualHint
+        }
         return
     }
     if (-not (Test-BlackboxStorePort)) {
@@ -487,6 +541,7 @@ function Install-Dkg {
         Invoke-BlackboxDkg start
         if ($LASTEXITCODE -ne 0) { throw "dkg exit $LASTEXITCODE" }
         Write-Ok "DKG node bootstrapped on $Network"
+        Remove-StaleDkgSubscriptions
         $script:DkgReady = $true
     } catch {
         $script:InstallIncomplete = $true
@@ -513,74 +568,20 @@ function Sync-Ruleset {
     }
 }
 
-# Stock DKG v10.0.5 gives the whole catch-up a 120s budget shared by every
-# graph and all three SWM phases, so a large public community graph can never
-# finish one meta pass and a fresh node stays at 0 community rows. Patch the
-# requester budgets in the Blackbox-owned DKG CLI (env-overridable, larger
-# defaults). Idempotent; warns and continues if upstream moved the constants.
+# Apply the tested, version-gated DKG 10.0.5 large-SWM recovery bridge. Later
+# agent versions are detected and left untouched.
 function Patch-DkgSyncBudgets {
-    $py = @'
-import pathlib, sys
-
-cli_dir = pathlib.Path(sys.argv[1])
-marker = "Ops patch (umanitek)"
-budgets = (
-    "const _envMs = (name, fallback) => {\n"
-    "    const v = Number(process.env[name] ?? '');\n"
-    "    return Number.isFinite(v) && v > 0 ? v : fallback;\n"
-    "};\n"
-)
-edits = [
-    ("dkg-agent-constants.js",
-     "export const SYNC_TOTAL_TIMEOUT_MS = 120_000;",
-     budgets + "export const SYNC_TOTAL_TIMEOUT_MS = _envMs('DKG_SYNC_TOTAL_TIMEOUT_MS', 600_000);"),
-    ("dkg-agent-constants.js",
-     "export const SYNC_PAGE_TIMEOUT_MS = 45_000;",
-     "export const SYNC_PAGE_TIMEOUT_MS = _envMs('DKG_SYNC_PAGE_TIMEOUT_MS', 90_000);"),
-    ("dkg-agent-constants.js",
-     "export const SYNC_MIN_GRAPH_BUDGET_MS = 10_000;",
-     "export const SYNC_MIN_GRAPH_BUDGET_MS = _envMs('DKG_SYNC_MIN_GRAPH_BUDGET_MS', 120_000);"),
-    ("sync/durable-session.js",
-     "export const DURABLE_DATA_SYNC_SESSION_TTL_MS = 10 * 60_000;",
-     "const _ttlEnv = Number(process.env.DKG_SYNC_SESSION_TTL_MS ?? '');\n"
-     "export const DURABLE_DATA_SYNC_SESSION_TTL_MS = "
-     "Number.isFinite(_ttlEnv) && _ttlEnv > 0 ? _ttlEnv : 60 * 60_000;"),
-    # Effectively-empty agent gate -> PUBLIC (see the .sh installer for why).
-    ("dkg-agent-crypto.js",
-     "return sawAgentGate ? agents : null;",
-     "return (sawAgentGate && agents.length > 0) ? agents : null;"),
-]
-roots = sorted(cli_dir.glob("node_modules/**/dkg-agent/dist"))
-if not roots:
-    print("dkg-agent dist not found under " + str(cli_dir), file=sys.stderr)
-    sys.exit(1)
-failed = False
-for root in roots:
-    for rel, stock, replacement in edits:
-        path = root / rel
-        if not path.is_file():
-            failed = True
-            print(f"missing {path}", file=sys.stderr)
-            continue
-        text = path.read_text()
-        if replacement.splitlines()[-1] in text:
-            continue
-        if stock not in text:
-            failed = True
-            print(f"stock line not found in {path}: {stock}", file=sys.stderr)
-            continue
-        path.write_text(text.replace(stock, f"// {marker}: sync budget, env-overridable\n" + replacement, 1))
-sys.exit(1 if failed else 0)
-'@
-    $tmp = Join-Path $env:TEMP "blackbox-patch-dkg-sync.py"
-    Set-Content -Path $tmp -Value $py -Encoding UTF8
-    & $script:VenvPython $tmp $DkgCliDir
-    if ($LASTEXITCODE -eq 0) {
-        Write-Ok "DKG sync budgets patched for large community-graph catch-up"
-    } else {
-        Write-Warn2 "Could not patch DKG sync budgets; large community graphs may not fully catch up."
+    $patcher = Join-Path $RepoDir "scripts\patch-dkg-10.0.5-sync.py"
+    if (-not (Test-Path $patcher)) {
+        Write-Warn2 "DKG 10.0.5 sync patcher is missing; large community graphs may not fully catch up."
+        return
     }
-    Remove-Item -Path $tmp -ErrorAction SilentlyContinue
+    & $script:VenvPython $patcher $DkgCliDir
+    if ($LASTEXITCODE -eq 0) {
+        Write-Ok "DKG 10.0.5 large-SWM recovery bridge checked"
+    } else {
+        Write-Warn2 "Could not patch DKG 10.0.5 large-SWM recovery; catch-up may remain incomplete."
+    }
 }
 
 function Show-DkgManualHint {
