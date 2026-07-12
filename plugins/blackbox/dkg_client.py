@@ -284,15 +284,10 @@ class DkgClient:
     ) -> Dict[str, Any]:
         """Create a local context graph (free, off-chain).
 
-        Pass ``access_policy=0`` to create it PUBLIC. This is the *local*
-        privacy classification the daemon writes into the CG's ``_meta`` graph
-        and checks (``canReadContextGraph``) on every read. A new CG otherwise
-        defaults to curated/private, and shared-working-memory reads fail closed
-        on a private CG ("local node is not authorized") — so no other Blackbox
-        user can ever see the community pool. ``0`` = public (anyone reads +
-        subscribes to SWM), ``1`` = curated/private (allowlist-gated). Keep this
-        in sync with ``register_context_graph(access_policy=0)`` so the on-chain
-        and local classifications agree.
+        Blackbox uses ``access_policy=1`` with the curator in
+        ``allowed_agents``. The DKG's per-graph auto-approval setting admits
+        every valid joiner, preserving private relay-backed replication while
+        making membership open in practice.
         """
         body: Dict[str, Any] = {"id": cg_id, "name": name}
         if description:
@@ -303,29 +298,11 @@ class DkgClient:
             body["allowedAgents"] = allowed_agents
         return self._request("POST", "/api/context-graph/create", body)
 
-    def add_context_graph_agent(self, cg_id: str, agent_address: str) -> Dict[str, Any]:
-        """Add an agent address to the context graph's SWM allowlist."""
-        enc = urllib.parse.quote(cg_id, safe="")
-        return self._request(
-            "POST",
-            f"/api/context-graph/{enc}/add-participant",
-            {"agentAddress": agent_address},
-            timeout=_STORE_TIMEOUT,
-        )
-
-    def list_context_graph_agents(self, cg_id: str) -> List[str]:
-        """Return agent addresses allowed in a context graph."""
-        enc = urllib.parse.quote(cg_id, safe="")
-        result = self._request("GET", f"/api/context-graph/{enc}/participants", timeout=_STORE_TIMEOUT)
-        agents = result.get("allowedAgents") if isinstance(result, dict) else None
-        return [str(agent) for agent in agents] if isinstance(agents, list) else []
-
     def register_context_graph(self, cg_id: str, access_policy: int, publish_policy: int) -> Dict[str, Any]:
         """Register a CG on-chain with explicit access/publish policies.
 
-        For the public curated KB: ``access_policy=0`` (open discovery/share)
-        and ``publish_policy=0`` (only curator wallets publish to VM). We pass
-        ``publish_policy`` explicitly — an open CG otherwise defaults permissive.
+        Blackbox uses ``access_policy=1`` (private member transport/read) and
+        ``publish_policy=0`` (only the curator wallet promotes to VM).
         """
         return self._request(
             "POST",
@@ -346,42 +323,6 @@ class DkgClient:
             "POST",
             "/api/context-graph/subscribe",
             {"contextGraphId": cg_id, "includeSharedMemory": include_shared_memory},
-            timeout=_STORE_TIMEOUT,
-        )
-
-    def list_join_requests(self, cg_id: str) -> List[Dict[str, Any]]:
-        """Pending join requests for a private (allowlist) CG — curator-only.
-
-        ``GET /api/context-graph/{id}/join-requests`` → ``{requests:[{agentAddress, name, ...}]}``.
-        The id carries a ``/`` so it is path-encoded.
-        """
-        enc = urllib.parse.quote(cg_id, safe="")
-        resp = self._request("GET", f"/api/context-graph/{enc}/join-requests", timeout=_STORE_TIMEOUT)
-        return resp.get("requests", []) if isinstance(resp, dict) else []
-
-    def approve_join(self, cg_id: str, agent_address: str) -> Dict[str, Any]:
-        """Approve a pending join request → adds the agent to the CG allowlist.
-
-        ``POST /api/context-graph/{id}/approve-join {agentAddress}``. This is how
-        ``curate auto-accept`` admits every joiner into the community.
-        """
-        enc = urllib.parse.quote(cg_id, safe="")
-        return self._request("POST", f"/api/context-graph/{enc}/approve-join",
-                             {"agentAddress": agent_address}, timeout=_STORE_TIMEOUT)
-
-    def redeliver_join_approval(self, cg_id: str, agent_address: str) -> Dict[str, Any]:
-        """Curator-side: re-fire a join-approved notification to an approved agent.
-
-        DKG can get into an otherwise-valid "already member, but no synced _meta"
-        state after a missed approval notification or daemon restart. The v10
-        daemon exposes this route so the curator can poke the approved member
-        without touching DKG's internal SQLite state.
-        """
-        enc = urllib.parse.quote(cg_id, safe="")
-        return self._request(
-            "POST",
-            f"/api/context-graph/{enc}/redeliver-approval",
-            {"agentAddress": agent_address},
             timeout=_STORE_TIMEOUT,
         )
 

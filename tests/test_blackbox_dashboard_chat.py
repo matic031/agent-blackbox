@@ -54,42 +54,6 @@ def test_ruleset_sync_once_refreshes_without_directly_requeueing_catchup():
     ]
 
 
-def test_dashboard_approver_skips_open_access_graph():
-    approved = []
-
-    class OpenClient:
-        def list_context_graph_agents(self, cg_id):
-            return []
-
-        def list_join_requests(self, cg_id):
-            return [{"agentAddress": "0x" + "1" * 40}]
-
-        def approve_join(self, cg_id, addr):
-            approved.append(addr)
-
-    assert server._approve_joins_once(OpenClient(), "umanitek/guardian-threats-staging") == []
-    assert approved == []
-
-
-def test_dashboard_approver_still_admits_legacy_private_graph():
-    approved = []
-
-    class PrivateClient:
-        def list_context_graph_agents(self, cg_id):
-            return ["0x" + "c" * 40]
-
-        def list_join_requests(self, cg_id):
-            return [{"agentAddress": "0x" + "1" * 40, "name": "fresh-node"}]
-
-        def approve_join(self, cg_id, addr):
-            approved.append(addr)
-
-    out = server._approve_joins_once(PrivateClient(), "some/private-cg")
-
-    assert out == [{"agentAddress": "0x" + "1" * 40, "name": "fresh-node"}]
-    assert approved == ["0x" + "1" * 40]
-
-
 def test_dashboard_zero_graph_count_settles_after_first_payload():
     html = (Path(server.__file__).parent / "static" / "index.html").read_text(
         encoding="utf-8"
@@ -100,10 +64,8 @@ def test_dashboard_zero_graph_count_settles_after_first_payload():
     assert "return !(lastStatus && lastStatus.node_reachable === false);" not in html
 
 
-def test_dashboard_retries_empty_sync_and_join_approval_promptly():
+def test_dashboard_retries_empty_ruleset_promptly():
     assert server._RULESET_EMPTY_RETRY_SEC <= 30
-    assert server._APPROVER_POLL_SEC <= 5
-    assert server._APPROVER_ERROR_RETRY_SEC < 30
 
 
 def test_blackbox_dashboard_chat_starts_session(monkeypatch):

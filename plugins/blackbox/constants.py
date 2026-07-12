@@ -102,13 +102,10 @@ SCHEMA_CONTRIBUTOR_PRED = "http://schema.org/contributor"
 
 #: Default community context-graph id (config key ``context_graph_id``).
 #: PRIVATE community graph (on-chain accessPolicy=1, allowlist-gated). The
-#: curator auto-approves every joiner (``curate auto-accept`` / the dashboard
-#: approver), so it is open in practice while replicating SWM over the curated-
-#: CG relay path — which catches up a large shared-memory pool far better than
-#: the public SWM substrate (see ORIGINTRAIL_SWM_CATCHUP_ISSUE.md). Approved
-#: members hold the sender key, so they both READ and PUBLISH to SWM. VM
-#: publishing is out of scope on this graph (its ciphertext can't satisfy core
-#: ACKs) — the community pool is the product.
+#: DKG auto-approves every cryptographically valid join request for this graph,
+#: so membership is open in practice while SWM uses the private relay-backed
+#: path. Approved members read and write SWM. The independent curated publish
+#: policy keeps VM promotion restricted to the curator.
 # Old default, parked for now: the correct graph is the blackbox one below, NOT
 # the guardian one. Do not re-enable without discussion.
 # DEFAULT_CONTEXT_GRAPH_ID = "umanitek/guardian-threats-staging"
@@ -139,10 +136,9 @@ DEFAULT_ANCHOR_BATCH_SIZE = 250
 DEFAULT_DKG_PORT = 9320
 DEFAULT_DKG_URL = f"http://127.0.0.1:{DEFAULT_DKG_PORT}"
 
-#: Community curator's node peer id — the OWNER of the private community graph
-#: and the only node that can approve joins / redeliver approvals (its wallet
-#: 0xEbaf… is funded on Base to write the on-chain allowlist). A fresh member
-#: sends its join request here before it can subscribe + sync SWM. This is the
+#: Community curator's node peer id — the owner of the private community graph.
+#: A fresh member sends its join request here; the curator DKG auto-approves it
+#: and writes the on-chain allowlist before the member syncs SWM. This is the
 #: ~/.dkg curator node on :9320. Override with ``BLACKBOX_CURATOR_PEER_ID``.
 DEFAULT_CURATOR_PEER_ID = "12D3KooWBY9jmNATMPv1DZcKbFas5RtjpkhT69pPwvkUBY2MMnDX"
 

@@ -235,10 +235,11 @@ def test_dkg_config_migration_removes_only_unselected_legacy_graphs(tmp_path: Pa
         "custom/private-graph",
         "umanitek/blackbox-threats-staging",
     ]
-    assert migrated["syncAgentsMeta"] is False
+    assert migrated["autoApproveJoinRequests"] == ["umanitek/blackbox-threats-staging"]
+    assert "syncAgentsMeta" not in migrated
     assert migrated["syncOnConnectEnabled"] is False
-    assert migrated["syncGlobalMaxInflight"] == 1
-    assert migrated["syncGlobalQueueLimit"] == 32
+    assert "syncGlobalMaxInflight" not in migrated
+    assert "syncGlobalQueueLimit" not in migrated
     assert "restrictAutoSubscribeContextGraphs" not in migrated
     assert migrated["store"]["options"]["readyTimeoutMs"] == 120000
 
@@ -308,7 +309,7 @@ def test_dkg_config_writer_recovers_invalid_utf8(tmp_path: Path) -> None:
     assert recovered["contextGraphs"] == ["umanitek/blackbox-threats-staging"]
 
 
-def test_installers_apply_relay_safe_serial_swm_recovery_defaults() -> None:
+def test_installers_apply_native_dkg_membership_and_relay_defaults() -> None:
     unix = INSTALL_SH.read_text(encoding="utf-8")
     windows = INSTALL_PS1.read_text(encoding="utf-8")
 
@@ -322,10 +323,10 @@ def test_installers_apply_relay_safe_serial_swm_recovery_defaults() -> None:
         assert "DKG_SYNC_RESPONDER_GLOBAL_SNAPSHOT_ROW_LIMIT" not in text
         assert "blackbox-dkg-runtime-fingerprint.py" in text
         assert "DKG daemon is ready on checkout" in text
-        assert 'data["syncAgentsMeta"] = False' in text
+        assert 'data["autoApproveJoinRequests"] = auto_approve' in text
         assert 'data["syncOnConnectEnabled"] = False' in text
-        assert 'data["syncGlobalMaxInflight"] = 1' in text
-        assert 'data["syncGlobalQueueLimit"] = 32' in text
+        assert 'data.pop("syncGlobalMaxInflight", None)' in text
+        assert 'data.pop("syncGlobalQueueLimit", None)' in text
         assert 'data.pop("restrictAutoSubscribeContextGraphs", None)' in text
         assert 'options["readyTimeoutMs"] = 120000' in text
 

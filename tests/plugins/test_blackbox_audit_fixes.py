@@ -12,11 +12,7 @@ One test per confirmed finding so the fixes can't silently regress:
 ``HERMES_HOME``/``BLACKBOX_HOME`` are per-test tmpdirs (root conftest).
 """
 
-import multiprocessing
-import os
 import re
-import threading
-from concurrent.futures import ThreadPoolExecutor
 
 from _blackbox_loader import load_blackbox
 
@@ -31,38 +27,6 @@ ruleset_mod = load_blackbox("ruleset")
 config_mod = load_blackbox("config")
 
 Ruleset = ruleset_mod.Ruleset
-
-
-def _catchup_process_worker(
-    label,
-    cg_id,
-    dkg_home,
-    hermes_home,
-    hold,
-    started,
-    release,
-    counter,
-    results,
-):
-    os.environ["HERMES_HOME"] = hermes_home
-    os.environ["BLACKBOX_HOME"] = os.path.join(hermes_home, "blackbox")
-
-    class _Client:
-        url = "http://127.0.0.1:9320"
-
-        def __init__(self):
-            self.dkg_home = dkg_home
-
-        def subscribe_context_graph(self, requested_cg_id):
-            assert requested_cg_id == cg_id
-            with counter.get_lock():
-                counter.value += 1
-            if hold:
-                started.set()
-                assert release.wait(timeout=5)
-
-    attempted = ruleset_mod.ensure_community_catchup(_Client(), cg_id)
-    results.put((label, attempted))
 
 
 # ---------------------------------------------------------------------------
@@ -143,14 +107,10 @@ def test_ruleset_sync_is_uncapped(monkeypatch):
     assert len(rs.dependency) == 6500  # far past the old LIMIT 2000
 
 
-def test_empty_initial_sync_retries_soon_after_subscribe(monkeypatch):
+def test_empty_initial_sync_retries_cache_without_network_orchestration(monkeypatch):
     monkeypatch.setattr(ruleset_mod, "_write_cache", lambda rs: None)
     monkeypatch.setattr(ruleset_mod, "_memory_cache", None)
-    monkeypatch.setattr(ruleset_mod, "_subscribe_next_allowed_at", {})
-    monkeypatch.setattr(ruleset_mod, "_subscribe_inflight", set())
     monkeypatch.setattr(ruleset_mod.time, "time", lambda: 1000.0)
-    monkeypatch.setattr(ruleset_mod.time, "monotonic", lambda: 1000.0)
-    calls = []
 
     class _Empty:
         def query(self, sparql, cg_id, view=None, on_error=None):
@@ -160,326 +120,32 @@ def test_empty_initial_sync_retries_soon_after_subscribe(monkeypatch):
             return []
 
         def subscribe_context_graph(self, cg_id):
-            calls.append(cg_id)
+            raise AssertionError("cache refresh must not subscribe")
+
+        def request_join(self, cg_id, curator_peer_id):
+            raise AssertionError("cache refresh must not request admission")
 
     cfg = config_mod.BlackboxConfig(sync_interval=300, context_graph_id="cg")
     rs = ruleset_mod.refresh(cfg, _Empty())
-    assert calls == ["cg"]
-    assert rs.synced_at == 730.0  # now - sync_interval + 30s retry delay
+    assert rs.synced_at == 730.0
 
 
-def test_missing_community_throttles_catchup_with_public_rules(monkeypatch):
+def test_missing_community_does_not_restart_dkg_sync(monkeypatch):
     monkeypatch.setattr(ruleset_mod, "_write_cache", lambda rs: None)
     monkeypatch.setattr(ruleset_mod, "_memory_cache", None)
-    monkeypatch.setattr(ruleset_mod, "_subscribe_next_allowed_at", {})
-    monkeypatch.setattr(ruleset_mod, "_subscribe_inflight", set())
-    monkeypatch.setattr(ruleset_mod, "_join_next_allowed_at", {})
-    monkeypatch.setattr(ruleset_mod, "_join_inflight", set())
-    monkeypatch.setattr(ruleset_mod, "_SUBSCRIBE_RETRY_S", 120.0)
-    now = [1000.0]
-    monkeypatch.setattr(ruleset_mod.time, "monotonic", lambda: now[0])
-    monkeypatch.setattr(ruleset_mod.time, "time", lambda: now[0])
-    calls = []
 
     class _PublicOnly(_Pager):
         def subscribe_context_graph(self, cg_id):
-            calls.append(cg_id)
-
-    cfg = config_mod.BlackboxConfig(context_graph_id="public-with-empty-community")
-    first = ruleset_mod.refresh(cfg, _PublicOnly(1))
-    now[0] += 30.0  # the dashboard's next cache refresh must not restart catch-up
-    second = ruleset_mod.refresh(cfg, _PublicOnly(1))
-    now[0] += 91.0
-    third = ruleset_mod.refresh(cfg, _PublicOnly(1))
-
-    assert len(first.dependency) == 1
-    assert len(second.dependency) == 1
-    assert len(third.dependency) == 1
-    assert calls == ["public-with-empty-community", "public-with-empty-community"]
-
-
-def test_private_community_catchup_joins_once_across_refreshes(monkeypatch):
-    monkeypatch.setattr(ruleset_mod, "_write_cache", lambda rs: None)
-    monkeypatch.setattr(ruleset_mod, "_memory_cache", None)
-    monkeypatch.setattr(ruleset_mod, "_subscribe_next_allowed_at", {})
-    monkeypatch.setattr(ruleset_mod, "_subscribe_inflight", set())
-    monkeypatch.setattr(ruleset_mod, "_join_next_allowed_at", {})
-    monkeypatch.setattr(ruleset_mod, "_join_inflight", set())
-    now = [1000.0]
-    monkeypatch.setattr(ruleset_mod.time, "monotonic", lambda: now[0])
-    events = []
-
-    class _Empty:
-        def query(self, sparql, cg_id, view=None, on_error=None):
-            return []
-
-        def query_store(self, sparql, on_error=None):
-            return []
-
-        def subscribe_context_graph(self, cg_id):
-            events.append(("subscribe", cg_id))
+            raise AssertionError("cache refresh must not subscribe")
 
         def request_join(self, cg_id, curator_peer_id):
-            events.append(("join", cg_id, curator_peer_id))
+            raise AssertionError("cache refresh must not request admission")
 
-    cfg = config_mod.BlackboxConfig(
-        context_graph_id=constants.DEFAULT_CONTEXT_GRAPH_ID,
-        curator_peer_id="curator-peer",
+    rs = ruleset_mod.refresh(
+        config_mod.BlackboxConfig(context_graph_id="public-with-empty-community"),
+        _PublicOnly(1),
     )
-    ruleset_mod.refresh(cfg, _Empty())
-    now[0] += 30.0
-    ruleset_mod.refresh(cfg, _Empty())
-
-    assert events == [
-        ("subscribe", constants.DEFAULT_CONTEXT_GRAPH_ID),
-        ("join", constants.DEFAULT_CONTEXT_GRAPH_ID, "curator-peer"),
-    ]
-
-
-def test_denied_custom_graph_requests_join_without_requeueing(monkeypatch):
-    monkeypatch.setattr(ruleset_mod, "_write_cache", lambda rs: None)
-    monkeypatch.setattr(ruleset_mod, "_memory_cache", None)
-    monkeypatch.setattr(ruleset_mod, "_subscribe_next_allowed_at", {})
-    monkeypatch.setattr(ruleset_mod, "_subscribe_inflight", set())
-    monkeypatch.setattr(ruleset_mod, "_join_next_allowed_at", {})
-    monkeypatch.setattr(ruleset_mod, "_join_inflight", set())
-    monkeypatch.setattr(ruleset_mod.time, "monotonic", lambda: 1000.0)
-    events = []
-
-    class _Denied:
-        def query(self, sparql, cg_id, view=None, on_error=None):
-            return []
-
-        def query_store(self, sparql, on_error=None):
-            return []
-
-        def subscribe_context_graph(self, cg_id):
-            events.append(("subscribe", cg_id))
-            raise RuntimeError("not admitted")
-
-        def request_join(self, cg_id, curator_peer_id):
-            events.append(("join", cg_id, curator_peer_id))
-
-    cfg = config_mod.BlackboxConfig(context_graph_id="custom/private", curator_peer_id="custom-curator")
-    ruleset_mod.refresh(cfg, _Denied())
-    ruleset_mod.refresh(cfg, _Denied())
-
-    assert events == [
-        ("subscribe", "custom/private"),
-        ("join", "custom/private", "custom-curator"),
-    ]
-
-
-def test_join_failure_retries_without_restarting_subscription(monkeypatch):
-    monkeypatch.setattr(ruleset_mod, "_subscribe_next_allowed_at", {})
-    monkeypatch.setattr(ruleset_mod, "_subscribe_inflight", set())
-    monkeypatch.setattr(ruleset_mod, "_join_next_allowed_at", {})
-    monkeypatch.setattr(ruleset_mod, "_join_inflight", set())
-    monkeypatch.setattr(ruleset_mod, "_SUBSCRIBE_RETRY_S", 100.0)
-    monkeypatch.setattr(ruleset_mod, "_JOIN_FAILURE_RETRY_S", 5.0)
-    now = [1000.0]
-    monkeypatch.setattr(ruleset_mod.time, "monotonic", lambda: now[0])
-    events = []
-
-    class _FlakyJoin:
-        def subscribe_context_graph(self, cg_id):
-            events.append(("subscribe", cg_id))
-
-        def request_join(self, cg_id, curator_peer_id):
-            events.append(("join", cg_id, curator_peer_id))
-            if sum(event[0] == "join" for event in events) == 1:
-                raise RuntimeError("relay unavailable")
-
-    client = _FlakyJoin()
-    assert ruleset_mod.ensure_community_catchup(
-        client,
-        constants.DEFAULT_CONTEXT_GRAPH_ID,
-        curator_peer_id="curator-peer",
-    ) is True
-    now[0] += 3.0
-    assert ruleset_mod.ensure_community_catchup(
-        client,
-        constants.DEFAULT_CONTEXT_GRAPH_ID,
-        curator_peer_id="curator-peer",
-    ) is False
-    now[0] += 3.0
-    assert ruleset_mod.ensure_community_catchup(
-        client,
-        constants.DEFAULT_CONTEXT_GRAPH_ID,
-        curator_peer_id="curator-peer",
-    ) is False
-
-    assert [event for event in events if event[0] == "subscribe"] == [
-        ("subscribe", constants.DEFAULT_CONTEXT_GRAPH_ID)
-    ]
-    assert [event for event in events if event[0] == "join"] == [
-        ("join", constants.DEFAULT_CONTEXT_GRAPH_ID, "curator-peer"),
-        ("join", constants.DEFAULT_CONTEXT_GRAPH_ID, "curator-peer"),
-    ]
-
-
-def test_community_catchup_is_singleflight_across_threads(monkeypatch):
-    monkeypatch.setattr(ruleset_mod, "_subscribe_next_allowed_at", {})
-    monkeypatch.setattr(ruleset_mod, "_subscribe_inflight", set())
-    monkeypatch.setattr(ruleset_mod.time, "monotonic", lambda: 1000.0)
-    started = threading.Event()
-    release = threading.Event()
-    calls = []
-
-    class _SlowClient:
-        def subscribe_context_graph(self, cg_id):
-            calls.append(cg_id)
-            started.set()
-            assert release.wait(timeout=2)
-
-    client = _SlowClient()
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        first = pool.submit(ruleset_mod.ensure_community_catchup, client, "cg")
-        assert started.wait(timeout=2)
-        second = pool.submit(ruleset_mod.ensure_community_catchup, client, "cg")
-        assert second.result(timeout=2) is False
-        release.set()
-        assert first.result(timeout=2) is True
-
-    assert calls == ["cg"]
-
-
-def test_community_catchup_lease_is_singleflight_across_processes(tmp_path):
-    ctx = multiprocessing.get_context("spawn")
-    started = ctx.Event()
-    release = ctx.Event()
-    counter = ctx.Value("i", 0)
-    results = ctx.Queue()
-    cg_id = f"cross-process/{tmp_path.name}"
-    dkg_home = str(tmp_path / "dkg-node")
-    first_profile = str(tmp_path / "profile-a")
-    second_profile = str(tmp_path / "profile-b")
-    first = ctx.Process(
-        target=_catchup_process_worker,
-        args=(
-            "first",
-            cg_id,
-            dkg_home,
-            first_profile,
-            True,
-            started,
-            release,
-            counter,
-            results,
-        ),
-    )
-    second = ctx.Process(
-        target=_catchup_process_worker,
-        args=(
-            "second",
-            cg_id,
-            dkg_home,
-            first_profile,
-            False,
-            started,
-            release,
-            counter,
-            results,
-        ),
-    )
-    after_restart = ctx.Process(
-        target=_catchup_process_worker,
-        args=(
-            "after-restart",
-            cg_id,
-            dkg_home,
-            second_profile,
-            False,
-            started,
-            release,
-            counter,
-            results,
-        ),
-    )
-
-    first.start()
-    try:
-        assert started.wait(timeout=5)
-        second.start()
-        second.join(timeout=5)
-        assert not second.is_alive()
-        assert second.exitcode == 0
-    finally:
-        release.set()
-        first.join(timeout=5)
-        for process in (first, second):
-            if process.is_alive():
-                process.terminate()
-                process.join(timeout=2)
-
-    assert first.exitcode == 0
-    after_restart.start()
-    after_restart.join(timeout=5)
-    if after_restart.is_alive():
-        after_restart.terminate()
-        after_restart.join(timeout=2)
-    assert after_restart.exitcode == 0
-
-    observed = dict(results.get(timeout=2) for _ in range(3))
-    assert observed == {"first": True, "second": False, "after-restart": False}
-    assert counter.value == 1
-
-
-def test_community_catchup_lease_is_scoped_to_dkg_identity(monkeypatch, tmp_path):
-    monkeypatch.setattr(ruleset_mod, "_subscribe_next_allowed_at", {})
-    monkeypatch.setattr(ruleset_mod, "_subscribe_inflight", set())
-    calls = []
-
-    class _Client:
-        def __init__(self, label, url, dkg_home):
-            self.label = label
-            self.url = url
-            self.dkg_home = dkg_home
-
-        def subscribe_context_graph(self, cg_id):
-            calls.append((self.label, cg_id))
-
-    clients = [
-        _Client("first", "http://127.0.0.1:9320", str(tmp_path / "node-a")),
-        _Client("new-home", "http://127.0.0.1:9320", str(tmp_path / "node-b")),
-        _Client("new-endpoint", "http://127.0.0.1:9420", str(tmp_path / "node-a")),
-    ]
-    same_endpoint_alias = _Client(
-        "localhost-alias",
-        "http://localhost:9320/",
-        str(tmp_path / "node-a"),
-    )
-
-    assert all(ruleset_mod.ensure_community_catchup(client, "same-graph") for client in clients)
-    assert ruleset_mod.ensure_community_catchup(same_endpoint_alias, "same-graph") is False
-    assert calls == [
-        ("first", "same-graph"),
-        ("new-home", "same-graph"),
-        ("new-endpoint", "same-graph"),
-    ]
-
-
-def test_failed_lease_update_preserves_existing_reservation(monkeypatch, tmp_path):
-    class _Client:
-        url = "http://127.0.0.1:9320"
-        dkg_home = str(tmp_path / "node")
-
-    client = _Client()
-    key = ruleset_mod._catchup_key(client, "atomic-lease")
-    lease = ruleset_mod._try_acquire_catchup_lease(client, key)
-    assert lease is not None
-    assert lease is not ruleset_mod._LEASE_UNAVAILABLE
-    try:
-        ruleset_mod._write_catchup_lease(lease, 2000.0)
-
-        def fail_replace(_source, _destination):
-            raise OSError("interrupted update")
-
-        monkeypatch.setattr(ruleset_mod.os, "replace", fail_replace)
-        ruleset_mod._write_catchup_lease(lease, 1000.0)
-        assert ruleset_mod._read_catchup_lease(lease) == 2000.0
-    finally:
-        ruleset_mod._release_catchup_lease(lease)
+    assert len(rs.dependency) == 1
 
 
 def test_partial_tier_error_preserves_public_rules(monkeypatch):

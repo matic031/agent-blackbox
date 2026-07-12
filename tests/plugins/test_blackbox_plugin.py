@@ -65,14 +65,6 @@ def test_blackbox_sync_parser_accepts_wait_timeout():
     assert args.require_rules is True
 
 
-def test_blackbox_redeliver_approval_parser():
-    parser = argparse.ArgumentParser()
-    cli_mod.setup_cli(parser)
-    args = parser.parse_args(["curate", "redeliver-approval", "--agent", "0xabc"])
-    assert args.func is cli_mod._cmd_curate_redeliver_approval
-    assert args.agent == "0xabc"
-
-
 def test_blackbox_sync_require_rules_fails_empty_ruleset(monkeypatch, capsys):
     class FakeClient:
         def __init__(self, url, **_kwargs):
@@ -91,7 +83,6 @@ def test_blackbox_sync_require_rules_fails_empty_ruleset(monkeypatch, capsys):
                 "skill": 0,
             }
 
-    monkeypatch.setattr(cli_mod, "_request_join", lambda *args, **kwargs: None)
     monkeypatch.setattr(cli_mod, "DkgClient", FakeClient)
     monkeypatch.setattr(
         cli_mod,
@@ -105,7 +96,7 @@ def test_blackbox_sync_require_rules_fails_empty_ruleset(monkeypatch, capsys):
     assert "Required ruleset sync failed" in capsys.readouterr().out
 
 
-def test_blackbox_sync_does_not_join_when_subscribe_succeeds(monkeypatch):
+def test_blackbox_sync_public_graph_subscribes_without_join(monkeypatch):
     join_calls = []
 
     class FakeClient:
@@ -139,151 +130,11 @@ def test_blackbox_sync_does_not_join_when_subscribe_succeeds(monkeypatch):
     assert join_calls == []
 
 
-def test_blackbox_sync_private_zero_rows_requests_join_after_successful_subscribe(monkeypatch, capsys):
-    join_calls = []
-    refresh_calls = []
-
-    class FakeClient:
-        def __init__(self, url, **_kwargs):
-            self.url = url
-
-        def subscribe_context_graph(self, cg_id):
-            return {}
-
-        def agent_identity(self):
-            return {"agentAddress": "0xabc"}
-
-    class FakeRuleset:
-        def counts(self):
-            return {
-                "injection": 0,
-                "escalation": 0,
-                "dependency": 0,
-                "fileaccess": 0,
-                "skill": 0,
-            }
-
-    def fake_join(*args, **kwargs):
-        join_calls.append((args, kwargs))
-        return "Join request sent for umanitek/blackbox-threats-staging: delivered to 1 curator(s)."
-
-    def fake_refresh(cfg, client):
-        refresh_calls.append((cfg, client))
-        return FakeRuleset()
-
-    monkeypatch.setattr(cli_mod, "_request_join", fake_join)
-    monkeypatch.setattr(cli_mod, "DkgClient", FakeClient)
-    monkeypatch.setattr(
-        cli_mod,
-        "load_blackbox_config",
-        lambda: config_mod.BlackboxConfig(
-            context_graph_id=constants.DEFAULT_CONTEXT_GRAPH_ID,
-            dkg_url=constants.DEFAULT_DKG_URL,
-            curator_peer_id=constants.DEFAULT_CURATOR_PEER_ID,
-        ),
-    )
-    monkeypatch.setattr(
-        cli_mod,
-        "_wait_for_context_graph_catchup",
-        lambda *a, **k: {
-            "ok": True,
-            "status": "done",
-            "detail": "peers 4/4, data 0, shared memory 0",
-        },
-    )
-    monkeypatch.setattr(cli_mod.ruleset, "refresh", fake_refresh)
-
-    args = argparse.Namespace(wait=True, timeout=180, require_rules=False)
-    assert cli_mod._cmd_sync(args) == 0
-    assert len(join_calls) == 1
-    assert len(refresh_calls) == 2
-    out = capsys.readouterr().out
-    assert "Private graph returned zero rows; requesting curator admission" in out
-
-
-def test_blackbox_sync_require_rules_fails_subscribe_error(monkeypatch, capsys):
-    class FakeClient:
-        def __init__(self, url, **_kwargs):
-            self.url = url
-
-        def subscribe_context_graph(self, cg_id):
-            raise cli_mod.DkgError("403: not on the allowlist")
-
-    class FakeRuleset:
-        def counts(self):
-            return {
-                "injection": 0,
-                "escalation": 0,
-                "dependency": 1,
-                "fileaccess": 0,
-                "skill": 0,
-            }
-
-    monkeypatch.setattr(cli_mod, "_request_join", lambda *args, **kwargs: None)
-    monkeypatch.setattr(cli_mod, "DkgClient", FakeClient)
-    monkeypatch.setattr(
-        cli_mod,
-        "load_blackbox_config",
-        lambda: config_mod.BlackboxConfig(context_graph_id="cg", dkg_url=constants.DEFAULT_DKG_URL),
-    )
-    monkeypatch.setattr(cli_mod.ruleset, "refresh", lambda cfg, client: FakeRuleset())
-
-    args = argparse.Namespace(wait=False, timeout=180, require_rules=True)
-    assert cli_mod._cmd_sync(args) == 3
-    out = capsys.readouterr().out
-    assert "could not subscribe to cg" in out
-    assert "Required community subscription failed" in out
-
-
-def test_blackbox_sync_empty_zero_data_prints_repair_hint(monkeypatch, capsys):
-    class FakeClient:
-        def __init__(self, url, **_kwargs):
-            self.url = url
-
-        def subscribe_context_graph(self, cg_id):
-            return {}
-
-        def agent_identity(self):
-            return {"agentAddress": "0xabc"}
-
-    class FakeRuleset:
-        def counts(self):
-            return {
-                "injection": 0,
-                "escalation": 0,
-                "dependency": 0,
-                "fileaccess": 0,
-                "skill": 0,
-            }
-
-    monkeypatch.setattr(cli_mod, "_request_join", lambda *args, **kwargs: None)
-    monkeypatch.setattr(cli_mod, "DkgClient", FakeClient)
-    monkeypatch.setattr(
-        cli_mod,
-        "load_blackbox_config",
-        lambda: config_mod.BlackboxConfig(context_graph_id="cg", dkg_url=constants.DEFAULT_DKG_URL),
-    )
-    monkeypatch.setattr(
-        cli_mod,
-        "_wait_for_context_graph_catchup",
-        lambda *a, **k: {
-            "ok": True,
-            "status": "done",
-            "detail": "peers 4/4, data 0, shared memory 0",
-        },
-    )
-    monkeypatch.setattr(cli_mod.ruleset, "refresh", lambda cfg, client: FakeRuleset())
-
-    args = argparse.Namespace(wait=True, timeout=180, require_rules=False)
-    assert cli_mod._cmd_sync(args) == 0
-    out = capsys.readouterr().out
-    assert "redeliver-approval --agent 0xabc" in out
-
-
-def test_blackbox_sync_retries_already_member_zero_data(monkeypatch, capsys):
+def test_blackbox_sync_private_retries_join_delivery_without_resubscribing(monkeypatch):
     join_calls = []
     refresh_calls = []
     subscribe_calls = []
+    clock = [0.0]
 
     class FakeClient:
         def __init__(self, url, **_kwargs):
@@ -291,92 +142,34 @@ def test_blackbox_sync_retries_already_member_zero_data(monkeypatch, capsys):
 
         def subscribe_context_graph(self, cg_id):
             subscribe_calls.append(cg_id)
-            if len(subscribe_calls) == 1:
-                raise cli_mod.DkgError("403: not on the allowlist")
-            return {}
 
     class FakeRuleset:
-        def __init__(self, dependency_count):
-            self.dependency_count = dependency_count
-
         def counts(self):
             return {
                 "injection": 0,
                 "escalation": 0,
-                "dependency": self.dependency_count,
+                "dependency": 0,
                 "fileaccess": 0,
                 "skill": 0,
             }
 
     def fake_join(*args, **kwargs):
         join_calls.append((args, kwargs))
-        return "Join request: this node is already a member of cg."
+        delivered = len(join_calls) >= 2
+        return ("join attempted", delivered)
 
     def fake_refresh(cfg, client):
         refresh_calls.append((cfg, client))
-        return FakeRuleset(0 if len(refresh_calls) == 1 else 3)
+        rs = FakeRuleset()
+        if len(refresh_calls) >= 4:
+            rs.counts = lambda: {
+                "injection": 0, "escalation": 0, "dependency": 2,
+                "fileaccess": 0, "skill": 0,
+            }
+        return rs
 
     monkeypatch.setattr(cli_mod, "_request_join", fake_join)
     monkeypatch.setattr(cli_mod, "DkgClient", FakeClient)
-    monkeypatch.setattr(
-        cli_mod,
-        "load_blackbox_config",
-        lambda: config_mod.BlackboxConfig(context_graph_id="cg", dkg_url=constants.DEFAULT_DKG_URL),
-    )
-    monkeypatch.setattr(
-        cli_mod,
-        "_wait_for_context_graph_catchup",
-        lambda *a, **k: {
-            "ok": True,
-            "status": "done",
-            "detail": "peers 4/4, data 0, shared memory 0",
-        },
-    )
-    monkeypatch.setattr(cli_mod.ruleset, "refresh", fake_refresh)
-
-    args = argparse.Namespace(wait=True, timeout=180, require_rules=True)
-    assert cli_mod._cmd_sync(args) == 0
-    assert len(join_calls) == 2
-    assert len(subscribe_calls) == 3
-    assert len(refresh_calls) == 2
-    out = capsys.readouterr().out
-    assert "Attempting automatic join-approval handshake repair" in out
-    assert "Ruleset synced from cg after DKG join repair" in out
-
-
-def test_blackbox_sync_require_rules_waits_through_delayed_curator_approval(monkeypatch, capsys):
-    join_calls = []
-    refresh_calls = []
-    subscribe_calls = []
-
-    class FakeClient:
-        def __init__(self, url, **_kwargs):
-            self.url = url
-
-        def subscribe_context_graph(self, _cg_id):
-            subscribe_calls.append(_cg_id)
-            return {}
-
-    class FakeRuleset:
-        def __init__(self, dependency_count):
-            self.dependency_count = dependency_count
-
-        def counts(self):
-            return {
-                "injection": 0,
-                "escalation": 0,
-                "dependency": self.dependency_count,
-                "fileaccess": 0,
-                "skill": 0,
-            }
-
-    def fake_refresh(_cfg, _client):
-        refresh_calls.append(True)
-        return FakeRuleset(2 if len(refresh_calls) >= 3 else 0)
-
-    monkeypatch.setattr(cli_mod, "_request_join", lambda *a, **k: join_calls.append(True) or "join sent")
-    monkeypatch.setattr(cli_mod, "DkgClient", FakeClient)
-    monkeypatch.setattr(cli_mod.time, "sleep", lambda _seconds: None)
     monkeypatch.setattr(
         cli_mod,
         "load_blackbox_config",
@@ -386,59 +179,15 @@ def test_blackbox_sync_require_rules_waits_through_delayed_curator_approval(monk
             curator_peer_id=constants.DEFAULT_CURATOR_PEER_ID,
         ),
     )
-    monkeypatch.setattr(
-        cli_mod,
-        "_wait_for_context_graph_catchup",
-        lambda *a, **k: {
-            "ok": True,
-            "status": "done",
-            "detail": "peers 4/4, data 0, shared memory 0",
-        },
-    )
+    monkeypatch.setattr(cli_mod.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(cli_mod.time, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds))
     monkeypatch.setattr(cli_mod.ruleset, "refresh", fake_refresh)
 
     args = argparse.Namespace(wait=True, timeout=30, require_rules=True)
     assert cli_mod._cmd_sync(args) == 0
-    assert len(refresh_calls) == 3
-    assert len(join_calls) == 1
-    assert len(subscribe_calls) == 2
-    assert "approval/sync retry" in capsys.readouterr().out
-
-
-def test_blackbox_curate_redeliver_approval(monkeypatch, capsys):
-    calls = []
-
-    class FakeClient:
-        def __init__(self, url, **_kwargs):
-            self.url = url
-
-        def redeliver_join_approval(self, cg_id, agent):
-            calls.append((cg_id, agent))
-            return {"delivered": True, "peerId": "peer-1"}
-
-    monkeypatch.setattr(cli_mod, "DkgClient", FakeClient)
-    monkeypatch.setattr(
-        cli_mod,
-        "load_blackbox_config",
-        lambda: config_mod.BlackboxConfig(context_graph_id="cg", dkg_url=constants.DEFAULT_DKG_URL),
-    )
-
-    args = argparse.Namespace(agent="0xabc")
-    assert cli_mod._cmd_curate_redeliver_approval(args) == 0
-    assert calls == [("cg", "0xabc")]
-    out = capsys.readouterr().out
-    assert "Join approval re-delivered" in out
-    assert "peer-1" in out
-
-
-def test_parse_catchup_status_fields():
-    output = """
-Context Graph: umanitek/blackbox-threats-staging
-Status:        done
-Result:        peers 21/21, data 2, shared memory 3
-"""
-    assert cli_mod._parse_catchup_field(output, "Status") == "done"
-    assert cli_mod._parse_catchup_field(output, "Result") == "peers 21/21, data 2, shared memory 3"
+    assert len(join_calls) == 2
+    assert len(refresh_calls) == 4
+    assert subscribe_calls == []
 
 
 def test_blackbox_chat_wraps_bare_prompt(monkeypatch):
@@ -698,40 +447,3 @@ def test_share_sighting_forwards_candidate_fields(monkeypatch):
     objs = " ".join(x["object"] for x in shared["quads"])
     assert "ssh-private-key" in objs  # the category signature travels
     assert "read_file" in objs
-
-
-def test_auto_approve_skips_open_access_graph():
-    # Approving a join on an open CG would write the first allowedAgent entry
-    # and flip the graph invite-only for everyone else — must be a no-op.
-    approved = []
-
-    class OpenClient:
-        def list_context_graph_agents(self, cg_id):
-            return []
-
-        def list_join_requests(self, cg_id):
-            return [{"agentAddress": "0x" + "1" * 40}]
-
-        def approve_join(self, cg_id, addr):
-            approved.append(addr)
-
-    assert cli_mod._auto_approve_joins(OpenClient(), "umanitek/guardian-threats-staging") == []
-    assert approved == []
-
-
-def test_auto_approve_still_admits_on_curated_graph():
-    approved = []
-
-    class CuratedClient:
-        def list_context_graph_agents(self, cg_id):
-            return ["0x" + "c" * 40]
-
-        def list_join_requests(self, cg_id):
-            return [{"agentAddress": "0x" + "1" * 40}]
-
-        def approve_join(self, cg_id, addr):
-            approved.append(addr)
-
-    out = cli_mod._auto_approve_joins(CuratedClient(), "some/private-cg")
-    assert len(out) == 1
-    assert approved == ["0x" + "1" * 40]

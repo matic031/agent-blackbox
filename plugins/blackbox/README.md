@@ -118,27 +118,15 @@ hermes blackbox status
 hermes blackbox sync --wait
 ```
 
-A first sync can continue in the background for several minutes. The public
-graph should populate without approval. The private community graph requires
-the curator to admit a new agent.
-
-If an admitted agent remains at `data 0, shared memory 0`, run this on the
-curator:
-
-```bash
-hermes blackbox curate auto-accept --once
-hermes blackbox curate redeliver-approval --agent <agent-address>
-```
-
-Then retry on the affected agent:
+A first sync can continue in the background for several minutes. DKG requests
+membership, the curator auto-approves it, and the node keeps syncing in the
+background. To wait longer:
 
 ```bash
 hermes blackbox sync --wait --timeout 180
 ```
 
-Do not edit DKG state files or enable unauthenticated private-graph sync.
-
 ## Curators
 
-Curating reports, publishing approved threats, and managing graph membership
-are operator tasks. See the [curator guide](../../CURATOR_README.md).
+Curating reports and publishing approved threats are operator tasks. See the
+[curator guide](../../CURATOR_README.md).

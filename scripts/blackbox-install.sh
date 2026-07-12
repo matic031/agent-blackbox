@@ -406,17 +406,23 @@ graphs = [g for g in graphs if g not in legacy_graphs or g == context_graph]
 if context_graph not in graphs:
     graphs.append(context_graph)
 data["contextGraphs"] = graphs
-data["syncAgentsMeta"] = False
-# Blackbox explicitly subscribes and targets its curator. Generic per-peer
-# startup fanout only delays that catch-up behind unrelated network graphs.
+# The curator approves valid joins inside the DKG join handler. Non-curator nodes
+# carry the same setting harmlessly; DKG applies it only when the local node is
+# the graph owner. This replaces Blackbox polling/approval processes entirely.
+auto_approve = data.get("autoApproveJoinRequests")
+if not isinstance(auto_approve, list):
+    auto_approve = []
+if context_graph not in auto_approve:
+    auto_approve.append(context_graph)
+data["autoApproveJoinRequests"] = auto_approve
+# Blackbox recovery targets its curator directly. Disable generic peer-connect
+# fanout; incomplete private recovery is retried by DKG at its saved cursor.
 data["syncOnConnectEnabled"] = False
-# Large first-run base-network syncs can occupy the single worker for minutes.
-# Keep enough FIFO capacity for post-approval metadata/SWM catch-up from the curator
-# instead of dropping it behind the default two-entry queue and leaving a newly
-# admitted private-graph member permanently at 0 rows.
-data["syncGlobalMaxInflight"] = 1
-data["syncGlobalQueueLimit"] = 32
-# Retired pre-fork workaround; current DKG handles configured subscriptions.
+# Retire old Blackbox backpressure overrides. DKG owns sync scheduling,
+# admission catch-up, backpressure, and approval redelivery.
+data.pop("syncAgentsMeta", None)
+data.pop("syncGlobalMaxInflight", None)
+data.pop("syncGlobalQueueLimit", None)
 data.pop("restrictAutoSubscribeContextGraphs", None)
 data.setdefault("autoUpdate", {"enabled": False})
 data["chain"] = {
@@ -1205,9 +1211,8 @@ if current_graph in legacy_graphs:
     added.append("context_graph_id")
 defaults = {
     "mode": "audit",
-    # PUBLIC staging graph: open reads/SWM for every node, publish authority
-    # stays with the curator wallet, and Verifiable Memory publishing works
-    # (impossible on the retired private CG). TODO(launch): production graph.
+    # Private relay-backed graph with automatic membership. Every admitted
+    # agent reads/writes SWM; only the curator promotes entries to VM.
     "context_graph_id": context_graph_id,
     "sync_interval": 60,
     "report": True,

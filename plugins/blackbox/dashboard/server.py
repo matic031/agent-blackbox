@@ -30,8 +30,6 @@ logger = logging.getLogger(__name__)
 _RESCAN_INTERVAL_SEC = 5.0
 _RULESET_EMPTY_RETRY_SEC = 30.0
 _RULESET_MIN_RETRY_SEC = 5.0
-_APPROVER_POLL_SEC = 5.0
-_APPROVER_ERROR_RETRY_SEC = 15.0
 
 _STATIC_DIR = Path(__file__).resolve().parent / "static"
 _ASSETS_DIR = Path(__file__).resolve().parent / "assets"
@@ -58,28 +56,6 @@ def _sync_ruleset_once(load_config: Any, dkg_client_cls: Any, ruleset_mod: Any) 
     rs = ruleset_mod.refresh(cfg, client)
     counts = _ruleset_sync_counts(rs)
     return counts
-
-
-def _approve_joins_once(client: Any, cg_id: str) -> List[Dict[str, Any]]:
-    """Approve pending joins only for legacy private graphs.
-
-    Open Guardian graphs have an empty allowlist. Approving the first join would
-    create an allowlist and make the graph invite-only, so this must no-op there.
-    """
-    try:
-        if not client.list_context_graph_agents(cg_id):
-            return []
-    except Exception:
-        return []
-    pending = client.list_join_requests(cg_id)
-    approved: List[Dict[str, Any]] = []
-    for req in pending:
-        addr = str(req.get("agentAddress") or "").strip()
-        if not addr:
-            continue
-        client.approve_join(cg_id, addr)
-        approved.append(req)
-    return approved
 
 
 def create_app():
@@ -145,40 +121,6 @@ def create_app():
                     return
                 time.sleep(0.1)
 
-    def _approver_loop() -> None:
-        """Curator-only legacy fallback for private graphs.
-
-        Public Guardian graphs do not need join approval. ``list_join_requests``
-        is server-side curator-gated, so on a non-curator node the call errors and
-        this loop just idles — it self-selects to the curator's dashboard. On an
-        open CG (empty allowlist) it never approves: the first approval would
-        re-gate the graph for everyone (see ``_auto_approve_joins`` in cli.py)."""
-        while not _rescan_state["stop"]:
-            failed = False
-            try:
-                cfg = load_blackbox_config()
-                client = DkgClient(url=cfg.dkg_url, dkg_home=cfg.dkg_home)
-                # ``_approve_joins_once`` no-ops on open CGs (empty allowlist):
-                # approving the first join would write an ``allowedAgent`` entry
-                # and flip the DKG gates from open to invite-only. Back off when
-                # nothing was approved so open/idle graphs don't poll every 15s.
-                approved = _approve_joins_once(client, cfg.context_graph_id)
-                for req in approved:
-                    logger.info(
-                        "blackbox approver: auto-admitted %s",
-                        req.get("name") or req.get("agentAddress"),
-                    )
-            except Exception:  # not curator / node down — back off and keep idling
-                failed = True
-            # Private community joins should never wait behind the former
-            # two-minute idle backoff. Poll continuously while healthy so a
-            # fresh agent is normally admitted before its first sync retry.
-            wait = _APPROVER_ERROR_RETRY_SEC if failed else _APPROVER_POLL_SEC
-            for _ in range(int(wait * 10)):
-                if _rescan_state["stop"]:
-                    return
-                time.sleep(0.1)
-
     def _ruleset_sync_loop() -> None:
         """Keep VM/SWM threat rows syncing while the dashboard is running.
 
@@ -232,10 +174,6 @@ def create_app():
         t = threading.Thread(target=_rescan_loop, name="blackbox-rescan", daemon=True)
         t.start()
         logger.info("blackbox rescan: background thread started (interval %.1fs)", _RESCAN_INTERVAL_SEC)
-        # Curator-only auto-accept: admits every community joiner with no operator
-        # action. Self-gates via the curator-only join-requests endpoint.
-        threading.Thread(target=_approver_loop, name="blackbox-approver", daemon=True).start()
-        logger.info("blackbox approver: background auto-accept thread started")
         threading.Thread(target=_ruleset_sync_loop, name="blackbox-ruleset-sync", daemon=True).start()
         logger.info("blackbox ruleset sync: background thread started")
 

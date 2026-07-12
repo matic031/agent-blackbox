@@ -216,7 +216,7 @@ def test_seed_entries_no_publish_only_shares_full_swm(monkeypatch):
     assert client.publishes == []
 
 
-def test_setup_graph_registers_public_graph(monkeypatch):
+def test_setup_graph_registers_private_open_membership_graph(monkeypatch):
     calls = []
 
     class FakeClient:
@@ -250,11 +250,10 @@ def test_setup_graph_registers_public_graph(monkeypatch):
 
     assert cli._cmd_setup_graph(SimpleNamespace(network="base")) == 0
     create = next(call for call in calls if call[0] == "create")
-    assert create[2]["access_policy"] == 0
-    assert "allowed_agents" not in create[2]
-    assert not [call for call in calls if call[0] == "add_agent"]
+    assert create[2]["access_policy"] == 1
+    assert create[2]["allowed_agents"] == ["0x0000000000000000000000000000000000000001"]
     register = next(call for call in calls if call[0] == "register")
-    assert register[2] == {"access_policy": 0, "publish_policy": 0}
+    assert register[2] == {"access_policy": 1, "publish_policy": 0}
 
 
 # A small bumblebee-shaped catalog: one package, three malicious versions.

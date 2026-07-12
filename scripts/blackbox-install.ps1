@@ -516,17 +516,19 @@ graphs = [g for g in graphs if g not in legacy_graphs or g == context_graph]
 if context_graph not in graphs:
     graphs.append(context_graph)
 data["contextGraphs"] = graphs
-data["syncAgentsMeta"] = False
-# Blackbox explicitly subscribes and targets its curator. Generic per-peer
-# startup fanout only delays that catch-up behind unrelated network graphs.
+auto_approve = data.get("autoApproveJoinRequests")
+if not isinstance(auto_approve, list):
+    auto_approve = []
+if context_graph not in auto_approve:
+    auto_approve.append(context_graph)
+data["autoApproveJoinRequests"] = auto_approve
+# Blackbox recovery targets its curator directly. DKG retries incomplete
+# private recovery at its saved cursor without generic peer-connect fanout.
 data["syncOnConnectEnabled"] = False
-# Large first-run base-network syncs can occupy the single worker for minutes.
-# Keep enough FIFO capacity for post-approval metadata/SWM catch-up from the curator
-# instead of dropping it behind the default two-entry queue and leaving a newly
-# admitted private-graph member permanently at 0 rows.
-data["syncGlobalMaxInflight"] = 1
-data["syncGlobalQueueLimit"] = 32
-# Retired pre-fork workaround; current DKG handles configured subscriptions.
+# DKG owns sync scheduling, catch-up, backpressure, and approval delivery.
+data.pop("syncAgentsMeta", None)
+data.pop("syncGlobalMaxInflight", None)
+data.pop("syncGlobalQueueLimit", None)
 data.pop("restrictAutoSubscribeContextGraphs", None)
 data.setdefault("autoUpdate", {"enabled": False})
 data["chain"] = {
