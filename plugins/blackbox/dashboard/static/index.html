@@ -387,6 +387,31 @@
     letter-spacing: 0.01em;
   }
   .section-note { font-size: 12px; color: var(--muted); }
+  .graph-sync-note {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 7px;
+    min-height: 24px;
+  }
+  .sync-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    min-height: 24px;
+    padding: 4px 9px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    background: rgba(255,255,255,0.035);
+    color: var(--muted);
+    font-size: 11px;
+    font-weight: 650;
+    white-space: nowrap;
+  }
+  .sync-chip.ready { color: var(--mint); border-color: rgba(128,202,156,0.32); background: rgba(128,202,156,0.08); }
+  .sync-chip.pending, .sync-chip.loading { color: var(--medium); border-color: rgba(245,158,11,0.32); background: rgba(245,158,11,0.08); }
+  .sync-chip.unreachable { color: var(--critical); border-color: rgba(239,68,68,0.35); background: rgba(239,68,68,0.08); }
+  .sync-chip .delta { color: var(--mint); }
   /* Title + subtitle stacked tight; the control on the right centers against
      the pair without stretching it. */
   .section-htext { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
@@ -1420,6 +1445,7 @@
         <div class="section-htext">
           <h2>Threat graph</h2>
           <div class="section-note" id="graph-tier-note">curated by Umanitek.</div>
+          <div class="graph-sync-note" id="graph-sync-note" aria-live="polite"></div>
         </div>
         <div class="graph-head-right">
           <div class="tabs" role="tablist" aria-label="Threat graph tier">
@@ -1588,10 +1614,12 @@
   "use strict";
 
   var POLL_MS = 4000;
+  var GRAPH_PAGE_SIZE = 1000;
   var connOk = true;
   var TIERS = ["public", "community", "local"];
   var activeTier = "public";
   var graphCache = { public: null, community: null, local: null };
+  var graphNextOffset = { public: 0, community: 0 };
   var GRAPH_DETAIL_PRESETS = {
     compact: { cap: 20, focusCap: 80 },
     explore: { cap: 70, focusCap: 420 }
@@ -1608,6 +1636,8 @@
   // Latest /api/graph-status payload, so the graph renderer can read node
   // reachability when deciding "still syncing" vs a settled 0. See countSyncing.
   var lastStatus = null;
+  var graphCountSeen = { public: null, community: null, local: null };
+  var graphCountDelta = { public: 0, community: 0, local: 0 };
 
   // Findings: keep the latest fetched list so the sort toggle can re-render
   // without a network round-trip. Backend returns newest-first already.
@@ -1693,6 +1723,91 @@
     } else {
       el.textContent = fmt ? num(value) : (value == null ? 0 : value);
     }
+  }
+
+  function noteGraphCount(tier, value) {
+    var n = Number(value);
+    if (!isFinite(n)) return;
+    var prev = graphCountSeen[tier];
+    if (prev != null && n > prev) graphCountDelta[tier] += (n - prev);
+    graphCountSeen[tier] = n;
+  }
+
+  function tierProgress(tier) {
+    var p = lastStatus && lastStatus.sync_progress && lastStatus.sync_progress[tier];
+    if (p && typeof p === "object") return p;
+    var count = tier === "public"
+      ? (lastStatus && (lastStatus.curated != null ? lastStatus.curated : lastStatus.curated_threats))
+      : (lastStatus && lastStatus.community);
+    return { count: count || 0, state: count > 0 ? "ready" : "pending", label: tier === "public" ? "VM pending" : "SWM loading" };
+  }
+
+  function isTierPending(tier) {
+    var p = tierProgress(tier);
+    return p && (p.state === "pending" || p.state === "loading");
+  }
+
+  function renderGraphSyncNote(data) {
+    var el = $("graph-sync-note");
+    if (!el) return;
+    data = data || lastStatus || {};
+    var progress = data.sync_progress || {};
+    function chip(tier, fallbackLabel) {
+      var p = progress[tier] || {};
+      var state = String(p.state || "pending").toLowerCase();
+      var count = Number(p.count != null ? p.count : (tier === "public" ? data.curated : data.community)) || 0;
+      var delta = graphCountDelta[tier] > 0 ? ' <span class="delta">+' + num(graphCountDelta[tier]) + ' this session</span>' : "";
+      var label = p.label || fallbackLabel;
+      return '<span class="sync-chip ' + esc(state) + '">' + esc(label) + ': ' + num(count) + delta + '</span>';
+    }
+    var rules = progress.ruleset_total != null ? Number(progress.ruleset_total) : null;
+    var age = progress.age_seconds != null ? Number(progress.age_seconds) : null;
+    var parts = [
+      chip("public", "VM pending"),
+      chip("community", "SWM loading")
+    ];
+    if (rules != null && isFinite(rules)) parts.push('<span class="sync-chip ready">local rules: ' + num(rules) + '</span>');
+    if (age != null && isFinite(age)) parts.push('<span class="sync-chip">refreshed ' + fmtAgo(Date.now() - age * 1000) + '</span>');
+    el.innerHTML = parts.join("");
+  }
+
+  function graphTotalForTier(tier) {
+    var data = graphCache[tier];
+    if (data && data.total != null) return Number(data.total) || 0;
+    if (lastStatus) {
+      if (tier === "public") return Number(lastStatus.curated != null ? lastStatus.curated : lastStatus.curated_threats) || 0;
+      if (tier === "community") return Number(lastStatus.community) || 0;
+    }
+    return data != null ? asList(data).length : null;
+  }
+
+  function mergeGraphPage(tier, page) {
+    if (!page || !Array.isArray(page.threats)) return;
+    var offset = Number(page.offset || 0);
+    if (!graphCache[tier] || offset === 0) {
+      graphCache[tier] = page;
+    } else {
+      var current = asList(graphCache[tier]);
+      var seen = {};
+      current.forEach(function (t) { if (t && t.identifier) seen[t.identifier] = true; });
+      page.threats.forEach(function (t) {
+        if (!t || !t.identifier || seen[t.identifier]) return;
+        current.push(t);
+        seen[t.identifier] = true;
+      });
+      graphCache[tier].threats = current;
+      graphCache[tier].total = page.total;
+      graphCache[tier].partial = current.length < (Number(page.total) || current.length);
+    }
+    var loaded = asList(graphCache[tier]).length;
+    var total = Number(graphCache[tier].total || loaded);
+    graphNextOffset[tier] = loaded < total ? loaded : 0;
+  }
+
+  function graphPollUrl(tier) {
+    var offset = graphNextOffset[tier] || 0;
+    return "/api/graph?tier=" + encodeURIComponent(tier) +
+      "&limit=" + GRAPH_PAGE_SIZE + "&offset=" + offset;
   }
 
   function setBanner(down) {
@@ -3165,8 +3280,14 @@
       });
       var count = $("graph-count");
       if (count) {
-        count.style.display = meta.focusLabel ? "" : "none";
-        count.innerHTML = meta.focusLabel ? '<strong>' + esc(meta.focusLabel) + '</strong>' : "";
+        var data = graphCache[activeTier];
+        var loaded = data ? asList(data).length : 0;
+        var total = data && data.total != null ? Number(data.total) || loaded : loaded;
+        var progress = total > loaded ? "Loaded " + num(loaded) + " of " + num(total) : "";
+        count.style.display = (meta.focusLabel || progress) ? "" : "none";
+        count.innerHTML =
+          (meta.focusLabel ? '<strong>' + esc(meta.focusLabel) + '</strong>' : "") +
+          (progress ? '<span>' + esc(progress) + '</span>' : "");
       }
     }
 
@@ -3380,7 +3501,7 @@
         else lel.textContent = localCache.threatCount || 0;
         return;
       }
-      setCount("count-" + t, graphCache[t] != null ? asList(graphCache[t]).length : null, "tab:" + t, false);
+      setCount("count-" + t, graphTotalForTier(t), "tab:" + t, false);
     });
 
     // Every tier — including local — renders through the one force-graph stage.
@@ -3400,9 +3521,12 @@
     // rather than the "nothing here" message.
     var hasContent = isLocal ? ((data.sessions || []).length > 0) : (asList(data).length > 0);
     if (!hasContent) {
-      if (!isLocal && countSyncing("tab:" + activeTier, asList(data).length)) {
-        showGraphEmpty('<span class="bb-loader"></span>Syncing ' +
-          (TIER_LABEL[activeTier] || "graph").toLowerCase() + " from the network&hellip;");
+      if (!isLocal && isTierPending(activeTier)) {
+        var p = tierProgress(activeTier);
+        var pendingText = activeTier === "public"
+          ? "Public VM is still loading or has no usable curated rows yet."
+          : "Community SWM is still loading from the network.";
+        showGraphEmpty('<span class="bb-loader"></span><strong>' + esc(p.label || "Syncing") + '</strong>' + pendingText);
       } else {
         showGraphEmpty("<strong>Nothing to show</strong>" + (TIER_EMPTY[activeTier] || "No threats yet."));
       }
@@ -3923,8 +4047,11 @@
     // Render every available VM/SWM count immediately, including 0. Polling
     // replaces these numbers as catch-up adds entries; loaders are reserved for
     // the brief window before the first payload.
+    noteGraphCount("public", curated);
+    noteGraphCount("community", data.community);
     setCount("stat-threats", curated, "stat:curated", true);
     setCount("stat-community", data.community, "stat:community", true);
+    renderGraphSyncNote(data);
 
     // header status pills: node reachability + enforcement mode
     var nodePill = $("pill-node");
@@ -3967,8 +4094,8 @@
       getJSON("/api/graph-status"),
       getJSON("/api/reports"),
       getJSON("/api/agents"),
-      getJSON("/api/graph?tier=public"),
-      getJSON("/api/graph?tier=community"),
+      getJSON(graphPollUrl("public")),
+      getJSON(graphPollUrl("community")),
       getJSON("/api/local-activity")
     ]).then(function (res) {
       var anyOk = res.some(function (r) { return r.status === "fulfilled"; });
@@ -3979,8 +4106,8 @@
       if (res[2].status === "fulfilled") renderReports(res[2].value);
       if (res[3].status === "fulfilled") renderAgents(res[3].value);
       var anyGraph = false;
-      if (res[4].status === "fulfilled") { graphCache.public = res[4].value; anyGraph = true; }
-      if (res[5].status === "fulfilled") { graphCache.community = res[5].value; anyGraph = true; }
+      if (res[4].status === "fulfilled") { mergeGraphPage("public", res[4].value); anyGraph = true; }
+      if (res[5].status === "fulfilled") { mergeGraphPage("community", res[5].value); anyGraph = true; }
       if (res[6].status === "fulfilled") { localCache = res[6].value; anyGraph = true; }
       if (anyGraph) renderGraphTab();
 

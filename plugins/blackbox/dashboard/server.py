@@ -435,6 +435,17 @@ def create_app():
 
         g = _swr("graph-status", _node_counts,
                  {"node_reachable": False, "curated": 0, "sightings": 0})
+        total_rules = sum(int(v or 0) for v in counts.values())
+        public_state = (
+            "ready" if int(g["curated"] or 0) > 0
+            else "pending" if g["node_reachable"]
+            else "unreachable"
+        )
+        community_state = (
+            "ready" if int(community or 0) > 0
+            else "loading" if g["node_reachable"]
+            else "unreachable"
+        )
         return {
             "mode": cfg.mode,
             "context_graph_id": cfg.context_graph_id,
@@ -449,6 +460,20 @@ def create_app():
             "community": community,
             "sightings": g["sightings"],
             "findings_logged": audit.count_findings(),
+            "sync_progress": {
+                "public": {
+                    "count": int(g["curated"] or 0),
+                    "state": public_state,
+                    "label": "VM synced" if public_state == "ready" else "VM pending",
+                },
+                "community": {
+                    "count": int(community or 0),
+                    "state": community_state,
+                    "label": "SWM synced" if community_state == "ready" else "SWM loading",
+                },
+                "ruleset_total": total_rules,
+                "age_seconds": max(0, int(time.time() - float(rs.synced_at or 0))) if rs.synced_at else None,
+            },
         }
 
     @app.get("/api/agents")
@@ -746,7 +771,11 @@ def create_app():
         return tier, views[tier]
 
     @app.get("/api/graph")
-    def graph(tier: str = Query("public")) -> Any:
+    def graph(
+        tier: str = Query("public"),
+        limit: int = Query(1000, ge=1, le=10000),
+        offset: int = Query(0, ge=0),
+    ) -> Any:
         """Threats from one graph tier: ``public`` | ``community`` | ``local``."""
         cfg = load_blackbox_config()
         tier, view = _tier_view(tier)
@@ -767,7 +796,7 @@ def create_app():
         # shared-working-memory view times out on a large pool.
         if tier == "community":
             rs = ruleset.get(cfg)
-            threats = [
+            all_threats = [
                 {
                     "identifier": r.get("identifier"),
                     "category": cat,
@@ -777,7 +806,14 @@ def create_app():
                 for cat, r in rs.iter_rules()
                 if r.get("source") == "community"
             ]
-            return {"tier": tier, "threats": threats}
+            return {
+                "tier": tier,
+                "threats": all_threats[offset:offset + limit],
+                "total": len(all_threats),
+                "offset": offset,
+                "limit": limit,
+                "partial": offset + limit < len(all_threats),
+            }
 
         # Public/local tiers read a live node view; served stale-while-revalidate.
         def _load() -> Any:
