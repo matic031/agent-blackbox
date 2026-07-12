@@ -15,7 +15,7 @@
 
 Agent Blackbox is a security plugin that lives inside your AI agent and checks every action it takes - prompts, shell commands, file access, package installs, skills - against a shared threat graph on the OriginTrail Decentralized Knowledge Graph (DKG). A threat discovered by one agent protects all of them: when the graph learns about an attack, every protected agent picks it up on its next sync. It flags by default; blocking is one config switch away.
 
-Blackbox runs its own local DKG node by default at `http://127.0.0.1:9320` with state under `~/.hermes/blackbox/dkg`. That is intentional: it avoids touching a user's existing DKG CLI/node at the default `~/.dkg` / `9200`. The dashboard is separate and still runs on `9700`.
+Blackbox runs its own local DKG node at `http://127.0.0.1:9320`. Its managed DKG checkout and state live inside the Agent Blackbox checkout under `dkg/` and `.dkg/`, so it never touches another DKG installation. The dashboard runs separately on `9700`.
 
 ## Install
 
@@ -43,11 +43,13 @@ mkdir -p ~/.local/bin
 ln -sf "$PWD/venv/bin/hermes" ~/.local/bin/hermes
 
 # 4. Local DKG node (required for first-run protection)
-npm i -g @origintrail-official/dkg
-export BLACKBOX_DKG_HOME="$HOME/.hermes/blackbox/dkg"
+git clone --depth 1 -b feat/blackbox https://github.com/matic031/dkg.git dkg
+(cd dkg && corepack pnpm install --frozen-lockfile && corepack pnpm run build:runtime:packages)
+export BLACKBOX_DKG_HOME="$PWD/.dkg"
+export BLACKBOX_DKG_BIN="$PWD/dkg/node_modules/.bin/dkg"
 export BLACKBOX_DKG_PORT=9320
 export BLACKBOX_DKG_DAEMON_URL="http://127.0.0.1:$BLACKBOX_DKG_PORT"
-DKG_HOME="$BLACKBOX_DKG_HOME" dkg hermes setup --network mainnet-base \
+DKG_HOME="$BLACKBOX_DKG_HOME" "$BLACKBOX_DKG_BIN" hermes setup --network mainnet-base \
   --port "$BLACKBOX_DKG_PORT" \
   --daemon-url "$BLACKBOX_DKG_DAEMON_URL" \
   --no-fund   # reading the public graph is free
@@ -201,7 +203,7 @@ Set under `plugins.entries.blackbox.*` in `config.yaml`.
 |-----|---------|---------|
 | `mode` | `audit` | `audit` or `block` |
 | `dkg_url` | `http://127.0.0.1:9320` | Blackbox-managed local DKG node |
-| `dkg_home` | `~/.hermes/blackbox/dkg` | isolated DKG node config, token, pid, and cache |
+| `dkg_home` | `<agent-guardian>/.dkg` | isolated DKG node config, token, pid, and cache |
 | `context_graph_id` | `umanitek/guardian-threats-staging` | staging Guardian threat graph until production is seeded |
 | `daily_report_limit` | `9999` | max threat reports sent to the community graph per day |
 | `report_min_severity` | `high` | minimum severity for heuristic candidates to be flagged and reported |

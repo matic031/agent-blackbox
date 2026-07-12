@@ -103,8 +103,9 @@ def test_unix_installer_uses_isolated_blackbox_dkg_node() -> None:
 
     assert 'BLACKBOX_DKG_PORT="${BLACKBOX_DKG_PORT:-9320}"' in text
     assert 'BLACKBOX_DKG_STORE_PORT="${BLACKBOX_DKG_STORE_PORT:-7879}"' in text
-    assert 'BLACKBOX_DKG_HOME="${BLACKBOX_DKG_HOME:-$BLACKBOX_HOME/dkg}"' in text
-    assert 'BLACKBOX_DKG_CLI_DIR="${BLACKBOX_DKG_CLI_DIR:-$BLACKBOX_HOME/dkg-cli}"' in text
+    assert 'BLACKBOX_INSTALL_ROOT="${BLACKBOX_INSTALL_DIR:-$HOME/agent-guardian}"' in text
+    assert 'BLACKBOX_DKG_HOME="${BLACKBOX_DKG_HOME:-$BLACKBOX_INSTALL_ROOT/.dkg}"' in text
+    assert 'BLACKBOX_DKG_CLI_DIR="${BLACKBOX_DKG_CLI_DIR:-$BLACKBOX_INSTALL_ROOT/dkg}"' in text
     assert 'BLACKBOX_DKG_BIN="${BLACKBOX_DKG_BIN:-$BLACKBOX_DKG_CLI_DIR/node_modules/.bin/dkg}"' in text
     assert 'BLACKBOX_DKG_REPO_URL="${BLACKBOX_DKG_REPO_URL:-https://github.com/matic031/dkg.git}"' in text
     assert 'BLACKBOX_DKG_REPO_BRANCH="${BLACKBOX_DKG_REPO_BRANCH:-feat/blackbox}"' in text
@@ -172,6 +173,8 @@ def test_windows_installer_uses_isolated_blackbox_dkg_node() -> None:
     assert "$DkgStorePort" in text and "7879" in text
     assert '$DkgHome     = if ($env:BLACKBOX_DKG_HOME)' in text
     assert '$DkgCliDir   = if ($env:BLACKBOX_DKG_CLI_DIR)' in text
+    assert 'Join-Path $DefaultRepoDir ".dkg"' in text
+    assert 'Join-Path $DefaultRepoDir "dkg"' in text
     assert '$DkgBin      = if ($env:BLACKBOX_DKG_BIN)' in text
     assert '$DkgRepoUrl  = if ($env:BLACKBOX_DKG_REPO_URL)' in text
     assert '$DkgRepoBranch = if ($env:BLACKBOX_DKG_REPO_BRANCH)' in text

@@ -23,6 +23,19 @@ set -euo pipefail
 REPO_URL="${BLACKBOX_REPO_URL:-https://github.com/matic031/agent-guardian.git}"
 REPO_BRANCH="${BLACKBOX_REPO_BRANCH:-feat/guardian}"
 HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
+# Keep the managed DKG checkout and node state inside the Agent Guardian
+# checkout.  For a local script this is the current repository; for curl | bash
+# it is the checkout the installer creates at BLACKBOX_INSTALL_DIR.
+BLACKBOX_INSTALL_ROOT="${BLACKBOX_INSTALL_DIR:-$HOME/agent-guardian}"
+BLACKBOX_INSTALL_SCRIPT="${BASH_SOURCE[0]:-}"
+if [ -n "$BLACKBOX_INSTALL_SCRIPT" ] && [ -f "$BLACKBOX_INSTALL_SCRIPT" ]; then
+    _blackbox_script_root="$(cd "$(dirname "$BLACKBOX_INSTALL_SCRIPT")/.." && pwd)"
+    if [ -f "$_blackbox_script_root/pyproject.toml" ] &&
+        [ -d "$_blackbox_script_root/plugins/blackbox" ]; then
+        BLACKBOX_INSTALL_ROOT="$_blackbox_script_root"
+    fi
+    unset _blackbox_script_root
+fi
 DKG_NETWORK="${BLACKBOX_DKG_NETWORK:-mainnet-base}"   # a valid dkg mainnet (mainnet-base | mainnet-gnosis). Base uses ETH for gas. No testnet.
 BLACKBOX_HOME="${BLACKBOX_HOME:-$HERMES_HOME/blackbox}"
 BLACKBOX_DKG_PORT_EXPLICIT=false
@@ -35,8 +48,8 @@ if [ -n "${BLACKBOX_DKG_DAEMON_URL+x}" ] || [ -n "${BLACKBOX_DKG_URL+x}" ]; then
 fi
 BLACKBOX_DKG_PORT="${BLACKBOX_DKG_PORT:-9320}"
 BLACKBOX_DKG_STORE_PORT="${BLACKBOX_DKG_STORE_PORT:-7879}"
-BLACKBOX_DKG_HOME="${BLACKBOX_DKG_HOME:-$BLACKBOX_HOME/dkg}"
-BLACKBOX_DKG_CLI_DIR="${BLACKBOX_DKG_CLI_DIR:-$BLACKBOX_HOME/dkg-cli}"
+BLACKBOX_DKG_HOME="${BLACKBOX_DKG_HOME:-$BLACKBOX_INSTALL_ROOT/.dkg}"
+BLACKBOX_DKG_CLI_DIR="${BLACKBOX_DKG_CLI_DIR:-$BLACKBOX_INSTALL_ROOT/dkg}"
 BLACKBOX_DKG_BIN="${BLACKBOX_DKG_BIN:-$BLACKBOX_DKG_CLI_DIR/node_modules/.bin/dkg}"
 BLACKBOX_DKG_REPO_URL="${BLACKBOX_DKG_REPO_URL:-https://github.com/matic031/dkg.git}"
 BLACKBOX_DKG_REPO_BRANCH="${BLACKBOX_DKG_REPO_BRANCH:-feat/blackbox}"
@@ -454,7 +467,7 @@ resolve_repo() {
         err "git is required to download Blackbox. Install git and re-run."
         exit 1
     fi
-    REPO_DIR="${BLACKBOX_INSTALL_DIR:-$HOME/agent-guardian}"
+    REPO_DIR="$BLACKBOX_INSTALL_ROOT"
     if [ -d "$REPO_DIR/.git" ]; then
         step "Updating existing clone at $REPO_DIR"
         git -C "$REPO_DIR" fetch --depth 1 origin "$REPO_BRANCH" >/dev/null 2>&1 || true

@@ -36,14 +36,24 @@ $ProgressPreference = "SilentlyContinue"
 $RepoUrl     = if ($env:BLACKBOX_REPO_URL)    { $env:BLACKBOX_REPO_URL }    else { "https://github.com/matic031/agent-guardian.git" }
 $RepoBranch  = if ($env:BLACKBOX_REPO_BRANCH) { $env:BLACKBOX_REPO_BRANCH } else { "feat/guardian" }
 $HermesHome  = if ($env:HERMES_HOME)          { $env:HERMES_HOME }          else { "$env:USERPROFILE\.hermes" }
+# Keep the managed DKG checkout and state in the Agent Guardian checkout. When
+# invoked from a clone, use that clone; when piped through iex, use the checkout
+# Resolve-Repo creates at BLACKBOX_INSTALL_DIR.
+$DefaultRepoDir = if ($env:BLACKBOX_INSTALL_DIR) { $env:BLACKBOX_INSTALL_DIR } else { "$env:USERPROFILE\agent-guardian" }
+if ($PSCommandPath) {
+    $candidateRepoDir = Split-Path -Parent (Split-Path -Parent $PSCommandPath)
+    if ((Test-Path "$candidateRepoDir\pyproject.toml") -and (Test-Path "$candidateRepoDir\plugins\blackbox")) {
+        $DefaultRepoDir = $candidateRepoDir
+    }
+}
 $BlackboxHome = if ($env:BLACKBOX_HOME)       { $env:BLACKBOX_HOME }        else { Join-Path $HermesHome "blackbox" }
 $DkgPortExplicit = [bool]$env:BLACKBOX_DKG_PORT
 $DkgStorePortExplicit = [bool]$env:BLACKBOX_DKG_STORE_PORT
 $DkgUrlExplicit = [bool]($env:BLACKBOX_DKG_DAEMON_URL -or $env:BLACKBOX_DKG_URL)
 $DkgPort     = if ($env:BLACKBOX_DKG_PORT)    { [int]$env:BLACKBOX_DKG_PORT } else { 9320 }
 $DkgStorePort = if ($env:BLACKBOX_DKG_STORE_PORT) { [int]$env:BLACKBOX_DKG_STORE_PORT } else { 7879 }
-$DkgHome     = if ($env:BLACKBOX_DKG_HOME)    { $env:BLACKBOX_DKG_HOME }    else { Join-Path $BlackboxHome "dkg" }
-$DkgCliDir   = if ($env:BLACKBOX_DKG_CLI_DIR) { $env:BLACKBOX_DKG_CLI_DIR } else { Join-Path $BlackboxHome "dkg-cli" }
+$DkgHome     = if ($env:BLACKBOX_DKG_HOME)    { $env:BLACKBOX_DKG_HOME }    else { Join-Path $DefaultRepoDir ".dkg" }
+$DkgCliDir   = if ($env:BLACKBOX_DKG_CLI_DIR) { $env:BLACKBOX_DKG_CLI_DIR } else { Join-Path $DefaultRepoDir "dkg" }
 $DkgBin      = if ($env:BLACKBOX_DKG_BIN)     { $env:BLACKBOX_DKG_BIN }     else { Join-Path $DkgCliDir "node_modules\.bin\dkg.cmd" }
 $DkgRepoUrl  = if ($env:BLACKBOX_DKG_REPO_URL) { $env:BLACKBOX_DKG_REPO_URL } else { "https://github.com/matic031/dkg.git" }
 $DkgRepoBranch = if ($env:BLACKBOX_DKG_REPO_BRANCH) { $env:BLACKBOX_DKG_REPO_BRANCH } else { "feat/blackbox" }
@@ -512,7 +522,7 @@ function Resolve-Repo {
         Write-Err2 "git is required to download Blackbox. Install git and re-run."
         exit 1
     }
-    $script:RepoDir = if ($env:BLACKBOX_INSTALL_DIR) { $env:BLACKBOX_INSTALL_DIR } else { "$env:USERPROFILE\agent-guardian" }
+    $script:RepoDir = $DefaultRepoDir
     if (Test-Path "$RepoDir\.git") {
         Write-Step "Updating existing clone at $RepoDir"
         git -C $RepoDir fetch --depth 1 origin $RepoBranch 2>$null
