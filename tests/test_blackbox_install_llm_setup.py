@@ -232,6 +232,7 @@ def test_dkg_config_migration_removes_only_unselected_legacy_graphs(tmp_path: Pa
         "umanitek/blackbox-threats-staging",
     ]
     assert migrated["syncAgentsMeta"] is False
+    assert migrated["syncOnConnectEnabled"] is False
     assert migrated["syncGlobalMaxInflight"] == 1
     assert migrated["syncGlobalQueueLimit"] == 32
     assert "restrictAutoSubscribeContextGraphs" not in migrated
@@ -313,7 +314,10 @@ def test_installers_apply_relay_safe_serial_swm_recovery_defaults() -> None:
         assert "DKG_SYNC_PAGE_TIMEOUT_MS" in text and "180000" in text
         assert "DKG_SYNC_TOTAL_TIMEOUT_MS" in text and "1200000" in text
         assert "DKG_SYNC_MIN_GRAPH_BUDGET_MS" in text and "120000" in text
+        assert "DKG_SYNC_RESPONDER_PER_SNAPSHOT_ROW_LIMIT" in text and "500000" in text
+        assert "DKG_SYNC_RESPONDER_GLOBAL_SNAPSHOT_ROW_LIMIT" in text and "1500000" in text
         assert 'data["syncAgentsMeta"] = False' in text
+        assert 'data["syncOnConnectEnabled"] = False' in text
         assert 'data["syncGlobalMaxInflight"] = 1' in text
         assert 'data["syncGlobalQueueLimit"] = 32' in text
         assert 'data.pop("restrictAutoSubscribeContextGraphs", None)' in text

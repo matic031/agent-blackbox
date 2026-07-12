@@ -116,6 +116,8 @@ blackbox_dkg() {
     DKG_SYNC_PAGE_TIMEOUT_MS="${DKG_SYNC_PAGE_TIMEOUT_MS:-180000}" \
     DKG_SYNC_TOTAL_TIMEOUT_MS="${DKG_SYNC_TOTAL_TIMEOUT_MS:-1200000}" \
     DKG_SYNC_MIN_GRAPH_BUDGET_MS="${DKG_SYNC_MIN_GRAPH_BUDGET_MS:-120000}" \
+    DKG_SYNC_RESPONDER_PER_SNAPSHOT_ROW_LIMIT="${DKG_SYNC_RESPONDER_PER_SNAPSHOT_ROW_LIMIT:-500000}" \
+    DKG_SYNC_RESPONDER_GLOBAL_SNAPSHOT_ROW_LIMIT="${DKG_SYNC_RESPONDER_GLOBAL_SNAPSHOT_ROW_LIMIT:-1500000}" \
     "$BLACKBOX_DKG_BIN" "$@"
 }
 
@@ -351,6 +353,9 @@ if context_graph not in graphs:
     graphs.append(context_graph)
 data["contextGraphs"] = graphs
 data["syncAgentsMeta"] = False
+# Blackbox explicitly subscribes and targets its curator. Generic per-peer
+# startup fanout only delays that catch-up behind unrelated network graphs.
+data["syncOnConnectEnabled"] = False
 # Large first-run base-network syncs can occupy the single worker for minutes.
 # Keep enough FIFO capacity for post-approval metadata/SWM catch-up from the curator
 # instead of dropping it behind the default two-entry queue and leaving a newly
