@@ -1668,20 +1668,16 @@
   }
 
   // ---- Sync-aware counts -------------------------------------------------
-  // A graph tier's count shows a loader (not a bare 0) while it's still being
-  // caught up from the network. It's "syncing" when nothing has been fetched
-  // yet, or when the count is 0, the node is reachable, and we've never seen
-  // data for this source — i.e. a fresh node mid-sync. Once any positive count
-  // lands we latch that source, so a later genuine emptying shows "0" instead
-  // of spinning forever, and an unreachable node shows its last-known value
-  // (the offline pill already explains that case).
+  // A graph tier shows a loader only until its first API payload arrives. An
+  // empty successful payload is a real current value, even while background
+  // catch-up may later make it positive. Treating every reachable zero as
+  // "syncing" made a legitimately empty Public/VM graph spin forever.
   var LOADER_HTML = '<span class="bb-loader" role="status" aria-label="Syncing"></span>';
   var loaderLatch = {};
   function countSyncing(key, value) {
     if (value == null) return true;
     if (Number(value) > 0) { loaderLatch[key] = true; return false; }
-    if (loaderLatch[key]) return false;
-    return !(lastStatus && lastStatus.node_reachable === false);
+    return false;
   }
   // Render a count element as either the loader or the number. fmt adds
   // thousands separators (stat cards); tab chips stay compact/raw. Leaves an
@@ -3924,8 +3920,9 @@
     var interval = data.sync_interval != null ? data.sync_interval : data.syncInterval;
     var lastSync = data.last_sync != null ? data.last_sync : data.lastSync;
 
-    // Threats synced (curated VM count) and Community pool (SWM ruleset count)
-    // read a loader while a fresh node is still catching them up, not a bare 0.
+    // Render every available VM/SWM count immediately, including 0. Polling
+    // replaces these numbers as catch-up adds entries; loaders are reserved for
+    // the brief window before the first payload.
     setCount("stat-threats", curated, "stat:curated", true);
     setCount("stat-community", data.community, "stat:community", true);
 

@@ -90,6 +90,22 @@ def test_dashboard_approver_still_admits_legacy_private_graph():
     assert approved == ["0x" + "1" * 40]
 
 
+def test_dashboard_zero_graph_count_settles_after_first_payload():
+    html = (Path(server.__file__).parent / "static" / "index.html").read_text(
+        encoding="utf-8"
+    )
+
+    assert "if (value == null) return true;" in html
+    assert "Treating every reachable zero" in html
+    assert "return !(lastStatus && lastStatus.node_reachable === false);" not in html
+
+
+def test_dashboard_retries_empty_sync_and_join_approval_promptly():
+    assert server._RULESET_EMPTY_RETRY_SEC <= 30
+    assert server._APPROVER_POLL_SEC <= 5
+    assert server._APPROVER_ERROR_RETRY_SEC < 30
+
+
 def test_blackbox_dashboard_chat_starts_session(monkeypatch):
     calls = []
 

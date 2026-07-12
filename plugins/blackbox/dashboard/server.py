@@ -30,6 +30,8 @@ logger = logging.getLogger(__name__)
 _RESCAN_INTERVAL_SEC = 5.0
 _RULESET_EMPTY_RETRY_SEC = 30.0
 _RULESET_MIN_RETRY_SEC = 5.0
+_APPROVER_POLL_SEC = 5.0
+_APPROVER_ERROR_RETRY_SEC = 15.0
 
 _STATIC_DIR = Path(__file__).resolve().parent / "static"
 _ASSETS_DIR = Path(__file__).resolve().parent / "assets"
@@ -151,8 +153,8 @@ def create_app():
         this loop just idles — it self-selects to the curator's dashboard. On an
         open CG (empty allowlist) it never approves: the first approval would
         re-gate the graph for everyone (see ``_auto_approve_joins`` in cli.py)."""
-        idle = 0
         while not _rescan_state["stop"]:
+            failed = False
             try:
                 cfg = load_blackbox_config()
                 client = DkgClient(url=cfg.dkg_url, dkg_home=cfg.dkg_home)
@@ -161,15 +163,17 @@ def create_app():
                 # and flip the DKG gates from open to invite-only. Back off when
                 # nothing was approved so open/idle graphs don't poll every 15s.
                 approved = _approve_joins_once(client, cfg.context_graph_id)
-                idle = 0 if approved else idle + 1
                 for req in approved:
                     logger.info(
                         "blackbox approver: auto-admitted %s",
                         req.get("name") or req.get("agentAddress"),
                     )
             except Exception:  # not curator / node down — back off and keep idling
-                idle += 1
-            wait = 15 if idle < 3 else 120
+                failed = True
+            # Private community joins should never wait behind the former
+            # two-minute idle backoff. Poll continuously while healthy so a
+            # fresh agent is normally admitted before its first sync retry.
+            wait = _APPROVER_ERROR_RETRY_SEC if failed else _APPROVER_POLL_SEC
             for _ in range(int(wait * 10)):
                 if _rescan_state["stop"]:
                     return
