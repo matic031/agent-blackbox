@@ -1,10 +1,91 @@
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
 
 from plugins.blackbox import attach
 from plugins.blackbox.dashboard import server
+
+
+def test_dashboard_public_graph_uses_vm_verified_ruleset_rows(monkeypatch):
+    from plugins.blackbox import audit, config, dkg_client, ruleset
+
+    cfg = SimpleNamespace(
+        mode="audit",
+        context_graph_id="umanitek/blackbox-threats-staging",
+        dkg_url="http://127.0.0.1:9320",
+        dkg_home="/tmp/blackbox-dkg",
+        dkg_bin="/tmp/dkg",
+        sync_interval=60,
+    )
+
+    class FakeRuleset:
+        synced_at = 123.0
+
+        def counts(self):
+            return {"injection": 1, "dependency": 2}
+
+        def source_count(self, source):
+            return {"public": 2, "community": 1}.get(source, 0)
+
+        def iter_rules(self):
+            yield "dependency", {
+                "identifier": "dep:npm:verified-one@1.0.0",
+                "severity": "critical",
+                "name": "Verified one",
+                "source": "public",
+            }
+            yield "dependency", {
+                "identifier": "dep:npm:verified-two@2.0.0",
+                "severity": "high",
+                "name": "Verified two",
+                "source": "public",
+            }
+            yield "injection", {
+                "identifier": "injection:community-only",
+                "severity": "medium",
+                "name": "Community only",
+                "source": "community",
+            }
+
+    fake_ruleset = FakeRuleset()
+    monkeypatch.setattr(config, "load_blackbox_config", lambda: cfg)
+    monkeypatch.setattr(ruleset, "get", lambda _cfg=None: fake_ruleset)
+    monkeypatch.setattr(audit, "count_findings", lambda: 0)
+    monkeypatch.setattr(dkg_client.DkgClient, "reachable", lambda self, timeout=None: False)
+    monkeypatch.setattr(
+        dkg_client.DkgClient,
+        "query",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("public dashboard rows must not query full threats directly from VM")
+        ),
+    )
+
+    client = TestClient(server.create_app())
+
+    status = client.get("/api/graph-status").json()
+    assert status["curated"] == 2
+    assert status["sync_progress"]["public"] == {
+        "count": 2,
+        "state": "ready",
+        "label": "VM synced",
+    }
+
+    public = client.get("/api/graph?tier=public&limit=1&offset=1").json()
+    assert public == {
+        "tier": "public",
+        "threats": [{
+            "identifier": "dep:npm:verified-two@2.0.0",
+            "category": "dependency",
+            "severity": "high",
+            "name": "Verified two",
+        }],
+        "total": 2,
+        "offset": 1,
+        "limit": 1,
+        "partial": False,
+    }
 
 
 def test_ruleset_sync_once_refreshes_without_directly_requeueing_catchup():

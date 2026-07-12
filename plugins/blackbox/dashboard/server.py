@@ -7,9 +7,9 @@ Routes:
 * ``GET /api/graph-status`` → curated threat counts + last sync + ruleset counts.
 * ``GET /api/reports``      → recent outbound sightings from the community graph.
 * ``GET /api/agents``       → distinct threat reporters + this node's own agent.
-* ``GET /api/graph``        → threats per tier: ``public`` (verifiable-memory,
-  the curated Umanitek threat graph), ``community`` (shared-working-memory,
-  the community pool), ``local`` (working-memory, this node's own graph).
+* ``GET /api/graph``        → threats per tier: ``public`` (SWM rows verified
+  by verifiable-memory proofs), ``community`` (unverified shared-working-memory
+  rows), ``local`` (working-memory, this node's own graph).
 
 FastAPI/uvicorn come from the hermes ``[web]`` extra, imported lazily. Loopback only.
 """
@@ -411,11 +411,14 @@ def create_app():
         counts = rs.counts()
         # Community + sightings come from the synced ruleset cache, NOT the
         # shared-working-memory view, which does O(slice) trust work and times
-        # out (HTTP 500) on a large pool.
+        # out (HTTP 500) on a large pool. Public uses the same cache because VM
+        # stores compact CurationProof anchors while the full threat rows remain
+        # in SWM; ruleset.refresh has already verified and promoted those rows.
+        public = rs.source_count("public")
         community = rs.source_count("community")
 
-        # curated + sightings + liveness are the only node-dependent bits left.
-        # Serve them stale-while-revalidate and skip them when the node is down.
+        # Sightings + liveness are the only node-dependent bits left. Serve them
+        # stale-while-revalidate and skip them when the node is down.
         def _node_counts() -> Any:
             # None (not {}) when unreachable so _swr keeps the default and
             # retries next poll instead of caching "down" for the whole TTL.
@@ -424,20 +427,14 @@ def create_app():
             client = DkgClient(url=cfg.dkg_url, dkg_home=cfg.dkg_home)
             return {
                 "node_reachable": True,
-                "curated": _count_query(
-                    client,
-                    cfg,
-                    "SELECT (COUNT(DISTINCT ?t) AS ?n) WHERE { ?t g:curated \"true\" . }",
-                    constants.VIEW_VERIFIABLE_MEMORY,
-                ),
                 "sightings": ruleset.community_report_count(client, cfg),
             }
 
         g = _swr("graph-status", _node_counts,
-                 {"node_reachable": False, "curated": 0, "sightings": 0})
+                 {"node_reachable": False, "sightings": 0})
         total_rules = sum(int(v or 0) for v in counts.values())
         public_state = (
-            "ready" if int(g["curated"] or 0) > 0
+            "ready" if int(public or 0) > 0
             else "pending" if g["node_reachable"]
             else "unreachable"
         )
@@ -456,13 +453,13 @@ def create_app():
             "sync_interval": cfg.sync_interval,
             "last_sync": rs.synced_at,
             "ruleset": counts,
-            "curated": g["curated"],
+            "curated": public,
             "community": community,
             "sightings": g["sightings"],
             "findings_logged": audit.count_findings(),
             "sync_progress": {
                 "public": {
-                    "count": int(g["curated"] or 0),
+                    "count": int(public or 0),
                     "state": public_state,
                     "label": "VM synced" if public_state == "ready" else "VM pending",
                 },
@@ -792,9 +789,10 @@ def create_app():
                 "ioc": "ioc",
             }.get(prefix, "other")
 
-        # Community tab: serve from the synced ruleset cache; the
-        # shared-working-memory view times out on a large pool.
-        if tier == "community":
+        # Public and community are two trust labels over the same SWM threat
+        # rows. VM carries compact CurationProof anchors; ruleset.refresh joins
+        # those proofs to SWM identifiers and tags verified rows as public.
+        if tier in {"public", "community"}:
             rs = ruleset.get(cfg)
             all_threats = [
                 {
@@ -804,7 +802,7 @@ def create_app():
                     "name": r.get("name") or "",
                 }
                 for cat, r in rs.iter_rules()
-                if r.get("source") == "community"
+                if r.get("source") == tier
             ]
             return {
                 "tier": tier,
@@ -815,7 +813,8 @@ def create_app():
                 "partial": offset + limit < len(all_threats),
             }
 
-        # Public/local tiers read a live node view; served stale-while-revalidate.
+        # The local tier reads the live working-memory view and is served
+        # stale-while-revalidate.
         def _load() -> Any:
             if not _node_reachable(cfg):
                 return None   # keep the default (empty) cached briefly; retry next poll
