@@ -318,8 +318,8 @@ def test_installers_apply_relay_safe_serial_swm_recovery_defaults() -> None:
         assert "DKG_SYNC_PAGE_TIMEOUT_MS" in text and "180000" in text
         assert "DKG_SYNC_TOTAL_TIMEOUT_MS" in text and "1200000" in text
         assert "DKG_SYNC_MIN_GRAPH_BUDGET_MS" in text and "120000" in text
-        assert "DKG_SYNC_RESPONDER_PER_SNAPSHOT_ROW_LIMIT" in text and "500000" in text
-        assert "DKG_SYNC_RESPONDER_GLOBAL_SNAPSHOT_ROW_LIMIT" in text and "1500000" in text
+        assert "DKG_SYNC_RESPONDER_PER_SNAPSHOT_ROW_LIMIT" not in text
+        assert "DKG_SYNC_RESPONDER_GLOBAL_SNAPSHOT_ROW_LIMIT" not in text
         assert "blackbox-dkg-runtime-fingerprint.py" in text
         assert "DKG daemon is ready on checkout" in text
         assert 'data["syncAgentsMeta"] = False' in text

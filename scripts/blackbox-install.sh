@@ -106,8 +106,10 @@ blackbox_dkg() {
     # The managed launcher pins the same Node selected by this installer so an
     # older Homebrew/system Node cannot load native
     # modules built by Node 22.  Sequential peer catch-up prevents overlapping
-    # sessions from superseding a long private-SWM recovery.  The larger page
-    # and total windows were exercised over reconnecting direct/relay paths.
+    # sessions from superseding a long private-SWM recovery. The larger timeout
+    # windows were exercised over reconnecting direct/relay paths. Keep DKG's
+    # own snapshot budgets: raising the row threshold disables its bounded-page
+    # fallback and can make a large curator reset streams under byte pressure.
     local node_bin_dir
     node_bin_dir="$(dirname "$(command -v node)")"
     PATH="$node_bin_dir:$PATH" \
@@ -116,8 +118,6 @@ blackbox_dkg() {
     DKG_SYNC_PAGE_TIMEOUT_MS="${DKG_SYNC_PAGE_TIMEOUT_MS:-180000}" \
     DKG_SYNC_TOTAL_TIMEOUT_MS="${DKG_SYNC_TOTAL_TIMEOUT_MS:-1200000}" \
     DKG_SYNC_MIN_GRAPH_BUDGET_MS="${DKG_SYNC_MIN_GRAPH_BUDGET_MS:-120000}" \
-    DKG_SYNC_RESPONDER_PER_SNAPSHOT_ROW_LIMIT="${DKG_SYNC_RESPONDER_PER_SNAPSHOT_ROW_LIMIT:-500000}" \
-    DKG_SYNC_RESPONDER_GLOBAL_SNAPSHOT_ROW_LIMIT="${DKG_SYNC_RESPONDER_GLOBAL_SNAPSHOT_ROW_LIMIT:-1500000}" \
     "$BLACKBOX_DKG_BIN" "$@"
 }
 

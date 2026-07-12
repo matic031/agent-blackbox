@@ -164,8 +164,8 @@ def test_wait_for_runtime_rejects_old_commit_then_accepts_built_commit():
     assert calls >= 2
 
 
-def test_snapshot_limits_are_part_of_runtime_fingerprint(tmp_path, monkeypatch):
+def test_removed_snapshot_overrides_do_not_change_runtime_fingerprint(tmp_path, monkeypatch):
     runtime = _make_runtime(tmp_path)
     first = FINGERPRINTER.compute_fingerprint(*runtime)
     monkeypatch.setenv("DKG_SYNC_RESPONDER_GLOBAL_SNAPSHOT_ROW_LIMIT", "1600000")
-    assert FINGERPRINTER.compute_fingerprint(*runtime) != first
+    assert FINGERPRINTER.compute_fingerprint(*runtime) == first

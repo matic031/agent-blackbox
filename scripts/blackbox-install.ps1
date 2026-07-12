@@ -200,8 +200,6 @@ function Invoke-BlackboxDkg {
         "DKG_SYNC_PAGE_TIMEOUT_MS",
         "DKG_SYNC_TOTAL_TIMEOUT_MS",
         "DKG_SYNC_MIN_GRAPH_BUDGET_MS",
-        "DKG_SYNC_RESPONDER_PER_SNAPSHOT_ROW_LIMIT",
-        "DKG_SYNC_RESPONDER_GLOBAL_SNAPSHOT_ROW_LIMIT",
         "Path"
     )
     $previous = @{}
@@ -218,8 +216,6 @@ function Invoke-BlackboxDkg {
         if (-not $env:DKG_SYNC_PAGE_TIMEOUT_MS) { $env:DKG_SYNC_PAGE_TIMEOUT_MS = "180000" }
         if (-not $env:DKG_SYNC_TOTAL_TIMEOUT_MS) { $env:DKG_SYNC_TOTAL_TIMEOUT_MS = "1200000" }
         if (-not $env:DKG_SYNC_MIN_GRAPH_BUDGET_MS) { $env:DKG_SYNC_MIN_GRAPH_BUDGET_MS = "120000" }
-        if (-not $env:DKG_SYNC_RESPONDER_PER_SNAPSHOT_ROW_LIMIT) { $env:DKG_SYNC_RESPONDER_PER_SNAPSHOT_ROW_LIMIT = "500000" }
-        if (-not $env:DKG_SYNC_RESPONDER_GLOBAL_SNAPSHOT_ROW_LIMIT) { $env:DKG_SYNC_RESPONDER_GLOBAL_SNAPSHOT_ROW_LIMIT = "1500000" }
         & $DkgBin @Args
     } finally {
         foreach ($name in $names) {
