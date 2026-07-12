@@ -347,12 +347,14 @@ def test_blackbox_sync_retries_already_member_zero_data(monkeypatch, capsys):
 def test_blackbox_sync_require_rules_waits_through_delayed_curator_approval(monkeypatch, capsys):
     join_calls = []
     refresh_calls = []
+    subscribe_calls = []
 
     class FakeClient:
         def __init__(self, url, **_kwargs):
             self.url = url
 
         def subscribe_context_graph(self, _cg_id):
+            subscribe_calls.append(_cg_id)
             return {}
 
     class FakeRuleset:
@@ -398,7 +400,8 @@ def test_blackbox_sync_require_rules_waits_through_delayed_curator_approval(monk
     args = argparse.Namespace(wait=True, timeout=30, require_rules=True)
     assert cli_mod._cmd_sync(args) == 0
     assert len(refresh_calls) == 3
-    assert len(join_calls) >= 2
+    assert len(join_calls) == 1
+    assert len(subscribe_calls) == 2
     assert "approval/sync retry" in capsys.readouterr().out
 
 

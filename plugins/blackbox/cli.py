@@ -740,9 +740,10 @@ def _retry_required_rules_after_join(
 
     Catch-up can report ``done, 0 rows`` before the auto-accept loop observes a
     fresh join request. A single immediate refresh therefore makes a healthy
-    clean install fail a few seconds before approval. Keep re-requesting the
-    idempotent join/resubscribe handshake and refreshing until the caller's
-    timeout expires or graph rows land.
+    clean install fail a few seconds before approval. The caller has already
+    sent one join request and one subscription; only poll local rows here.
+    Re-sending approval requests would make the DKG auto-subscribe again and
+    supersede the large SWM recovery that is still in flight.
     """
     if (
         not getattr(args, "wait", False)
@@ -759,13 +760,6 @@ def _retry_required_rules_after_join(
         time.sleep(min(3.0, max(0.2, remaining)))
         attempt += 1
         print(f"  approval/sync retry {attempt}: waiting for non-empty graph rows...")
-        retry_status = _request_join(client, cfg.context_graph_id, cfg.curator_peer_id)
-        if retry_status:
-            print(f"  repair: {retry_status}")
-        try:
-            client.subscribe_context_graph(cfg.context_graph_id)
-        except DkgError as exc:
-            print(f"  repair warning: could not resubscribe to {cfg.context_graph_id}: {exc}")
         try:
             current = ruleset.refresh(cfg, client)
         except Exception as exc:
