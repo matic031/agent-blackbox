@@ -304,6 +304,70 @@ function Save-BlackboxDkgRuntimeFingerprint {
     return $true
 }
 
+function Wait-BlackboxDkgRuntime {
+    $verifier = Join-Path $RepoDir "scripts\blackbox-dkg-runtime-fingerprint.py"
+    $expectedCommit = (& git -C $DkgCliDir rev-parse HEAD).Trim()
+    if ($LASTEXITCODE -ne 0 -or -not $expectedCommit) {
+        $script:InstallIncomplete = $true
+        Write-Warn2 "Could not resolve the expected DKG checkout commit."
+        return $false
+    }
+    $null = & $script:VenvPython $verifier wait $DkgDaemonUrl $expectedCommit 90
+    if ($LASTEXITCODE -ne 0) {
+        $script:InstallIncomplete = $true
+        Write-Warn2 "The DKG daemon did not activate checkout $($expectedCommit.Substring(0, 12))."
+        return $false
+    }
+    Write-Ok "DKG daemon is ready on checkout $($expectedCommit.Substring(0, 12))"
+    return $true
+}
+
+function Move-LegacyBlackboxDkgHome {
+    $legacyHome = Join-Path $HOME ".hermes\blackbox\dkg"
+    $legacyBin = Join-Path $HOME ".hermes\blackbox\dkg-cli\node_modules\.bin\dkg.cmd"
+    if ([System.IO.Path]::GetFullPath($legacyHome) -eq [System.IO.Path]::GetFullPath($DkgHome)) { return $true }
+    if (-not (Test-Path (Join-Path $legacyHome "config.json"))) { return $true }
+
+    $pidPath = Join-Path $legacyHome "daemon.pid"
+    $legacyPid = if (Test-Path $pidPath) { (Get-Content -Raw $pidPath).Trim() } else { "" }
+    $legacyProcess = if ($legacyPid -match '^\d+$') {
+        Get-Process -Id ([int]$legacyPid) -ErrorAction SilentlyContinue
+    } else { $null }
+    if ($legacyProcess) {
+        if (-not (Test-Path $legacyBin)) {
+            $script:InstallIncomplete = $true
+            Write-Warn2 "The deprecated Blackbox DKG is running, but its stop command is missing: $legacyBin"
+            return $false
+        }
+        Write-Step "Stopping the deprecated Blackbox DKG at $legacyHome ..."
+        $previousHome = $env:DKG_HOME
+        try {
+            $env:DKG_HOME = $legacyHome
+            & $legacyBin stop
+            if ($LASTEXITCODE -ne 0) { throw "legacy dkg stop exit $LASTEXITCODE" }
+            if (Get-Process -Id ([int]$legacyPid) -ErrorAction SilentlyContinue) {
+                throw "legacy DKG process is still running"
+            }
+        } catch {
+            $script:InstallIncomplete = $true
+            Write-Warn2 "Could not stop the deprecated Blackbox DKG safely."
+            return $false
+        } finally {
+            if ($null -eq $previousHome) { Remove-Item Env:DKG_HOME -ErrorAction SilentlyContinue }
+            else { $env:DKG_HOME = $previousHome }
+        }
+    }
+
+    if (-not (Test-Path $DkgHome)) {
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $DkgHome) | Out-Null
+        Move-Item $legacyHome $DkgHome
+        Write-Ok "Migrated the Blackbox DKG identity and graph state into this checkout"
+    } else {
+        Write-Warn2 "Deprecated DKG state remains at $legacyHome (stopped); current state is $DkgHome."
+    }
+    return $true
+}
+
 function Set-BlackboxDkgPort {
     param([int]$Port)
     $script:DkgPort = $Port
@@ -666,6 +730,11 @@ function Install-Dkg {
         return
     }
 
+    if (-not (Move-LegacyBlackboxDkgHome)) {
+        Show-DkgManualHint
+        return
+    }
+
     New-Item -ItemType Directory -Force -Path $DkgHome | Out-Null
     if (-not (Test-BlackboxDkgPort)) {
         Show-DkgManualHint
@@ -691,6 +760,7 @@ function Install-Dkg {
             if ($LASTEXITCODE -ne 0) { throw "dkg stop exit $LASTEXITCODE" }
             Invoke-BlackboxDkg start
             if ($LASTEXITCODE -ne 0) { throw "dkg start exit $LASTEXITCODE" }
+            if (-not (Wait-BlackboxDkgRuntime)) { throw "DKG runtime verification failed" }
             Write-Ok "Blackbox DKG node restarted with the current sync settings"
             if (-not (Save-BlackboxDkgRuntimeFingerprint) -or -not (Remove-StaleDkgSubscriptions)) {
                 Show-DkgManualHint
@@ -722,6 +792,7 @@ function Install-Dkg {
     try {
         Invoke-BlackboxDkg start
         if ($LASTEXITCODE -ne 0) { throw "dkg exit $LASTEXITCODE" }
+        if (-not (Wait-BlackboxDkgRuntime)) { throw "DKG runtime verification failed" }
         Write-Ok "DKG node bootstrapped on $Network"
         if (-not (Save-BlackboxDkgRuntimeFingerprint) -or -not (Remove-StaleDkgSubscriptions)) {
             Show-DkgManualHint
@@ -801,21 +872,25 @@ blackbox = entries.setdefault("blackbox", {})
 legacy_dkg_urls = {"http://127.0.0.1:9200", "http://localhost:9200"}
 legacy_graphs = {"umanitek/guardian-threats-staging", "umanitek/guardian-threats"}
 default_dkg_home = os.path.abspath(os.path.expanduser("~/.dkg"))
+legacy_blackbox_dkg_home = os.path.abspath(os.path.expanduser("~/.hermes/blackbox/dkg"))
+legacy_blackbox_dkg_bin = os.path.abspath(os.path.expanduser("~/.hermes/blackbox/dkg-cli/node_modules/.bin/dkg.cmd"))
 added = []
 current_dkg_url = str(blackbox.get("dkg_url") or blackbox.get("dkgUrl") or "").rstrip("/")
 current_dkg_home = str(blackbox.get("dkg_home") or blackbox.get("dkgHome") or "").strip()
 current_dkg_home_abs = os.path.abspath(os.path.expanduser(current_dkg_home)) if current_dkg_home else ""
 uses_shared_dkg_home = current_dkg_home_abs == default_dkg_home
 uses_unpaired_shared_dkg_home = uses_shared_dkg_home and (not current_dkg_url or current_dkg_url in legacy_dkg_urls)
+uses_legacy_blackbox_dkg_home = current_dkg_home_abs == legacy_blackbox_dkg_home
 current_graph = str(blackbox.get("context_graph_id") or "")
-if "dkg_url" not in blackbox or current_dkg_url in legacy_dkg_urls or uses_unpaired_shared_dkg_home:
+if "dkg_url" not in blackbox or current_dkg_url in legacy_dkg_urls or uses_unpaired_shared_dkg_home or uses_legacy_blackbox_dkg_home:
     blackbox["dkg_url"] = dkg_url.rstrip("/")
     added.append("dkg_url")
-if "dkg_home" not in blackbox or not blackbox.get("dkg_home") or uses_unpaired_shared_dkg_home:
+if "dkg_home" not in blackbox or not blackbox.get("dkg_home") or uses_unpaired_shared_dkg_home or uses_legacy_blackbox_dkg_home:
     blackbox["dkg_home"] = dkg_home
     added.append("dkg_home")
 current_dkg_bin = str(blackbox.get("dkg_bin") or blackbox.get("dkgBin") or "").strip()
-if not current_dkg_bin or current_dkg_bin == "dkg":
+current_dkg_bin_abs = os.path.abspath(os.path.expanduser(current_dkg_bin)) if current_dkg_bin else ""
+if not current_dkg_bin or current_dkg_bin == "dkg" or current_dkg_bin_abs == legacy_blackbox_dkg_bin:
     blackbox["dkg_bin"] = dkg_bin
     added.append("dkg_bin")
 if current_graph in legacy_graphs:

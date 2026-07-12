@@ -9,10 +9,14 @@ were updated on disk after an interrupted install.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import subprocess
 import sys
 import tempfile
+import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 
@@ -21,6 +25,8 @@ RUNTIME_ENV_DEFAULTS = {
     "DKG_SYNC_PAGE_TIMEOUT_MS": "180000",
     "DKG_SYNC_TOTAL_TIMEOUT_MS": "1200000",
     "DKG_SYNC_MIN_GRAPH_BUDGET_MS": "120000",
+    "DKG_SYNC_RESPONDER_PER_SNAPSHOT_ROW_LIMIT": "500000",
+    "DKG_SYNC_RESPONDER_GLOBAL_SNAPSHOT_ROW_LIMIT": "1500000",
 }
 
 
@@ -130,6 +136,44 @@ def record_fingerprint(marker: Path, fingerprint: str) -> None:
         raise
 
 
+def wait_for_runtime(
+    daemon_url: str,
+    expected_commit: str,
+    timeout_seconds: float,
+) -> dict[str, object]:
+    """Wait until the daemon API serves the checkout that was just built."""
+    expected = expected_commit.strip().lower()
+    if len(expected) < 7 or any(ch not in "0123456789abcdef" for ch in expected):
+        raise FingerprintError("expected commit must be a Git hexadecimal revision")
+    if timeout_seconds <= 0:
+        raise FingerprintError("runtime wait timeout must be positive")
+
+    status_url = daemon_url.rstrip("/") + "/api/status"
+    deadline = time.monotonic() + timeout_seconds
+    last_detail = "daemon API has not responded"
+    while time.monotonic() < deadline:
+        try:
+            request = urllib.request.Request(
+                status_url,
+                headers={"Accept": "application/json"},
+            )
+            with urllib.request.urlopen(request, timeout=min(3.0, timeout_seconds)) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+            actual = str(
+                payload.get("commit") or payload.get("commitShort") or ""
+            ).strip().lower()
+            if actual and (expected.startswith(actual) or actual.startswith(expected)):
+                return payload
+            last_detail = f"daemon serves commit {actual or 'unknown'}, expected {expected[:12]}"
+        except (OSError, UnicodeError, json.JSONDecodeError, urllib.error.URLError) as exc:
+            last_detail = str(exc)
+        time.sleep(0.5)
+    raise FingerprintError(
+        f"DKG runtime did not become ready at {status_url} within "
+        f"{timeout_seconds:g}s ({last_detail})"
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     try:
@@ -139,13 +183,19 @@ def main(argv: list[str] | None = None) -> int:
         if len(args) == 3 and args[0] == "record":
             record_fingerprint(Path(args[1]), args[2])
             return 0
-    except (OSError, FingerprintError) as exc:
+        if len(args) == 4 and args[0] == "wait":
+            payload = wait_for_runtime(args[1], args[2], float(args[3]))
+            actual = str(payload.get("commit") or payload.get("commitShort") or "")
+            print(actual)
+            return 0
+    except (OSError, ValueError, FingerprintError) as exc:
         print(f"blackbox-dkg-runtime-fingerprint: {exc}", file=sys.stderr)
         return 1
     print(
         f"usage: {Path(sys.argv[0]).name} compute <dkg-cli-dir> <dkg-home> "
         "<node-bin> <dkg-bin>\n"
-        f"       {Path(sys.argv[0]).name} record <marker> <sha256>",
+        f"       {Path(sys.argv[0]).name} record <marker> <sha256>\n"
+        f"       {Path(sys.argv[0]).name} wait <daemon-url> <expected-commit> <timeout-seconds>",
         file=sys.stderr,
     )
     return 2

@@ -119,6 +119,8 @@ def test_unix_installer_uses_isolated_blackbox_dkg_node() -> None:
     assert 'options["port"] = store_port' in text
     assert 'blackbox_dkg subscribe "$blackbox_cg" --save' in text
     assert "uses_unpaired_shared_dkg_home" in text
+    assert "uses_legacy_blackbox_dkg_home" in text
+    assert "migrate_legacy_blackbox_dkg_home" in text
     assert 'blackbox["dkg_home"] = dkg_home' in text
     assert 'blackbox["dkg_bin"] = dkg_bin' in text
     assert "npm i -g" not in text
@@ -187,6 +189,8 @@ def test_windows_installer_uses_isolated_blackbox_dkg_node() -> None:
     assert 'data["apiPort"] = api_port' in text
     assert 'options["port"] = store_port' in text
     assert "uses_unpaired_shared_dkg_home" in text
+    assert "uses_legacy_blackbox_dkg_home" in text
+    assert "Move-LegacyBlackboxDkgHome" in text
     assert 'blackbox["dkg_home"] = dkg_home' in text
     assert 'blackbox["dkg_bin"] = dkg_bin' in text
     assert "npm i -g" not in text
@@ -316,6 +320,8 @@ def test_installers_apply_relay_safe_serial_swm_recovery_defaults() -> None:
         assert "DKG_SYNC_MIN_GRAPH_BUDGET_MS" in text and "120000" in text
         assert "DKG_SYNC_RESPONDER_PER_SNAPSHOT_ROW_LIMIT" in text and "500000" in text
         assert "DKG_SYNC_RESPONDER_GLOBAL_SNAPSHOT_ROW_LIMIT" in text and "1500000" in text
+        assert "blackbox-dkg-runtime-fingerprint.py" in text
+        assert "DKG daemon is ready on checkout" in text
         assert 'data["syncAgentsMeta"] = False' in text
         assert 'data["syncOnConnectEnabled"] = False' in text
         assert 'data["syncGlobalMaxInflight"] = 1' in text
@@ -330,7 +336,7 @@ def test_installers_restart_running_owned_dkg_only_for_runtime_changes() -> None
 
     assert "BLACKBOX_DKG_RESTART_REQUIRED" in INSTALL_SH.read_text(encoding="utf-8")
     assert 'if [ "$BLACKBOX_DKG_RESTART_REQUIRED" != true ]; then' in unix
-    assert "blackbox_dkg stop && blackbox_dkg start" in unix
+    assert "blackbox_dkg stop && blackbox_dkg start && wait_for_blackbox_dkg_runtime" in unix
     assert "install_blackbox_dkg_checkout" in unix
     assert "prepare_blackbox_dkg_runtime_fingerprint" in unix
     assert "record_blackbox_dkg_runtime_fingerprint" in unix
@@ -340,10 +346,57 @@ def test_installers_restart_running_owned_dkg_only_for_runtime_changes() -> None
     assert "if (-not $script:DkgRestartRequired)" in windows
     assert "Invoke-BlackboxDkg stop" in windows
     assert "Invoke-BlackboxDkg start" in windows
+    assert "Wait-BlackboxDkgRuntime" in windows
     assert "updated sync settings are not active" in windows
     assert "Prepare-BlackboxDkgRuntimeFingerprint" in windows
     assert "Save-BlackboxDkgRuntimeFingerprint" in windows
     assert ".blackbox-runtime.sha256" in windows
+
+
+def test_installers_migrate_only_the_known_legacy_blackbox_dkg_paths() -> None:
+    unix = INSTALL_SH.read_text(encoding="utf-8")
+    windows = INSTALL_PS1.read_text(encoding="utf-8")
+
+    assert '$HOME/.hermes/blackbox/dkg' in unix
+    assert '$HOME/.hermes/blackbox/dkg-cli/node_modules/.bin/dkg' in unix
+    assert 'mv "$legacy_home" "$BLACKBOX_DKG_HOME"' in unix
+    assert 'DKG_HOME="$legacy_home" "$legacy_bin" stop' in unix
+    assert '.hermes\\blackbox\\dkg' in windows
+    assert 'Move-Item $legacyHome $DkgHome' in windows
+    assert '& $legacyBin stop' in windows
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash is unavailable")
+def test_unix_legacy_dkg_state_moves_into_project_without_losing_identity(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    legacy = home / ".hermes" / "blackbox" / "dkg"
+    target = home / "agent-guardian" / ".dkg"
+    legacy.mkdir(parents=True)
+    target.parent.mkdir(parents=True)
+    (legacy / "config.json").write_text('{"apiPort":9320}\n', encoding="utf-8")
+    (legacy / "agent-key.bin").write_bytes(b"preserved-peer-identity")
+    body = _extract_function_body("migrate_legacy_blackbox_dkg_home")
+    command = f"""
+migrate_legacy_blackbox_dkg_home() {{
+{body}
+}}
+warn() {{ :; }}
+step() {{ :; }}
+ok() {{ :; }}
+HOME={shlex.quote(str(home))}
+BLACKBOX_DKG_HOME={shlex.quote(str(target))}
+BLACKBOX_INSTALL_INCOMPLETE=false
+BLACKBOX_THREAT_GRAPH_INCOMPLETE=false
+migrate_legacy_blackbox_dkg_home
+"""
+
+    subprocess.run(["bash", "-c", command], check=True)
+
+    assert not legacy.exists()
+    assert (target / "config.json").is_file()
+    assert (target / "agent-key.bin").read_bytes() == b"preserved-peer-identity"
 
 
 def test_installers_do_not_report_ready_after_cleanup_failure() -> None:

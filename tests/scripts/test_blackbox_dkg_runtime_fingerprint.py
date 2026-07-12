@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import sys
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 
@@ -124,3 +127,45 @@ def test_record_works_when_fchmod_is_unavailable(tmp_path, monkeypatch):
     FINGERPRINTER.record_fingerprint(marker, "a" * 64)
 
     assert marker.read_text(encoding="utf-8") == "a" * 64 + "\n"
+
+
+def test_wait_for_runtime_rejects_old_commit_then_accepts_built_commit():
+    expected = "4a59421180c509c0fc3d90a9e409191c554fea74"
+    calls = 0
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            nonlocal calls
+            calls += 1
+            commit = "6ffc0c9b" if calls == 1 else "4a594211"
+            body = json.dumps({"commit": commit}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        payload = FINGERPRINTER.wait_for_runtime(
+            f"http://127.0.0.1:{server.server_port}", expected, 3
+        )
+    finally:
+        server.shutdown()
+        thread.join(timeout=3)
+        server.server_close()
+
+    assert payload["commit"] == "4a594211"
+    assert calls >= 2
+
+
+def test_snapshot_limits_are_part_of_runtime_fingerprint(tmp_path, monkeypatch):
+    runtime = _make_runtime(tmp_path)
+    first = FINGERPRINTER.compute_fingerprint(*runtime)
+    monkeypatch.setenv("DKG_SYNC_RESPONDER_GLOBAL_SNAPSHOT_ROW_LIMIT", "1600000")
+    assert FINGERPRINTER.compute_fingerprint(*runtime) != first

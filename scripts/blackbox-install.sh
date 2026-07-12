@@ -183,6 +183,60 @@ record_blackbox_dkg_runtime_fingerprint() {
     return 0
 }
 
+wait_for_blackbox_dkg_runtime() {
+    local verifier="$REPO_DIR/scripts/blackbox-dkg-runtime-fingerprint.py"
+    local expected_commit
+    expected_commit="$(git -C "$BLACKBOX_DKG_CLI_DIR" rev-parse HEAD)" || return 1
+    if ! "$VENV_DIR/bin/python" "$verifier" wait \
+        "$BLACKBOX_DKG_DAEMON_URL" "$expected_commit" 90 >/dev/null; then
+        BLACKBOX_INSTALL_INCOMPLETE=true
+        BLACKBOX_THREAT_GRAPH_INCOMPLETE=true
+        warn "The DKG daemon did not activate checkout ${expected_commit:0:12}."
+        return 1
+    fi
+    ok "DKG daemon is ready on checkout ${expected_commit:0:12}"
+}
+
+migrate_legacy_blackbox_dkg_home() {
+    local legacy_home="$HOME/.hermes/blackbox/dkg"
+    local legacy_bin="$HOME/.hermes/blackbox/dkg-cli/node_modules/.bin/dkg"
+    local legacy_pid=""
+    [ "$(cd "$(dirname "$BLACKBOX_DKG_HOME")" 2>/dev/null && pwd -P)/$(basename "$BLACKBOX_DKG_HOME")" != \
+        "$(cd "$(dirname "$legacy_home")" 2>/dev/null && pwd -P)/$(basename "$legacy_home")" ] || return 0
+    [ -f "$legacy_home/config.json" ] || return 0
+
+    [ -f "$legacy_home/daemon.pid" ] && legacy_pid="$(tr -dc '0-9' <"$legacy_home/daemon.pid")"
+    if [ -n "$legacy_pid" ] && kill -0 "$legacy_pid" 2>/dev/null; then
+        if [ ! -x "$legacy_bin" ]; then
+            BLACKBOX_INSTALL_INCOMPLETE=true
+            BLACKBOX_THREAT_GRAPH_INCOMPLETE=true
+            warn "The deprecated Blackbox DKG is running, but its stop command is missing: $legacy_bin"
+            return 1
+        fi
+        step "Stopping the deprecated Blackbox DKG at $legacy_home ..."
+        if ! DKG_HOME="$legacy_home" "$legacy_bin" stop; then
+            BLACKBOX_INSTALL_INCOMPLETE=true
+            BLACKBOX_THREAT_GRAPH_INCOMPLETE=true
+            warn "Could not stop the deprecated Blackbox DKG safely."
+            return 1
+        fi
+        if kill -0 "$legacy_pid" 2>/dev/null; then
+            BLACKBOX_INSTALL_INCOMPLETE=true
+            BLACKBOX_THREAT_GRAPH_INCOMPLETE=true
+            warn "The deprecated Blackbox DKG did not stop; its state was not moved."
+            return 1
+        fi
+    fi
+
+    if [ ! -e "$BLACKBOX_DKG_HOME" ]; then
+        mkdir -p "$(dirname "$BLACKBOX_DKG_HOME")"
+        mv "$legacy_home" "$BLACKBOX_DKG_HOME"
+        ok "Migrated the Blackbox DKG identity and graph state into this checkout"
+    else
+        warn "Deprecated DKG state remains at $legacy_home (stopped); current state is $BLACKBOX_DKG_HOME."
+    fi
+}
+
 port_in_use() {
     "$VENV_DIR/bin/python" - "$1" <<'PYEOF'
 import socket
@@ -927,6 +981,11 @@ install_dkg() {
         return 0
     fi
 
+    if ! migrate_legacy_blackbox_dkg_home; then
+        dkg_manual_hint
+        return 0
+    fi
+
     mkdir -p "$BLACKBOX_DKG_HOME"
     if ! check_blackbox_dkg_port; then
         dkg_manual_hint
@@ -947,7 +1006,7 @@ install_dkg() {
             return 0
         fi
         step "Restarting the Blackbox-owned DKG node to activate sync and relay updates ..."
-        if blackbox_dkg stop && blackbox_dkg start; then
+        if blackbox_dkg stop && blackbox_dkg start && wait_for_blackbox_dkg_runtime; then
             ok "Blackbox DKG node restarted with the current sync settings"
             if ! record_blackbox_dkg_runtime_fingerprint ||
                 ! clean_stale_dkg_subscriptions; then
@@ -978,7 +1037,7 @@ install_dkg() {
     step "  DKG CLI:  $BLACKBOX_DKG_BIN"
     step "  Store:    http://127.0.0.1:$BLACKBOX_DKG_STORE_PORT/query"
     step "  (non-interactive; reading the public threat graph is free — no funds needed)"
-    if blackbox_dkg start; then
+    if blackbox_dkg start && wait_for_blackbox_dkg_runtime; then
         ok "DKG node bootstrapped on $DKG_NETWORK"
         if ! record_blackbox_dkg_runtime_fingerprint ||
             ! clean_stale_dkg_subscriptions; then
@@ -1120,21 +1179,25 @@ blackbox = entries.setdefault("blackbox", {})
 legacy_dkg_urls = {"http://127.0.0.1:9200", "http://localhost:9200"}
 legacy_graphs = {"umanitek/guardian-threats-staging", "umanitek/guardian-threats"}
 default_dkg_home = os.path.abspath(os.path.expanduser("~/.dkg"))
+legacy_blackbox_dkg_home = os.path.abspath(os.path.expanduser("~/.hermes/blackbox/dkg"))
+legacy_blackbox_dkg_bin = os.path.abspath(os.path.expanduser("~/.hermes/blackbox/dkg-cli/node_modules/.bin/dkg"))
 added = []
 current_dkg_url = str(blackbox.get("dkg_url") or blackbox.get("dkgUrl") or "").rstrip("/")
 current_dkg_home = str(blackbox.get("dkg_home") or blackbox.get("dkgHome") or "").strip()
 current_dkg_home_abs = os.path.abspath(os.path.expanduser(current_dkg_home)) if current_dkg_home else ""
 uses_shared_dkg_home = current_dkg_home_abs == default_dkg_home
 uses_unpaired_shared_dkg_home = uses_shared_dkg_home and (not current_dkg_url or current_dkg_url in legacy_dkg_urls)
+uses_legacy_blackbox_dkg_home = current_dkg_home_abs == legacy_blackbox_dkg_home
 current_graph = str(blackbox.get("context_graph_id") or "")
-if "dkg_url" not in blackbox or current_dkg_url in legacy_dkg_urls or uses_unpaired_shared_dkg_home:
+if "dkg_url" not in blackbox or current_dkg_url in legacy_dkg_urls or uses_unpaired_shared_dkg_home or uses_legacy_blackbox_dkg_home:
     blackbox["dkg_url"] = dkg_url.rstrip("/")
     added.append("dkg_url")
-if "dkg_home" not in blackbox or not blackbox.get("dkg_home") or uses_unpaired_shared_dkg_home:
+if "dkg_home" not in blackbox or not blackbox.get("dkg_home") or uses_unpaired_shared_dkg_home or uses_legacy_blackbox_dkg_home:
     blackbox["dkg_home"] = dkg_home
     added.append("dkg_home")
 current_dkg_bin = str(blackbox.get("dkg_bin") or blackbox.get("dkgBin") or "").strip()
-if not current_dkg_bin or current_dkg_bin == "dkg":
+current_dkg_bin_abs = os.path.abspath(os.path.expanduser(current_dkg_bin)) if current_dkg_bin else ""
+if not current_dkg_bin or current_dkg_bin == "dkg" or current_dkg_bin_abs == legacy_blackbox_dkg_bin:
     blackbox["dkg_bin"] = dkg_bin
     added.append("dkg_bin")
 if current_graph in legacy_graphs:
