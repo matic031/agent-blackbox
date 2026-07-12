@@ -443,7 +443,14 @@ if context_graph not in graphs:
     graphs.append(context_graph)
 data["contextGraphs"] = graphs
 data["syncAgentsMeta"] = False
+# Large first-run base-network syncs can occupy the single worker for minutes.
+# Keep enough FIFO capacity for post-approval metadata/SWM catch-up from the curator
+# instead of dropping it behind the default two-entry queue and leaving a newly
+# admitted private-graph member permanently at 0 rows.
 data["syncGlobalMaxInflight"] = 1
+data["syncGlobalQueueLimit"] = 32
+# Retired pre-fork workaround; current DKG handles configured subscriptions.
+data.pop("restrictAutoSubscribeContextGraphs", None)
 data.setdefault("autoUpdate", {"enabled": False})
 data["chain"] = {
     "type": "evm",
@@ -457,6 +464,9 @@ data["auth"] = {**auth, "enabled": True}
 store = data.get("store") if isinstance(data.get("store"), dict) else {}
 options = store.get("options") if isinstance(store.get("options"), dict) else {}
 options["port"] = store_port
+# A populated curator store can need longer than the 30-second DKG default to
+# reopen its RocksDB state. Killing it at that boundary creates a restart loop.
+options["readyTimeoutMs"] = 120000
 data["store"] = {"backend": "oxigraph-server", "options": options}
 rendered = json.dumps(data, indent=2) + "\n"
 changed = rendered != original
