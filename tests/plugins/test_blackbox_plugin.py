@@ -344,6 +344,64 @@ def test_blackbox_sync_retries_already_member_zero_data(monkeypatch, capsys):
     assert "Ruleset synced from cg after DKG join repair" in out
 
 
+def test_blackbox_sync_require_rules_waits_through_delayed_curator_approval(monkeypatch, capsys):
+    join_calls = []
+    refresh_calls = []
+
+    class FakeClient:
+        def __init__(self, url, **_kwargs):
+            self.url = url
+
+        def subscribe_context_graph(self, _cg_id):
+            return {}
+
+    class FakeRuleset:
+        def __init__(self, dependency_count):
+            self.dependency_count = dependency_count
+
+        def counts(self):
+            return {
+                "injection": 0,
+                "escalation": 0,
+                "dependency": self.dependency_count,
+                "fileaccess": 0,
+                "skill": 0,
+            }
+
+    def fake_refresh(_cfg, _client):
+        refresh_calls.append(True)
+        return FakeRuleset(2 if len(refresh_calls) >= 3 else 0)
+
+    monkeypatch.setattr(cli_mod, "_request_join", lambda *a, **k: join_calls.append(True) or "join sent")
+    monkeypatch.setattr(cli_mod, "DkgClient", FakeClient)
+    monkeypatch.setattr(cli_mod.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        cli_mod,
+        "load_blackbox_config",
+        lambda: config_mod.BlackboxConfig(
+            context_graph_id=constants.DEFAULT_CONTEXT_GRAPH_ID,
+            dkg_url=constants.DEFAULT_DKG_URL,
+            curator_peer_id=constants.DEFAULT_CURATOR_PEER_ID,
+        ),
+    )
+    monkeypatch.setattr(
+        cli_mod,
+        "_wait_for_context_graph_catchup",
+        lambda *a, **k: {
+            "ok": True,
+            "status": "done",
+            "detail": "peers 4/4, data 0, shared memory 0",
+        },
+    )
+    monkeypatch.setattr(cli_mod.ruleset, "refresh", fake_refresh)
+
+    args = argparse.Namespace(wait=True, timeout=30, require_rules=True)
+    assert cli_mod._cmd_sync(args) == 0
+    assert len(refresh_calls) == 3
+    assert len(join_calls) >= 2
+    assert "approval/sync retry" in capsys.readouterr().out
+
+
 def test_blackbox_curate_redeliver_approval(monkeypatch, capsys):
     calls = []
 
