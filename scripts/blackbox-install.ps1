@@ -45,7 +45,8 @@ $DkgStorePort = if ($env:BLACKBOX_DKG_STORE_PORT) { [int]$env:BLACKBOX_DKG_STORE
 $DkgHome     = if ($env:BLACKBOX_DKG_HOME)    { $env:BLACKBOX_DKG_HOME }    else { Join-Path $BlackboxHome "dkg" }
 $DkgCliDir   = if ($env:BLACKBOX_DKG_CLI_DIR) { $env:BLACKBOX_DKG_CLI_DIR } else { Join-Path $BlackboxHome "dkg-cli" }
 $DkgBin      = if ($env:BLACKBOX_DKG_BIN)     { $env:BLACKBOX_DKG_BIN }     else { Join-Path $DkgCliDir "node_modules\.bin\dkg.cmd" }
-$DkgPackage  = if ($env:BLACKBOX_DKG_PACKAGE) { $env:BLACKBOX_DKG_PACKAGE } else { "@origintrail-official/dkg@latest" }
+$DkgRepoUrl  = if ($env:BLACKBOX_DKG_REPO_URL) { $env:BLACKBOX_DKG_REPO_URL } else { "https://github.com/matic031/dkg.git" }
+$DkgRepoBranch = if ($env:BLACKBOX_DKG_REPO_BRANCH) { $env:BLACKBOX_DKG_REPO_BRANCH } else { "feat/blackbox" }
 $DkgDaemonUrl = if ($env:BLACKBOX_DKG_DAEMON_URL) { $env:BLACKBOX_DKG_DAEMON_URL } elseif ($env:BLACKBOX_DKG_URL) { $env:BLACKBOX_DKG_URL } else { "http://127.0.0.1:$DkgPort" }
 $NodeMajor   = if ($env:BLACKBOX_NODE_MAJOR)  { [int]$env:BLACKBOX_NODE_MAJOR } else { 22 }
 # Old default, parked for now: umanitek/guardian-threats-staging
@@ -53,6 +54,9 @@ $ContextGraphId = if ($env:BLACKBOX_CONTEXT_GRAPH_ID) { $env:BLACKBOX_CONTEXT_GR
 $CatchupTimeout = if ($env:BLACKBOX_DKG_CATCHUP_TIMEOUT) { [int]$env:BLACKBOX_DKG_CATCHUP_TIMEOUT } else { 180 }
 $script:InstallIncomplete = $false
 $script:DkgAlreadyRunning = $false
+$script:DkgRestartRequired = $false
+$script:DkgRuntimeMarker = Join-Path $DkgHome ".blackbox-runtime.sha256"
+$script:DkgRuntimeFingerprint = ""
 
 # ── Echo helpers (DRY) ──────────────────────────────────────────────────────
 function Write-Step    { param($m) Write-Host "-> $m" -ForegroundColor Cyan }
@@ -89,7 +93,8 @@ Reading it is free; publishing costs TRAC. Blackbox does not support testnet.
 Environment overrides:
 	  BLACKBOX_REPO_URL, BLACKBOX_REPO_BRANCH, HERMES_HOME, BLACKBOX_NODE_MAJOR,
 	  BLACKBOX_CONTEXT_GRAPH_ID, BLACKBOX_DKG_PORT, BLACKBOX_DKG_STORE_PORT, BLACKBOX_DKG_HOME,
-	  BLACKBOX_DKG_CLI_DIR, BLACKBOX_DKG_BIN, BLACKBOX_DKG_DAEMON_URL,
+	  BLACKBOX_DKG_CLI_DIR, BLACKBOX_DKG_BIN, BLACKBOX_DKG_REPO_URL,
+	  BLACKBOX_DKG_REPO_BRANCH, BLACKBOX_DKG_DAEMON_URL,
 	  BLACKBOX_DKG_CATCHUP_TIMEOUT
 
 Blackbox uses its own DKG home and port by default:
@@ -184,6 +189,7 @@ function Invoke-BlackboxDkg {
         "DKG_CATCHUP_MAX_CONCURRENT_PEERS",
         "DKG_SYNC_PAGE_TIMEOUT_MS",
         "DKG_SYNC_TOTAL_TIMEOUT_MS",
+        "DKG_SYNC_MIN_GRAPH_BUDGET_MS",
         "Path"
     )
     $previous = @{}
@@ -199,6 +205,7 @@ function Invoke-BlackboxDkg {
         if (-not $env:DKG_CATCHUP_MAX_CONCURRENT_PEERS) { $env:DKG_CATCHUP_MAX_CONCURRENT_PEERS = "1" }
         if (-not $env:DKG_SYNC_PAGE_TIMEOUT_MS) { $env:DKG_SYNC_PAGE_TIMEOUT_MS = "180000" }
         if (-not $env:DKG_SYNC_TOTAL_TIMEOUT_MS) { $env:DKG_SYNC_TOTAL_TIMEOUT_MS = "1200000" }
+        if (-not $env:DKG_SYNC_MIN_GRAPH_BUDGET_MS) { $env:DKG_SYNC_MIN_GRAPH_BUDGET_MS = "120000" }
         & $DkgBin @Args
     } finally {
         foreach ($name in $names) {
@@ -218,15 +225,69 @@ function Test-BlackboxDkgState {
 function Remove-StaleDkgSubscriptions {
     $cleaner = Join-Path $RepoDir "scripts\blackbox-clean-dkg-subscriptions.py"
     if (-not (Test-Path $cleaner)) {
-        Write-Warn2 "DKG subscription cleaner is missing; stale graphs may keep syncing."
-        return
+        $script:InstallIncomplete = $true
+        Write-Warn2 "DKG subscription cleaner is missing; stale graphs cannot be verified safely."
+        return $false
     }
     & $script:VenvPython $cleaner $DkgHome $DkgDaemonUrl $ContextGraphId
     if ($LASTEXITCODE -eq 0) {
         Write-Ok "Stale DKG graph subscriptions checked"
+        return $true
     } else {
-        Write-Warn2 "Could not clean stale DKG graph subscriptions; Blackbox sync will continue."
+        $script:InstallIncomplete = $true
+        Write-Warn2 "Could not clean stale DKG graph subscriptions; setup is incomplete."
+        return $false
     }
+}
+
+function Prepare-BlackboxDkgRuntimeFingerprint {
+    $fingerprinter = Join-Path $RepoDir "scripts\blackbox-dkg-runtime-fingerprint.py"
+    if (-not (Test-Path $fingerprinter)) {
+        $script:InstallIncomplete = $true
+        Write-Warn2 "DKG runtime fingerprint helper is missing; loaded checkout state cannot be verified."
+        return $false
+    }
+    $nodeCommand = Get-Command node -ErrorAction SilentlyContinue
+    if (-not $nodeCommand -or -not $nodeCommand.Source) {
+        $script:InstallIncomplete = $true
+        Write-Warn2 "Could not resolve the Node.js runtime for DKG fingerprinting."
+        return $false
+    }
+    $fingerprintOutput = @(& $script:VenvPython $fingerprinter compute $DkgCliDir $DkgHome $nodeCommand.Source $DkgBin 2>&1)
+    if ($LASTEXITCODE -ne 0) {
+        $script:InstallIncomplete = $true
+        if ($fingerprintOutput) {
+            $fingerprintOutput | ForEach-Object { Write-Warn2 "$_" }
+        }
+        Write-Warn2 "Could not fingerprint the configured DKG runtime; setup is incomplete."
+        return $false
+    }
+    $script:DkgRuntimeFingerprint = "$($fingerprintOutput | Select-Object -Last 1)".Trim()
+    $applied = if (Test-Path $script:DkgRuntimeMarker) {
+        (Get-Content -Raw $script:DkgRuntimeMarker).Trim()
+    } else {
+        ""
+    }
+    if ($applied -ne $script:DkgRuntimeFingerprint) {
+        $script:DkgRestartRequired = $true
+    }
+    return $true
+}
+
+function Save-BlackboxDkgRuntimeFingerprint {
+    $fingerprinter = Join-Path $RepoDir "scripts\blackbox-dkg-runtime-fingerprint.py"
+    if (-not $script:DkgRuntimeFingerprint) {
+        $script:InstallIncomplete = $true
+        Write-Warn2 "DKG runtime fingerprint is empty after restart."
+        return $false
+    }
+    & $script:VenvPython $fingerprinter record $script:DkgRuntimeMarker $script:DkgRuntimeFingerprint
+    if ($LASTEXITCODE -ne 0) {
+        $script:InstallIncomplete = $true
+        Write-Warn2 "DKG restarted, but its applied runtime fingerprint could not be recorded."
+        return $false
+    }
+    return $true
 }
 
 function Set-BlackboxDkgPort {
@@ -344,9 +405,11 @@ store_port = int(sys.argv[3])
 context_graph = sys.argv[4]
 home.mkdir(parents=True, exist_ok=True)
 cfg_path = home / "config.json"
+original = None
 if cfg_path.exists():
     try:
-        data = json.loads(cfg_path.read_text(encoding="utf-8"))
+        original = cfg_path.read_text(encoding="utf-8")
+        data = json.loads(original)
     except Exception:
         data = {}
 else:
@@ -395,7 +458,10 @@ store = data.get("store") if isinstance(data.get("store"), dict) else {}
 options = store.get("options") if isinstance(store.get("options"), dict) else {}
 options["port"] = store_port
 data["store"] = {"backend": "oxigraph-server", "options": options}
-cfg_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+rendered = json.dumps(data, indent=2) + "\n"
+changed = rendered != original
+if changed:
+    cfg_path.write_text(rendered, encoding="utf-8")
 token_path = home / "auth.token"
 if not token_path.exists():
     token_path.write_text(
@@ -405,12 +471,17 @@ if not token_path.exists():
         encoding="utf-8",
     )
     os.chmod(token_path, 0o600)
+    changed = True
+print("changed" if changed else "unchanged")
 '@
     $writerFile = Join-Path $env:TEMP "blackbox_dkg_config.py"
     Set-Content -Path $writerFile -Value $writer -Encoding UTF8
     try {
-        & $VenvPython $writerFile $DkgHome $DkgPort $DkgStorePort $ContextGraphId
+        $configState = & $VenvPython $writerFile $DkgHome $DkgPort $DkgStorePort $ContextGraphId
         if ($LASTEXITCODE -ne 0) { throw "dkg config exit $LASTEXITCODE" }
+        if (($configState | Select-Object -Last 1) -eq "changed") {
+            $script:DkgRestartRequired = $true
+        }
     } finally {
         Remove-Item $writerFile -Force -ErrorAction SilentlyContinue
     }
@@ -468,6 +539,83 @@ function Install-PythonEnv {
 }
 
 # ── DKG node CLI + bootstrap ────────────────────────────────────────────────
+function Install-BlackboxDkgCheckout {
+    $entrypoint = Join-Path $DkgCliDir "packages\cli\dist\cli.js"
+    $buildMarker = Join-Path $DkgCliDir ".git\blackbox-build-commit"
+    $previousCommit = ""
+    $backupDir = ""
+    $needsBuild = $false
+    $gitCommand = Get-Command git -ErrorAction SilentlyContinue
+    $corepackCommand = Get-Command corepack -ErrorAction SilentlyContinue
+    $nodeCommand = Get-Command node -ErrorAction SilentlyContinue
+    if (-not $gitCommand -or -not $corepackCommand -or -not $nodeCommand) {
+        Write-Warn2 "git, Node.js, and Corepack are required to build the Blackbox DKG checkout."
+        return $false
+    }
+
+    if (Test-Path (Join-Path $DkgCliDir ".git")) {
+        & git -C $DkgCliDir diff --quiet
+        $worktreeClean = $LASTEXITCODE -eq 0
+        & git -C $DkgCliDir diff --cached --quiet
+        $indexClean = $LASTEXITCODE -eq 0
+        if (-not $worktreeClean -or -not $indexClean) {
+            Write-Warn2 "Managed DKG checkout has local changes; refusing to overwrite $DkgCliDir."
+            return $false
+        }
+        $previousCommit = (& git -C $DkgCliDir rev-parse HEAD).Trim()
+        & git -C $DkgCliDir remote set-url origin $DkgRepoUrl
+        if ($LASTEXITCODE -ne 0) { return $false }
+        & git -C $DkgCliDir fetch --depth 1 origin $DkgRepoBranch
+        if ($LASTEXITCODE -ne 0) { return $false }
+        & git -C $DkgCliDir checkout --detach FETCH_HEAD
+        if ($LASTEXITCODE -ne 0) { return $false }
+    } else {
+        if ((Test-Path $DkgCliDir) -and @(Get-ChildItem -Force $DkgCliDir).Count -gt 0) {
+            $backupDir = "$DkgCliDir.npm-backup-$(Get-Date -Format yyyyMMddHHmmss)"
+            Write-Step "Moving the legacy npm DKG install to $backupDir"
+            Move-Item $DkgCliDir $backupDir
+        }
+        & git clone --depth 1 --branch $DkgRepoBranch $DkgRepoUrl $DkgCliDir
+        if ($LASTEXITCODE -ne 0) {
+            if ($backupDir -and -not (Test-Path $DkgCliDir)) {
+                Move-Item $backupDir $DkgCliDir
+            }
+            Write-Warn2 "Could not clone DKG from $DkgRepoUrl#$DkgRepoBranch."
+            return $false
+        }
+        $needsBuild = $true
+    }
+
+    $currentCommit = (& git -C $DkgCliDir rev-parse HEAD).Trim()
+    $builtCommit = if (Test-Path $buildMarker) { (Get-Content -Raw $buildMarker).Trim() } else { "" }
+    if ($previousCommit -ne $currentCommit -or $builtCommit -ne $currentCommit -or -not (Test-Path $entrypoint)) {
+        $needsBuild = $true
+    }
+    if ($needsBuild) {
+        Write-Step "Building DKG feat/blackbox at $($currentCommit.Substring(0, 12)) ..."
+        Push-Location $DkgCliDir
+        try {
+            & corepack pnpm install --frozen-lockfile
+            if ($LASTEXITCODE -ne 0) { throw "pnpm install exit $LASTEXITCODE" }
+            & corepack pnpm run build:runtime:packages
+            if ($LASTEXITCODE -ne 0) { throw "pnpm build exit $LASTEXITCODE" }
+        } catch {
+            Write-Warn2 "Could not install or build the Blackbox DKG checkout: $_"
+            return $false
+        } finally {
+            Pop-Location
+        }
+        Set-Content -Path $buildMarker -Value "$currentCommit`n" -Encoding Ascii -NoNewline
+        $script:DkgRestartRequired = $true
+    }
+
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $DkgBin) | Out-Null
+    $launcher = "@echo off`r`n`"$($nodeCommand.Source)`" `"$entrypoint`" %*`r`n"
+    Set-Content -Path $DkgBin -Value $launcher -Encoding Ascii -NoNewline
+    Write-Ok "Blackbox DKG checkout ready ($($currentCommit.Substring(0, 12)), $DkgRepoBranch)"
+    return $true
+}
+
 function Install-Dkg {
     Write-Heading "Setting up the OriginTrail DKG node"
     if ($SkipDkg) {
@@ -483,24 +631,13 @@ function Install-Dkg {
         return
     }
 
-    New-Item -ItemType Directory -Force -Path $DkgCliDir | Out-Null
-    if (Test-Path $DkgBin) {
-        Write-Ok "Blackbox DKG CLI already installed"
-    } else {
-        Write-Step "Installing the Blackbox-owned DKG CLI ($DkgPackage) ..."
-        Write-Step "  CLI dir: $DkgCliDir"
-        try {
-            npm install --prefix $DkgCliDir $DkgPackage 2>&1 | Out-Null
-            if ($LASTEXITCODE -ne 0) { throw "npm exit $LASTEXITCODE" }
-            Write-Ok "Blackbox DKG CLI installed at $DkgBin"
-        } catch {
-            $script:InstallIncomplete = $true
-            Write-Warn2 "Local npm install failed. The plugin is installed, but threat-graph sync is not active."
-            Show-DkgManualHint
-            return
-        }
+    Write-Step "Installing the Blackbox DKG checkout ($DkgRepoUrl#$DkgRepoBranch) ..."
+    Write-Step "  Checkout: $DkgCliDir"
+    if (-not (Install-BlackboxDkgCheckout)) {
+        $script:InstallIncomplete = $true
+        Show-DkgManualHint
+        return
     }
-    Patch-DkgSyncBudgets
 
     New-Item -ItemType Directory -Force -Path $DkgHome | Out-Null
     if (-not (Test-BlackboxDkgPort)) {
@@ -509,7 +646,18 @@ function Install-Dkg {
     }
     if ($script:DkgAlreadyRunning) {
         Ensure-BlackboxDkgConfig
-        Remove-StaleDkgSubscriptions
+        if (-not (Prepare-BlackboxDkgRuntimeFingerprint)) {
+            Show-DkgManualHint
+            return
+        }
+        if (-not (Remove-StaleDkgSubscriptions)) {
+            Show-DkgManualHint
+            return
+        }
+        if (-not $script:DkgRestartRequired) {
+            $script:DkgReady = $true
+            return
+        }
         Write-Step "Restarting the Blackbox-owned DKG node to activate sync and relay updates ..."
         try {
             Invoke-BlackboxDkg stop
@@ -517,7 +665,10 @@ function Install-Dkg {
             Invoke-BlackboxDkg start
             if ($LASTEXITCODE -ne 0) { throw "dkg start exit $LASTEXITCODE" }
             Write-Ok "Blackbox DKG node restarted with the current sync settings"
-            Remove-StaleDkgSubscriptions
+            if (-not (Save-BlackboxDkgRuntimeFingerprint) -or -not (Remove-StaleDkgSubscriptions)) {
+                Show-DkgManualHint
+                return
+            }
             $script:DkgReady = $true
         } catch {
             $script:InstallIncomplete = $true
@@ -531,6 +682,10 @@ function Install-Dkg {
         return
     }
     Ensure-BlackboxDkgConfig
+    if (-not (Prepare-BlackboxDkgRuntimeFingerprint)) {
+        Show-DkgManualHint
+        return
+    }
 
     Write-Step "Bootstrapping a Blackbox-owned $Network node at $DkgDaemonUrl ..."
     Write-Step "  DKG home: $DkgHome"
@@ -541,7 +696,10 @@ function Install-Dkg {
         Invoke-BlackboxDkg start
         if ($LASTEXITCODE -ne 0) { throw "dkg exit $LASTEXITCODE" }
         Write-Ok "DKG node bootstrapped on $Network"
-        Remove-StaleDkgSubscriptions
+        if (-not (Save-BlackboxDkgRuntimeFingerprint) -or -not (Remove-StaleDkgSubscriptions)) {
+            Show-DkgManualHint
+            return
+        }
         $script:DkgReady = $true
     } catch {
         $script:InstallIncomplete = $true
@@ -568,26 +726,10 @@ function Sync-Ruleset {
     }
 }
 
-# Apply the tested, version-gated DKG 10.0.5 large-SWM recovery bridge. Later
-# agent versions are detected and left untouched.
-function Patch-DkgSyncBudgets {
-    $patcher = Join-Path $RepoDir "scripts\patch-dkg-10.0.5-sync.py"
-    if (-not (Test-Path $patcher)) {
-        Write-Warn2 "DKG 10.0.5 sync patcher is missing; large community graphs may not fully catch up."
-        return
-    }
-    & $script:VenvPython $patcher $DkgCliDir
-    if ($LASTEXITCODE -eq 0) {
-        Write-Ok "DKG 10.0.5 large-SWM recovery bridge checked"
-    } else {
-        Write-Warn2 "Could not patch DKG 10.0.5 large-SWM recovery; catch-up may remain incomplete."
-    }
-}
-
 function Show-DkgManualHint {
     Write-Step "To set up the DKG node later:"
-    Write-Host "      New-Item -ItemType Directory -Force -Path `"$DkgCliDir`""
-    Write-Host "      npm install --prefix `"$DkgCliDir`" `"$DkgPackage`""
+    Write-Host "      git clone --depth 1 --branch `"$DkgRepoBranch`" `"$DkgRepoUrl`" `"$DkgCliDir`""
+    Write-Host "      Set-Location `"$DkgCliDir`"; corepack pnpm install --frozen-lockfile; corepack pnpm run build:runtime:packages"
     Write-Host "      `$env:BLACKBOX_DKG_HOME = `"$DkgHome`""
     Write-Host "      `$env:BLACKBOX_DKG_BIN = `"$DkgBin`""
     Write-Host "      `$env:BLACKBOX_DKG_PORT = `"$DkgPort`""

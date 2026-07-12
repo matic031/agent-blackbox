@@ -252,9 +252,9 @@ def blackbox_dkg_home() -> Path:
 def blackbox_dkg_cli_dir() -> Path:
     """Return the Blackbox-owned DKG CLI package directory.
 
-    The installer places ``@origintrail-official/dkg`` here instead of using
-    ``npm -g``. Keeping the CLI package beside the Blackbox DKG home prevents a
-    Blackbox install from upgrading or depending on a user's unrelated DKG CLI.
+    The installer keeps its managed DKG source checkout here. Keeping the
+    checkout beside the Blackbox DKG home prevents a Blackbox install from
+    upgrading or depending on a user's unrelated DKG CLI.
     """
     env = os.environ.get("BLACKBOX_DKG_CLI_DIR")
     if env and env.strip():

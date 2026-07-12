@@ -38,7 +38,8 @@ BLACKBOX_DKG_STORE_PORT="${BLACKBOX_DKG_STORE_PORT:-7879}"
 BLACKBOX_DKG_HOME="${BLACKBOX_DKG_HOME:-$BLACKBOX_HOME/dkg}"
 BLACKBOX_DKG_CLI_DIR="${BLACKBOX_DKG_CLI_DIR:-$BLACKBOX_HOME/dkg-cli}"
 BLACKBOX_DKG_BIN="${BLACKBOX_DKG_BIN:-$BLACKBOX_DKG_CLI_DIR/node_modules/.bin/dkg}"
-BLACKBOX_DKG_PACKAGE="${BLACKBOX_DKG_PACKAGE:-@origintrail-official/dkg@latest}"
+BLACKBOX_DKG_REPO_URL="${BLACKBOX_DKG_REPO_URL:-https://github.com/matic031/dkg.git}"
+BLACKBOX_DKG_REPO_BRANCH="${BLACKBOX_DKG_REPO_BRANCH:-feat/blackbox}"
 BLACKBOX_DKG_DAEMON_URL="${BLACKBOX_DKG_DAEMON_URL:-${BLACKBOX_DKG_URL:-http://127.0.0.1:$BLACKBOX_DKG_PORT}}"
 NODE_MAJOR="${BLACKBOX_NODE_MAJOR:-22}"
 # Old default, parked for now: umanitek/guardian-threats-staging
@@ -56,6 +57,9 @@ BLACKBOX_THREAT_GRAPH_INCOMPLETE=false
 BLACKBOX_SYNC_PENDING=false
 BLACKBOX_SYNC_LOG=""
 BLACKBOX_DKG_ALREADY_RUNNING=false
+BLACKBOX_DKG_RESTART_REQUIRED=false
+BLACKBOX_DKG_RUNTIME_MARKER="$BLACKBOX_DKG_HOME/.blackbox-runtime.sha256"
+BLACKBOX_DKG_RUNTIME_FINGERPRINT=""
 HERMES_API_KEY_VARS='OPENAI_API_KEY|ANTHROPIC_API_KEY|OPENROUTER_API_KEY|NOUS_API_KEY|ZAI_API_KEY|KIMI_API_KEY|KIMI_CN_API_KEY|MINIMAX_API_KEY|MINIMAX_CN_API_KEY|GOOGLE_API_KEY|GEMINI_API_KEY|MISTRAL_API_KEY|GROQ_API_KEY|TOGETHER_API_KEY|XAI_API_KEY'
 HERMES_API_KEY_RE="^[[:space:]]*(${HERMES_API_KEY_VARS})[[:space:]]*=[[:space:]]*[^[:space:]#]+"
 
@@ -86,8 +90,8 @@ run_detached() {
 }
 
 blackbox_dkg() {
-    # The npm shim uses `#!/usr/bin/env node`; pin the same Node selected by
-    # this installer so an older Homebrew/system Node cannot load native
+    # The managed launcher pins the same Node selected by this installer so an
+    # older Homebrew/system Node cannot load native
     # modules built by Node 22.  Sequential peer catch-up prevents overlapping
     # sessions from superseding a long private-SWM recovery.  The larger page
     # and total windows were exercised over reconnecting direct/relay paths.
@@ -98,6 +102,7 @@ blackbox_dkg() {
     DKG_CATCHUP_MAX_CONCURRENT_PEERS="${DKG_CATCHUP_MAX_CONCURRENT_PEERS:-1}" \
     DKG_SYNC_PAGE_TIMEOUT_MS="${DKG_SYNC_PAGE_TIMEOUT_MS:-180000}" \
     DKG_SYNC_TOTAL_TIMEOUT_MS="${DKG_SYNC_TOTAL_TIMEOUT_MS:-1200000}" \
+    DKG_SYNC_MIN_GRAPH_BUDGET_MS="${DKG_SYNC_MIN_GRAPH_BUDGET_MS:-120000}" \
     "$BLACKBOX_DKG_BIN" "$@"
 }
 
@@ -108,15 +113,59 @@ blackbox_has_dkg_state() {
 clean_stale_dkg_subscriptions() {
     local cleaner="$REPO_DIR/scripts/blackbox-clean-dkg-subscriptions.py"
     if [ ! -f "$cleaner" ]; then
-        warn "DKG subscription cleaner is missing; stale graphs may keep syncing."
-        return 0
+        BLACKBOX_INSTALL_INCOMPLETE=true
+        BLACKBOX_THREAT_GRAPH_INCOMPLETE=true
+        warn "DKG subscription cleaner is missing; stale graphs cannot be verified safely."
+        return 1
     fi
     if "$VENV_DIR/bin/python" "$cleaner" \
         "$BLACKBOX_DKG_HOME" "$BLACKBOX_DKG_DAEMON_URL" "$BLACKBOX_CONTEXT_GRAPH_ID"; then
         ok "Stale DKG graph subscriptions checked"
     else
-        warn "Could not clean stale DKG graph subscriptions; Blackbox sync will continue."
+        BLACKBOX_INSTALL_INCOMPLETE=true
+        BLACKBOX_THREAT_GRAPH_INCOMPLETE=true
+        warn "Could not clean stale DKG graph subscriptions; setup is incomplete."
+        return 1
     fi
+}
+
+prepare_blackbox_dkg_runtime_fingerprint() {
+    local fingerprinter="$REPO_DIR/scripts/blackbox-dkg-runtime-fingerprint.py"
+    local node_bin
+    local applied=""
+    if [ ! -f "$fingerprinter" ]; then
+        BLACKBOX_INSTALL_INCOMPLETE=true
+        BLACKBOX_THREAT_GRAPH_INCOMPLETE=true
+        warn "DKG runtime fingerprint helper is missing; loaded checkout state cannot be verified."
+        return 1
+    fi
+    node_bin="$(command -v node)"
+    if ! BLACKBOX_DKG_RUNTIME_FINGERPRINT="$("$VENV_DIR/bin/python" "$fingerprinter" compute \
+        "$BLACKBOX_DKG_CLI_DIR" "$BLACKBOX_DKG_HOME" "$node_bin" "$BLACKBOX_DKG_BIN")"; then
+        BLACKBOX_INSTALL_INCOMPLETE=true
+        BLACKBOX_THREAT_GRAPH_INCOMPLETE=true
+        warn "Could not fingerprint the configured DKG runtime; setup is incomplete."
+        return 1
+    fi
+    if [ -f "$BLACKBOX_DKG_RUNTIME_MARKER" ]; then
+        applied="$(tr -d '\r\n' <"$BLACKBOX_DKG_RUNTIME_MARKER")"
+    fi
+    if [ "$applied" != "$BLACKBOX_DKG_RUNTIME_FINGERPRINT" ]; then
+        BLACKBOX_DKG_RESTART_REQUIRED=true
+    fi
+}
+
+record_blackbox_dkg_runtime_fingerprint() {
+    local fingerprinter="$REPO_DIR/scripts/blackbox-dkg-runtime-fingerprint.py"
+    if [ -z "$BLACKBOX_DKG_RUNTIME_FINGERPRINT" ] ||
+        ! "$VENV_DIR/bin/python" "$fingerprinter" record \
+            "$BLACKBOX_DKG_RUNTIME_MARKER" "$BLACKBOX_DKG_RUNTIME_FINGERPRINT"; then
+        BLACKBOX_INSTALL_INCOMPLETE=true
+        BLACKBOX_THREAT_GRAPH_INCOMPLETE=true
+        warn "DKG restarted, but its applied runtime fingerprint could not be recorded."
+        return 1
+    fi
+    return 0
 }
 
 port_in_use() {
@@ -232,7 +281,8 @@ check_blackbox_store_port() {
 }
 
 ensure_blackbox_dkg_config() {
-    "$VENV_DIR/bin/python" - "$BLACKBOX_DKG_HOME" "$BLACKBOX_DKG_PORT" "$BLACKBOX_DKG_STORE_PORT" "$BLACKBOX_CONTEXT_GRAPH_ID" <<'PYEOF'
+    local config_state
+    config_state="$("$VENV_DIR/bin/python" - "$BLACKBOX_DKG_HOME" "$BLACKBOX_DKG_PORT" "$BLACKBOX_DKG_STORE_PORT" "$BLACKBOX_CONTEXT_GRAPH_ID" <<'PYEOF'
 import json
 import os
 import secrets
@@ -245,9 +295,11 @@ store_port = int(sys.argv[3])
 context_graph = sys.argv[4]
 home.mkdir(parents=True, exist_ok=True)
 cfg_path = home / "config.json"
+original = None
 if cfg_path.exists():
     try:
-        data = json.loads(cfg_path.read_text(encoding="utf-8"))
+        original = cfg_path.read_text(encoding="utf-8")
+        data = json.loads(original)
     except Exception:
         data = {}
 else:
@@ -301,7 +353,10 @@ store = data.get("store") if isinstance(data.get("store"), dict) else {}
 options = store.get("options") if isinstance(store.get("options"), dict) else {}
 options["port"] = store_port
 data["store"] = {"backend": "oxigraph-server", "options": options}
-cfg_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+rendered = json.dumps(data, indent=2) + "\n"
+changed = rendered != original
+if changed:
+    cfg_path.write_text(rendered, encoding="utf-8")
 
 token_path = home / "auth.token"
 if not token_path.exists():
@@ -312,7 +367,13 @@ if not token_path.exists():
         encoding="utf-8",
     )
     os.chmod(token_path, 0o600)
+    changed = True
+print("changed" if changed else "unchanged")
 PYEOF
+    )"
+    if [ "$config_state" = "changed" ]; then
+        BLACKBOX_DKG_RESTART_REQUIRED=true
+    fi
 }
 
 banner() {
@@ -336,7 +397,8 @@ Environment overrides:
   BLACKBOX_REPO_URL, BLACKBOX_REPO_BRANCH, HERMES_HOME,
   BLACKBOX_NODE_MAJOR, BLACKBOX_INSTALL_DIR, BLACKBOX_CONTEXT_GRAPH_ID,
   BLACKBOX_DKG_PORT, BLACKBOX_DKG_STORE_PORT, BLACKBOX_DKG_HOME, BLACKBOX_DKG_CLI_DIR,
-  BLACKBOX_DKG_BIN, BLACKBOX_DKG_DAEMON_URL, BLACKBOX_DKG_CATCHUP_TIMEOUT,
+  BLACKBOX_DKG_BIN, BLACKBOX_DKG_REPO_URL, BLACKBOX_DKG_REPO_BRANCH,
+  BLACKBOX_DKG_DAEMON_URL, BLACKBOX_DKG_CATCHUP_TIMEOUT,
   BLACKBOX_LLM_PROVIDER,
   BLACKBOX_LLM_MODEL, BLACKBOX_LLM_KEY_SOURCE, BLACKBOX_LLM_API_KEY,
   BLACKBOX_HERMES_SETUP=reuse|always|never, BLACKBOX_AUTO_DASHBOARD=0|1,
@@ -738,6 +800,79 @@ run_hermes_setup() {
 }
 
 # ── DKG node CLI + bootstrap ────────────────────────────────────────────────
+install_blackbox_dkg_checkout() {
+    local previous_commit=""
+    local current_commit
+    local backup_dir=""
+    local needs_build=false
+    local entrypoint="$BLACKBOX_DKG_CLI_DIR/packages/cli/dist/cli.js"
+    local build_marker="$BLACKBOX_DKG_CLI_DIR/.git/blackbox-build-commit"
+    local built_commit=""
+    local node_bin
+
+    if ! command -v git >/dev/null 2>&1 || ! command -v corepack >/dev/null 2>&1; then
+        warn "git and Corepack are required to build the Blackbox DKG checkout."
+        return 1
+    fi
+
+    if [ -d "$BLACKBOX_DKG_CLI_DIR/.git" ]; then
+        if ! git -C "$BLACKBOX_DKG_CLI_DIR" diff --quiet ||
+            ! git -C "$BLACKBOX_DKG_CLI_DIR" diff --cached --quiet; then
+            warn "Managed DKG checkout has local changes; refusing to overwrite $BLACKBOX_DKG_CLI_DIR."
+            return 1
+        fi
+        previous_commit="$(git -C "$BLACKBOX_DKG_CLI_DIR" rev-parse HEAD)"
+        if ! git -C "$BLACKBOX_DKG_CLI_DIR" remote set-url origin "$BLACKBOX_DKG_REPO_URL" ||
+            ! git -C "$BLACKBOX_DKG_CLI_DIR" fetch --depth 1 origin "$BLACKBOX_DKG_REPO_BRANCH" ||
+            ! git -C "$BLACKBOX_DKG_CLI_DIR" checkout --detach FETCH_HEAD; then
+            warn "Could not update DKG from $BLACKBOX_DKG_REPO_URL#$BLACKBOX_DKG_REPO_BRANCH."
+            return 1
+        fi
+    else
+        if [ -d "$BLACKBOX_DKG_CLI_DIR" ] &&
+            [ -n "$(find "$BLACKBOX_DKG_CLI_DIR" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]; then
+            backup_dir="${BLACKBOX_DKG_CLI_DIR}.npm-backup-$(date +%Y%m%d%H%M%S)"
+            step "Moving the legacy npm DKG install to $backup_dir"
+            mv "$BLACKBOX_DKG_CLI_DIR" "$backup_dir"
+        fi
+        if ! git clone --depth 1 --branch "$BLACKBOX_DKG_REPO_BRANCH" \
+            "$BLACKBOX_DKG_REPO_URL" "$BLACKBOX_DKG_CLI_DIR"; then
+            [ -n "$backup_dir" ] && [ ! -e "$BLACKBOX_DKG_CLI_DIR" ] &&
+                mv "$backup_dir" "$BLACKBOX_DKG_CLI_DIR"
+            warn "Could not clone DKG from $BLACKBOX_DKG_REPO_URL#$BLACKBOX_DKG_REPO_BRANCH."
+            return 1
+        fi
+        needs_build=true
+    fi
+
+    current_commit="$(git -C "$BLACKBOX_DKG_CLI_DIR" rev-parse HEAD)"
+    [ -f "$build_marker" ] && built_commit="$(tr -d '\r\n' <"$build_marker")"
+    if [ "$previous_commit" != "$current_commit" ] ||
+        [ "$built_commit" != "$current_commit" ] || [ ! -f "$entrypoint" ]; then
+        needs_build=true
+    fi
+    if [ "$needs_build" = true ]; then
+        step "Building DKG feat/blackbox at ${current_commit:0:12} ..."
+        if ! (cd "$BLACKBOX_DKG_CLI_DIR" &&
+            corepack pnpm install --frozen-lockfile &&
+            corepack pnpm run build:runtime:packages); then
+            warn "Could not install or build the Blackbox DKG checkout."
+            return 1
+        fi
+        printf '%s\n' "$current_commit" >"$build_marker"
+        BLACKBOX_DKG_RESTART_REQUIRED=true
+    fi
+
+    node_bin="$(command -v node)"
+    mkdir -p "$(dirname "$BLACKBOX_DKG_BIN")"
+    {
+        printf '%s\n' '#!/bin/sh'
+        printf 'exec "%s" "%s" "$@"\n' "$node_bin" "$entrypoint"
+    } >"$BLACKBOX_DKG_BIN"
+    chmod 755 "$BLACKBOX_DKG_BIN"
+    ok "Blackbox DKG checkout ready (${current_commit:0:12}, $BLACKBOX_DKG_REPO_BRANCH)"
+}
+
 install_dkg() {
     heading "Setting up the OriginTrail DKG node"
     if [ "$SKIP_DKG" = true ]; then
@@ -755,23 +890,14 @@ install_dkg() {
         return 0
     fi
 
-    mkdir -p "$BLACKBOX_DKG_CLI_DIR"
-    if [ -x "$BLACKBOX_DKG_BIN" ]; then
-        ok "Blackbox DKG CLI already installed ($("$BLACKBOX_DKG_BIN" --version 2>/dev/null || echo present))"
-    else
-        step "Installing the Blackbox-owned DKG CLI ($BLACKBOX_DKG_PACKAGE) ..."
-        step "  CLI dir: $BLACKBOX_DKG_CLI_DIR"
-        if npm install --prefix "$BLACKBOX_DKG_CLI_DIR" "$BLACKBOX_DKG_PACKAGE" >/dev/null 2>&1; then
-            ok "Blackbox DKG CLI installed at $BLACKBOX_DKG_BIN"
-        else
-            BLACKBOX_INSTALL_INCOMPLETE=true
-            BLACKBOX_THREAT_GRAPH_INCOMPLETE=true
-            warn "Local npm install failed. The plugin is installed, but threat-graph sync is not active."
-            dkg_manual_hint
-            return 0
-        fi
+    step "Installing the Blackbox DKG checkout ($BLACKBOX_DKG_REPO_URL#$BLACKBOX_DKG_REPO_BRANCH) ..."
+    step "  Checkout: $BLACKBOX_DKG_CLI_DIR"
+    if ! install_blackbox_dkg_checkout; then
+        BLACKBOX_INSTALL_INCOMPLETE=true
+        BLACKBOX_THREAT_GRAPH_INCOMPLETE=true
+        dkg_manual_hint
+        return 0
     fi
-    patch_dkg_sync_budgets
 
     mkdir -p "$BLACKBOX_DKG_HOME"
     if ! check_blackbox_dkg_port; then
@@ -780,11 +906,26 @@ install_dkg() {
     fi
     if [ "$BLACKBOX_DKG_ALREADY_RUNNING" = true ]; then
         ensure_blackbox_dkg_config
-        clean_stale_dkg_subscriptions
+        if ! prepare_blackbox_dkg_runtime_fingerprint; then
+            dkg_manual_hint
+            return 0
+        fi
+        if ! clean_stale_dkg_subscriptions; then
+            dkg_manual_hint
+            return 0
+        fi
+        if [ "$BLACKBOX_DKG_RESTART_REQUIRED" != true ]; then
+            DKG_READY=true
+            return 0
+        fi
         step "Restarting the Blackbox-owned DKG node to activate sync and relay updates ..."
         if blackbox_dkg stop && blackbox_dkg start; then
             ok "Blackbox DKG node restarted with the current sync settings"
-            clean_stale_dkg_subscriptions
+            if ! record_blackbox_dkg_runtime_fingerprint ||
+                ! clean_stale_dkg_subscriptions; then
+                dkg_manual_hint
+                return 0
+            fi
             DKG_READY=true
         else
             BLACKBOX_INSTALL_INCOMPLETE=true
@@ -799,6 +940,10 @@ install_dkg() {
         return 0
     fi
     ensure_blackbox_dkg_config
+    if ! prepare_blackbox_dkg_runtime_fingerprint; then
+        dkg_manual_hint
+        return 0
+    fi
 
     step "Bootstrapping a Blackbox-owned $DKG_NETWORK node at $BLACKBOX_DKG_DAEMON_URL ..."
     step "  DKG home: $BLACKBOX_DKG_HOME"
@@ -807,7 +952,11 @@ install_dkg() {
     step "  (non-interactive; reading the public threat graph is free — no funds needed)"
     if blackbox_dkg start; then
         ok "DKG node bootstrapped on $DKG_NETWORK"
-        clean_stale_dkg_subscriptions
+        if ! record_blackbox_dkg_runtime_fingerprint ||
+            ! clean_stale_dkg_subscriptions; then
+            dkg_manual_hint
+            return 0
+        fi
         DKG_READY=true
     else
         BLACKBOX_INSTALL_INCOMPLETE=true
@@ -893,27 +1042,10 @@ wait_for_dkg_catchup() {
     return 1
 }
 
-# DKG agent 10.0.5 has two independent large-SWM blockers: short requester
-# budgets and an unbounded Oxigraph metadata self-join on the responder.  Keep
-# the bridge in one version-gated, tested script; later releases are left
-# untouched so their upstream implementation wins.
-patch_dkg_sync_budgets() {
-    local patcher="$REPO_DIR/scripts/patch-dkg-10.0.5-sync.py"
-    if [ ! -f "$patcher" ]; then
-        warn "DKG 10.0.5 sync patcher is missing; large community graphs may not fully catch up."
-        return 0
-    fi
-    if "$VENV_DIR/bin/python" "$patcher" "$BLACKBOX_DKG_CLI_DIR"; then
-        ok "DKG 10.0.5 large-SWM recovery bridge checked"
-    else
-        warn "Could not patch DKG 10.0.5 large-SWM recovery; catch-up may remain incomplete."
-    fi
-}
-
 dkg_manual_hint() {
     step "To set up the DKG node later:"
-    echo "      mkdir -p \"$BLACKBOX_DKG_CLI_DIR\""
-    echo "      npm install --prefix \"$BLACKBOX_DKG_CLI_DIR\" \"$BLACKBOX_DKG_PACKAGE\""
+    echo "      git clone --depth 1 --branch \"$BLACKBOX_DKG_REPO_BRANCH\" \"$BLACKBOX_DKG_REPO_URL\" \"$BLACKBOX_DKG_CLI_DIR\""
+    echo "      cd \"$BLACKBOX_DKG_CLI_DIR\" && corepack pnpm install --frozen-lockfile && corepack pnpm run build:runtime:packages"
     echo "      export BLACKBOX_DKG_HOME=\"$BLACKBOX_DKG_HOME\""
     echo "      export BLACKBOX_DKG_BIN=\"$BLACKBOX_DKG_BIN\""
     echo "      export BLACKBOX_DKG_PORT=\"$BLACKBOX_DKG_PORT\""

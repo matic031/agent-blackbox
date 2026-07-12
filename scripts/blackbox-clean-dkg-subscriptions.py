@@ -6,12 +6,45 @@ from __future__ import annotations
 import json
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
 
 class CleanupError(RuntimeError):
     """Raised when the local DKG daemon cannot retire a subscription."""
+
+
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Never forward the node-admin bearer token through an HTTP redirect."""
+
+    def redirect_request(self, *_args, **_kwargs):
+        return None
+
+
+def _build_local_opener() -> urllib.request.OpenerDirector:
+    """Ignore ambient proxies and redirects for token-bearing loopback calls."""
+    return urllib.request.build_opener(
+        urllib.request.ProxyHandler({}),
+        _NoRedirectHandler(),
+    )
+
+
+def _local_daemon_url(value: str) -> str:
+    parsed = urllib.parse.urlsplit(value)
+    if (
+        parsed.scheme not in {"http", "https"}
+        or parsed.hostname not in {"127.0.0.1", "localhost", "::1"}
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+        or parsed.path not in {"", "/"}
+    ):
+        raise CleanupError(
+            "subscription maintenance requires a direct loopback DKG URL"
+        )
+    return value.rstrip("/")
 
 
 def _load_token(dkg_home: Path) -> str:
@@ -36,8 +69,8 @@ def clean_subscriptions(
 ) -> list[str]:
     """Unsubscribe active graphs absent from this isolated node's config."""
     token = _load_token(dkg_home)
-    client = opener or urllib.request.build_opener()
-    base_url = daemon_url.rstrip("/")
+    client = opener or _build_local_opener()
+    base_url = _local_daemon_url(daemon_url)
     try:
         config = json.loads(
             (dkg_home.expanduser() / "config.json").read_text(encoding="utf-8")
@@ -73,9 +106,12 @@ def clean_subscriptions(
         if isinstance(graph, str) and graph not in allowed:
             stale.append(graph)
 
+    if not stale:
+        return []
+
     endpoint = base_url + "/api/context-graph/unsubscribe"
     removed: list[str] = []
-    for graph in stale:
+    for graph in list(dict.fromkeys(stale)):
         request = urllib.request.Request(
             endpoint,
             data=json.dumps({"contextGraphId": graph}).encode("utf-8"),
@@ -90,10 +126,14 @@ def clean_subscriptions(
                 payload = json.loads(response.read().decode("utf-8") or "{}")
         except (OSError, ValueError, urllib.error.URLError) as exc:
             raise CleanupError(f"could not unsubscribe {graph}: {exc}") from exc
-        if payload.get("subscribed") is True:
-            raise CleanupError(f"DKG kept stale graph subscribed: {graph}")
-        if graph not in removed:
-            removed.append(graph)
+        if (
+            payload.get("unsubscribed") != graph
+            or payload.get("subscribed") is not False
+        ):
+            raise CleanupError(
+                f"DKG did not confirm stale graph removal: {graph}"
+            )
+        removed.append(graph)
     return removed
 
 
