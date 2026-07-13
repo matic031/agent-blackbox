@@ -52,9 +52,9 @@ def slug(value: str) -> str:
     return trimmed or "unknown"
 
 
-# The ``urn:guardian:`` subject schemes (and the guardian ontology IRI in
-# constants.py) are kept literally after the Guardian->Blackbox rename so the
-# already-published threat corpus stays addressable and queryable.
+# The legacy ``urn:guardian:`` subject schemes (and ontology IRI in
+# constants.py) remain byte-stable so the already-published threat corpus stays
+# addressable and queryable.
 def threat_uri(identifier: str) -> str:
     """Stable curated-threat subject URI for a threat *identifier*."""
     return f"urn:guardian:threat:{slug(identifier)}"

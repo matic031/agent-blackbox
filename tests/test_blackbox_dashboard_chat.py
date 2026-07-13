@@ -146,6 +146,19 @@ def test_dashboard_zero_graph_count_spins_only_for_active_catchup():
     assert "return !(lastStatus && lastStatus.node_reachable === false);" not in html
 
 
+def test_dashboard_serves_only_allowlisted_brand_fonts():
+    client = TestClient(server.create_app())
+
+    font = client.get("/fonts/archivo-latin.woff2")
+    assert font.status_code == 200
+    assert font.headers["content-type"] == "font/woff2"
+    assert font.headers["cache-control"] == "public, max-age=31536000, immutable"
+    assert font.content.startswith(b"wOF2")
+
+    assert client.get("/fonts/Archivo-OFL.txt").status_code == 404
+    assert client.get("/fonts/not-a-font.woff2").status_code == 404
+
+
 def test_dashboard_graph_sync_state_tracks_real_dkg_catchup():
     assert server._graph_sync_state(5, True, "running") == "syncing"
     assert server._graph_sync_state(0, False, "running") == "unreachable"

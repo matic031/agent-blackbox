@@ -3,6 +3,7 @@
 Routes:
 
 * ``GET /``                 → the single-page ``static/index.html``.
+* ``GET /fonts/{name}``     → allowlisted, self-hosted brand fonts.
 * ``GET /api/findings``     → findings.jsonl, newest-first, paged.
 * ``GET /api/graph-status`` → curated threat counts + last sync + ruleset counts.
 * ``GET /api/reports``      → recent outbound sightings from the community graph.
@@ -28,11 +29,13 @@ from typing import Any, Dict, List, Set, Tuple
 logger = logging.getLogger(__name__)
 
 _RESCAN_INTERVAL_SEC = 5.0
+_RECONCILE_INTERVAL_SEC = 60.0
 _RULESET_EMPTY_RETRY_SEC = 10.0
 _RULESET_MIN_RETRY_SEC = 5.0
 
 _STATIC_DIR = Path(__file__).resolve().parent / "static"
 _ASSETS_DIR = Path(__file__).resolve().parent / "assets"
+_FONTS_DIR = _ASSETS_DIR / "fonts"
 
 
 def _ruleset_total(rs: Any) -> int:
@@ -80,7 +83,12 @@ def create_app():
 
     app = FastAPI(title="Agent Blackbox", docs_url=None, redoc_url=None)
 
-    _rescan_state: Dict[str, Any] = {"stop": False, "known": set(), "lock": threading.Lock()}
+    _rescan_state: Dict[str, Any] = {
+        "stop": False,
+        "known": set(),
+        "last_reconcile": 0.0,
+        "lock": threading.Lock(),
+    }
 
     def _rescan_once(*, force: bool = False) -> List[Dict[str, Any]]:
         """Discover local Hermes/OpenClaw workspaces and hook Blackbox into them.
@@ -101,7 +109,12 @@ def create_app():
             known: Set[Tuple[str, str]] = _rescan_state["known"]
             removed = known - current
             touched: List[Dict[str, Any]] = []
-            for kind, target in sorted(current if force else current - known):
+            now = time.monotonic()
+            reconcile = force or now - float(_rescan_state["last_reconcile"] or 0.0) >= _RECONCILE_INTERVAL_SEC
+            targets = current if reconcile else current - known
+            if reconcile:
+                _rescan_state["last_reconcile"] = now
+            for kind, target in sorted(targets):
                 try:
                     if kind == "hermes":
                         row = attach.attach_hermes(Path(target))
@@ -296,6 +309,31 @@ def create_app():
         if not path.exists():
             return JSONResponse({"error": "not found"}, status_code=404)
         return FileResponse(str(path), media_type="image/svg+xml")
+
+    @app.get("/fonts/{name}")
+    def font(name: str) -> Any:
+        # Exact allowlist keeps this static route traversal-safe and limits the
+        # dashboard to the licensed brand faces shipped by this plugin.
+        allowed = {
+            "archivo-latin.woff2",
+            "archivo-latin-ext.woff2",
+            "ibm-plex-mono-400-latin.woff2",
+            "ibm-plex-mono-400-latin-ext.woff2",
+            "ibm-plex-mono-500-latin.woff2",
+            "ibm-plex-mono-500-latin-ext.woff2",
+            "ibm-plex-mono-600-latin.woff2",
+            "ibm-plex-mono-600-latin-ext.woff2",
+        }
+        if name not in allowed:
+            return JSONResponse({"error": "not found"}, status_code=404)
+        path = _FONTS_DIR / name
+        if not path.exists():
+            return JSONResponse({"error": "not found"}, status_code=404)
+        return FileResponse(
+            str(path),
+            media_type="font/woff2",
+            headers={"Cache-Control": "public, max-age=31536000, immutable"},
+        )
 
     @app.get("/vendor/{name}")
     def vendor(name: str) -> Any:
@@ -548,7 +586,7 @@ def create_app():
         protected_local_fw = {
             str(row.get("kind") or "").lower()
             for row in attach_rows
-            if row.get("target") and row.get("already")
+            if row.get("target") and row.get("protected", row.get("already"))
         }
 
         # Local active agents: one per framework that has emitted a local
@@ -637,7 +675,7 @@ def create_app():
             attached = [
                 (str(row.get("kind") or "").lower(), str(row.get("target") or ""))
                 for row in attach_rows
-                if row.get("already") and row.get("target")
+                if row.get("protected", row.get("already")) and row.get("target")
             ]
             fw_with_ws = {fw for fw, _ in attached}
             local_addr_lc = local_addr.lower()
@@ -684,7 +722,7 @@ def create_app():
                 if not isinstance(row, dict):
                     continue
                 saw_row = True
-                row["protected"] = bool(row.get("already"))
+                row["protected"] = bool(row.get("protected", row.get("already")))
                 row["available"] = bool(row.get("target")) and not row.get("error")
                 if not row["available"]:
                     row["disabled_reason"] = str(row.get("error") or supported[kind])

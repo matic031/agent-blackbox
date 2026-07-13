@@ -36,10 +36,20 @@ $ProgressPreference = "SilentlyContinue"
 $RepoUrl     = if ($env:BLACKBOX_REPO_URL)    { $env:BLACKBOX_REPO_URL }    else { "https://github.com/matic031/agent-guardian.git" }
 $RepoBranch  = if ($env:BLACKBOX_REPO_BRANCH) { $env:BLACKBOX_REPO_BRANCH } else { "feat/guardian" }
 $HermesHome  = if ($env:HERMES_HOME)          { $env:HERMES_HOME }          else { "$env:USERPROFILE\.hermes" }
-# Keep the managed DKG checkout and state in the Agent Guardian checkout. When
+# Keep the managed DKG checkout and state in the Agent Blackbox checkout. When
 # invoked from a clone, use that clone; when piped through iex, use the checkout
 # Resolve-Repo creates at BLACKBOX_INSTALL_DIR.
-$DefaultRepoDir = if ($env:BLACKBOX_INSTALL_DIR) { $env:BLACKBOX_INSTALL_DIR } else { "$env:USERPROFILE\agent-guardian" }
+if ($env:BLACKBOX_INSTALL_DIR) {
+    $DefaultRepoDir = $env:BLACKBOX_INSTALL_DIR
+} elseif (Test-Path "$env:USERPROFILE\agent-blackbox\.git") {
+    $DefaultRepoDir = "$env:USERPROFILE\agent-blackbox"
+} elseif (Test-Path "$env:USERPROFILE\agent-guardian\.git") {
+    # Reuse the pre-Blackbox checkout in place: moving it would invalidate
+    # absolute venv scripts, OpenClaw load paths, and managed DKG state.
+    $DefaultRepoDir = "$env:USERPROFILE\agent-guardian"
+} else {
+    $DefaultRepoDir = "$env:USERPROFILE\agent-blackbox"
+}
 if ($PSCommandPath) {
     $candidateRepoDir = Split-Path -Parent (Split-Path -Parent $PSCommandPath)
     if ((Test-Path "$candidateRepoDir\pyproject.toml") -and (Test-Path "$candidateRepoDir\plugins\blackbox")) {
@@ -542,7 +552,7 @@ graphs = data.get("contextGraphs")
 if not isinstance(graphs, list):
     graphs = []
 # Keep catch-up focused on the selected Blackbox graph after migrating from
-# the retired Guardian default. Preserve it when explicitly selected.
+# the retired pre-Blackbox default. Preserve it when explicitly selected.
 legacy_graphs = {"umanitek/guardian-threats-staging", "umanitek/guardian-threats"}
 graphs = [g for g in graphs if g not in legacy_graphs or g == context_graph]
 if context_graph not in graphs:
@@ -658,7 +668,7 @@ function Install-PythonEnv {
     } else {
         Write-Step "Reusing existing venv at $VenvDir"
     }
-    Write-Step "Upgrading pip and installing agent-guardian[web] (editable) ..."
+    Write-Step "Upgrading pip and installing Hermes + Agent Blackbox (web extras, editable) ..."
     & $VenvPython -m pip install --upgrade pip | Out-Null
     Push-Location $RepoDir
     try {

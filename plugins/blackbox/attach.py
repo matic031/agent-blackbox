@@ -16,7 +16,9 @@ rest — the caller collects a per-target report). Only stdlib + PyYAML are used
 from __future__ import annotations
 
 import logging
+import json
 import os
+import re
 import shutil
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -27,6 +29,7 @@ logger = logging.getLogger(__name__)
 _BLACKBOX_CHAT_PROFILE = "blackbox"
 _BLACKBOX_CHAT_SOUL_MARKER = "<!-- managed-by: hermes-blackbox-chat -->"
 _SOURCE_ROOT_MARKER = ".blackbox-source-root"
+_INSTALL_STAMP_MARKER = ".blackbox-install-stamp"
 
 try:  # PyYAML ships with hermes; degrade gracefully if it is somehow absent.
     import yaml
@@ -43,6 +46,8 @@ _COPY_EXCLUDE_SUFFIXES = (".pyc", ".pyo")
 # OpenClaw always has something to load, even when Blackbox was copied into a
 # user home with no sibling ``integrations/`` (see ``_openclaw_plugin_source``).
 _BUNDLED_OPENCLAW_DIRNAME = "_openclaw"
+_OPENCLAW_MIN_VERSION = (2026, 6, 11)
+_OPENCLAW_MIN_VERSION_TEXT = ".".join(str(part) for part in _OPENCLAW_MIN_VERSION)
 
 
 # ---------------------------------------------------------------------------
@@ -142,14 +147,30 @@ def is_managed_blackbox_chat_profile(path: Path) -> bool:
         return False
 
 
-def discover_openclaw_workspaces() -> List[Path]:
-    """Return existing local OpenClaw workspaces (those with an ``openclaw.json``).
+def _openclaw_config_path(target: Path) -> Path:
+    """Return the config file represented by an OpenClaw attach *target*.
 
-    Candidate roots come from ``$OPENCLAW_STATE_DIR``, ``$OPENCLAW_HOME/.openclaw``,
-    the legacy ``~/.clawdbot``, **and any ``~/.openclaw*`` profile directory**
-    (so ``openclaw --profile prod`` writing to ``~/.openclaw-prod`` is picked up
-    live without any config change on our side). Only directories that actually
-    contain an ``openclaw.json`` are returned, de-duplicated preserving order.
+    Standard targets are state directories containing ``openclaw.json``.  An
+    explicit ``$OPENCLAW_CONFIG_PATH`` may point at any filename, so discovery
+    returns that file directly and this helper keeps both forms supported.
+    """
+    try:
+        if target.is_file() or target.suffix.lower() in {".json", ".json5"}:
+            return target
+    except OSError:
+        pass
+    return target / "openclaw.json"
+
+
+def discover_openclaw_workspaces() -> List[Path]:
+    """Return existing local OpenClaw config targets.
+
+    Candidate roots come from ``$OPENCLAW_CONFIG_PATH``,
+    ``$OPENCLAW_STATE_DIR``, ``$OPENCLAW_HOME/.openclaw``, and any
+    ``~/.openclaw*`` profile directory.  Standard configs are represented by
+    their state directory for stable dashboard labels; a custom config filename
+    is represented by the file itself.  Results are de-duplicated by config
+    path, preserving order.
     """
     candidates: List[Path] = []
 
@@ -162,6 +183,19 @@ def discover_openclaw_workspaces() -> List[Path]:
             return
         if resolved not in candidates:
             candidates.append(resolved)
+
+    def _add_config(path: Path) -> None:
+        try:
+            expanded = path.expanduser()
+        except Exception:
+            return
+        # Keep the long-standing state-directory target shape for the normal
+        # filename; only a true custom filename needs to travel as a file.
+        _add(expanded.parent if expanded.name == "openclaw.json" else expanded)
+
+    config_path = os.environ.get("OPENCLAW_CONFIG_PATH")
+    if config_path and config_path.strip():
+        _add_config(Path(config_path.strip()))
 
     state_dir = os.environ.get("OPENCLAW_STATE_DIR")
     if state_dir and state_dir.strip():
@@ -180,9 +214,203 @@ def discover_openclaw_workspaces() -> List[Path]:
     except Exception:  # pragma: no cover - defensive
         pass
 
-    _add(Path.home() / ".clawdbot")  # legacy name
+    out: List[Path] = []
+    seen_configs: set = set()
+    for candidate in candidates:
+        config = _openclaw_config_path(candidate)
+        try:
+            if not config.is_file():
+                continue
+            key = str(config.resolve())
+        except OSError:
+            continue
+        if key in seen_configs:
+            continue
+        seen_configs.add(key)
+        out.append(candidate)
+    return out
 
-    return [c for c in candidates if (c / "openclaw.json").is_file()]
+
+def _json5_to_json(text: str) -> str:
+    """Convert the JSON5 features commonly used by OpenClaw into strict JSON.
+
+    OpenClaw officially accepts comments, trailing commas, unquoted object keys,
+    and single-quoted strings.  Blackbox only needs those syntax features to
+    merge one plugin entry; uncommon numeric JSON5 extensions fail safely rather
+    than risking replacement of the user's config.
+    """
+    out: List[str] = []
+    i = 0
+    length = len(text)
+    while i < length:
+        ch = text[i]
+        if ch == "/" and i + 1 < length and text[i + 1] == "/":
+            i += 2
+            while i < length and text[i] not in "\r\n":
+                i += 1
+            continue
+        if ch == "/" and i + 1 < length and text[i + 1] == "*":
+            i += 2
+            while i + 1 < length and text[i : i + 2] != "*/":
+                if text[i] in "\r\n":
+                    out.append(text[i])
+                i += 1
+            if i + 1 >= length:
+                raise ValueError("unterminated JSON5 block comment")
+            i += 2
+            continue
+        if ch == '"':
+            start = i
+            i += 1
+            escaped = False
+            while i < length:
+                cur = text[i]
+                i += 1
+                if escaped:
+                    escaped = False
+                elif cur == "\\":
+                    escaped = True
+                elif cur == '"':
+                    break
+            else:
+                raise ValueError("unterminated JSON5 string")
+            out.append(text[start:i])
+            continue
+        if ch == "'":
+            i += 1
+            value: List[str] = []
+            while i < length:
+                cur = text[i]
+                i += 1
+                if cur == "'":
+                    break
+                if cur != "\\":
+                    value.append(cur)
+                    continue
+                if i >= length:
+                    raise ValueError("unterminated JSON5 escape")
+                esc = text[i]
+                i += 1
+                if esc in "\r\n":
+                    if esc == "\r" and i < length and text[i] == "\n":
+                        i += 1
+                    continue
+                mapped = {"b": "\b", "f": "\f", "n": "\n", "r": "\r", "t": "\t", "v": "\v", "0": "\0"}
+                if esc in mapped:
+                    value.append(mapped[esc])
+                elif esc == "x" and i + 2 <= length:
+                    value.append(chr(int(text[i : i + 2], 16)))
+                    i += 2
+                elif esc == "u" and i + 4 <= length:
+                    value.append(chr(int(text[i : i + 4], 16)))
+                    i += 4
+                else:
+                    value.append(esc)
+            else:
+                raise ValueError("unterminated JSON5 string")
+            out.append(json.dumps("".join(value), ensure_ascii=False))
+            continue
+        out.append(ch)
+        i += 1
+
+    cleaned = "".join(out)
+
+    # Quote unquoted object keys without touching string contents.
+    keyed: List[str] = []
+    i = 0
+    while i < len(cleaned):
+        ch = cleaned[i]
+        if ch == '"':
+            start = i
+            i += 1
+            escaped = False
+            while i < len(cleaned):
+                cur = cleaned[i]
+                i += 1
+                if escaped:
+                    escaped = False
+                elif cur == "\\":
+                    escaped = True
+                elif cur == '"':
+                    break
+            keyed.append(cleaned[start:i])
+            continue
+        if ch in "{,":
+            keyed.append(ch)
+            i += 1
+            while i < len(cleaned) and cleaned[i].isspace():
+                keyed.append(cleaned[i])
+                i += 1
+            match = re.match(r"[$A-Za-z_][$A-Za-z0-9_]*", cleaned[i:])
+            if match:
+                key = match.group(0)
+                end = i + len(key)
+                look = end
+                while look < len(cleaned) and cleaned[look].isspace():
+                    look += 1
+                if look < len(cleaned) and cleaned[look] == ":":
+                    keyed.append(json.dumps(key))
+                    i = end
+                    continue
+            continue
+        keyed.append(ch)
+        i += 1
+
+    # Remove trailing commas outside strings.
+    strictish = "".join(keyed)
+    final: List[str] = []
+    i = 0
+    while i < len(strictish):
+        ch = strictish[i]
+        if ch == '"':
+            start = i
+            i += 1
+            escaped = False
+            while i < len(strictish):
+                cur = strictish[i]
+                i += 1
+                if escaped:
+                    escaped = False
+                elif cur == "\\":
+                    escaped = True
+                elif cur == '"':
+                    break
+            final.append(strictish[start:i])
+            continue
+        if ch == ",":
+            look = i + 1
+            while look < len(strictish) and strictish[look].isspace():
+                look += 1
+            if look < len(strictish) and strictish[look] in "}]":
+                i += 1
+                continue
+        final.append(ch)
+        i += 1
+    return "".join(final)
+
+
+def _load_openclaw_config(path: Path) -> Dict[str, Any]:
+    """Load an OpenClaw JSON/JSON5 config or raise without modifying it."""
+    text = path.read_text(encoding="utf-8")
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        data = json.loads(_json5_to_json(text))
+    if not isinstance(data, dict):
+        raise ValueError("OpenClaw config root must be an object")
+    return data
+
+
+def _calendar_version(value: Any) -> Optional[tuple]:
+    match = re.search(r"(\d{4})\.(\d{1,2})\.(\d{1,2})", str(value or ""))
+    if not match:
+        return None
+    return tuple(int(part) for part in match.groups())
+
+
+def _openclaw_version(data: Dict[str, Any]) -> Optional[tuple]:
+    meta = data.get("meta")
+    return _calendar_version(meta.get("lastTouchedVersion")) if isinstance(meta, dict) else None
 
 
 # ---------------------------------------------------------------------------
@@ -258,7 +486,15 @@ def _needs_copy(dest: Path) -> bool:
         return True
     try:
         src_dir = _plugin_source_dir()
-        installed_at = init.stat().st_mtime
+        if not _is_openclaw_plugin_dir(dest / _BUNDLED_OPENCLAW_DIRNAME):
+            checkout = _source_checkout_root(src_dir)
+            candidates = [src_dir / _BUNDLED_OPENCLAW_DIRNAME]
+            if checkout is not None:
+                candidates.append(checkout / "integrations" / "openclaw")
+            if any(_is_openclaw_plugin_dir(candidate) for candidate in candidates):
+                return True
+        stamp = dest / _INSTALL_STAMP_MARKER
+        installed_at = stamp.stat().st_mtime if stamp.exists() else init.stat().st_mtime
         newest_src = max(
             p.stat().st_mtime for p in src_dir.rglob("*.py") if "__pycache__" not in p.parts
         )
@@ -282,6 +518,7 @@ def _copy_plugin_tree(src: Path, dest: Path) -> None:
         shutil.rmtree(dest)
     shutil.copytree(src, dest, ignore=_copy_ignore)
     _bundle_openclaw_plugin(src, dest)
+    (dest / _INSTALL_STAMP_MARKER).write_text(constants.__version__, encoding="utf-8")
     source_root = _source_checkout_root(src)
     if source_root is not None:
         try:
@@ -313,7 +550,11 @@ def _bundle_openclaw_plugin(src: Path, dest: Path) -> None:
     dest_bundle = dest / _BUNDLED_OPENCLAW_DIRNAME
     if _is_openclaw_plugin_dir(dest_bundle):
         return  # copytree already carried a valid bundle over from *src*
-    for candidate in (src / _BUNDLED_OPENCLAW_DIRNAME, _repo_openclaw_dir()):
+    checkout = _source_checkout_root(src)
+    checkout_integration = checkout / "integrations" / "openclaw" if checkout is not None else None
+    for candidate in (src / _BUNDLED_OPENCLAW_DIRNAME, checkout_integration, _repo_openclaw_dir()):
+        if candidate is None:
+            continue
         if not _is_openclaw_plugin_dir(candidate):
             continue
         try:
@@ -349,6 +590,7 @@ def attach_hermes(home: Path, *, dry_run: bool = False) -> Dict[str, Any]:
         "target": str(home),
         "kind": "hermes",
         "ok": False,
+        "protected": False,
         "copied": False,
         "enabled": False,
         "already": False,
@@ -360,15 +602,17 @@ def attach_hermes(home: Path, *, dry_run: bool = False) -> Dict[str, Any]:
         # Don't copy a home onto itself (e.g. running from inside a home).
         same_tree = src == dest or src == dest.resolve() if dest.exists() else False
         needs = (not same_tree) and _needs_copy(dest)
+        files_ready = same_tree or not needs
         if needs and not dry_run:
             _copy_plugin_tree(src, dest)
         report["copied"] = needs
 
         config_path = home / "config.yaml"
         data = _load_yaml(config_path)
-        if _enabled_list_has(data, "blackbox"):
+        config_enabled = _enabled_list_has(data, "blackbox")
+        if config_enabled and files_ready:
             report["already"] = True
-        else:
+        elif not config_enabled:
             if not dry_run:
                 plugins = data.setdefault("plugins", {})
                 if not isinstance(plugins, dict):
@@ -382,6 +626,10 @@ def attach_hermes(home: Path, *, dry_run: bool = False) -> Dict[str, Any]:
                     enabled.append("blackbox")
                 _dump_yaml(config_path, data)
             report["enabled"] = True
+        # A dry-run reports the protection that exists now, not the state an
+        # attach *could* create.  This keeps dashboard cards honest when config
+        # says enabled but the plugin files are missing or stale.
+        report["protected"] = (config_enabled and files_ready) if dry_run else True
         report["ok"] = True
     except Exception as exc:  # fail open per target
         logger.debug("blackbox.attach: attach_hermes(%s) failed: %s", home, exc)
@@ -472,6 +720,57 @@ def _openclaw_load_paths_entry() -> Optional[str]:
     return str(src) if src is not None else None
 
 
+def _same_openclaw_load_path(left: Any, right: Any) -> bool:
+    if not isinstance(left, str) or not isinstance(right, str):
+        return False
+    try:
+        return Path(left).expanduser().resolve() == Path(right).expanduser().resolve()
+    except Exception:
+        return os.path.normcase(os.path.normpath(left)) == os.path.normcase(os.path.normpath(right))
+
+
+def _is_blackbox_openclaw_load_path(value: Any) -> bool:
+    """Recognize current or stale Blackbox OpenClaw plugin paths.
+
+    Existing paths are identified by manifest id.  Known checkout/bundle path
+    shapes cover stale directories that no longer exist, while deliberately not
+    matching the pre-Blackbox ``plugins/guardian/_openclaw`` integration.
+    """
+    if not isinstance(value, str) or not value.strip():
+        return False
+    path = Path(value).expanduser()
+    try:
+        manifest = path / "openclaw.plugin.json"
+        if manifest.is_file():
+            data = json.loads(manifest.read_text(encoding="utf-8"))
+            if isinstance(data, dict) and data.get("id") == "blackbox":
+                return True
+    except Exception:
+        pass
+    normalized = value.replace("\\", "/").rstrip("/").lower()
+    if normalized.endswith("/plugins/blackbox/_openclaw"):
+        return True
+    if normalized.endswith("/integrations/openclaw"):
+        return any(
+            marker in normalized
+            for marker in ("/agent-blackbox/", "/agent-guardian/", "/blackbox-", "/blackbox/")
+        )
+    return False
+
+
+def _is_missing_pre_blackbox_load_path(value: Any) -> bool:
+    """True for a vanished pre-Blackbox OpenClaw bundle path."""
+    if not isinstance(value, str) or not value.strip():
+        return False
+    normalized = value.replace("\\", "/").rstrip("/").lower()
+    if not normalized.endswith("/plugins/guardian/_openclaw"):
+        return False
+    try:
+        return not Path(value).expanduser().exists()
+    except OSError:
+        return True
+
+
 def attach_openclaw(workspace: Path, *, dry_run: bool = False) -> Dict[str, Any]:
     """Enable Blackbox in a single OpenClaw *workspace*.
 
@@ -483,26 +782,34 @@ def attach_openclaw(workspace: Path, *, dry_run: bool = False) -> Dict[str, Any]
 
     Preserves every other key. Fails open per target.
     """
-    import json  # local import: only this path needs JSON I/O
-
     workspace = workspace.expanduser()
-    config_path = workspace / "openclaw.json"
+    config_path = _openclaw_config_path(workspace)
     report: Dict[str, Any] = {
         "target": str(workspace),
+        "config_path": str(config_path),
         "kind": "openclaw",
         "ok": False,
+        "protected": False,
         "changed": False,
         "already": False,
         "backed_up": False,
         "dry_run": dry_run,
     }
     try:
-        try:
-            data = json.loads(config_path.read_text(encoding="utf-8")) if config_path.exists() else {}
-        except Exception:
-            data = {}
-        if not isinstance(data, dict):
-            data = {}
+        if not config_path.is_file():
+            raise FileNotFoundError(f"OpenClaw config not found: {config_path}")
+        data = _load_openclaw_config(config_path)
+
+        detected_version = _openclaw_version(data)
+        if detected_version is not None:
+            report["version"] = ".".join(str(part) for part in detected_version)
+            if detected_version < _OPENCLAW_MIN_VERSION:
+                report["unsupported"] = True
+                report["error"] = (
+                    f"OpenClaw {report['version']} is unsupported; "
+                    f"Blackbox requires OpenClaw {_OPENCLAW_MIN_VERSION_TEXT}+"
+                )
+                return report
 
         cfg = load_blackbox_config_snapshot()
         load_path = _openclaw_load_paths_entry()
@@ -516,17 +823,17 @@ def attach_openclaw(workspace: Path, *, dry_run: bool = False) -> Dict[str, Any]
         changed = _merge_openclaw(data, cfg, load_path)
         report["changed"] = changed
         report["already"] = not changed
+        report["protected"] = load_path is not None and not changed if dry_run else load_path is not None
 
         if changed and not dry_run:
             # Back up before writing.
             if config_path.exists():
-                backup = config_path.with_suffix(".json.blackbox.bak")
+                backup = config_path.with_name(config_path.name + ".blackbox.bak")
                 shutil.copy2(config_path, backup)
                 report["backed_up"] = True
             _atomic_write(config_path, json.dumps(data, indent=2) + "\n")
         # Honest status: without a load path the blackbox block is recorded but
         # OpenClaw won't actually load the hook, so this workspace isn't protected.
-        report["protected"] = load_path is not None
         report["ok"] = load_path is not None
     except Exception as exc:
         logger.debug("blackbox.attach: attach_openclaw(%s) failed: %s", workspace, exc)
@@ -563,7 +870,18 @@ def _merge_openclaw(data: Dict[str, Any], cfg: Dict[str, Any], load_path: Option
         if not isinstance(paths, list):
             paths = []
             load["paths"] = paths
-        if load_path not in paths:
+        # One plugin id must resolve from one source.  Remove older Blackbox
+        # checkout/bundle paths so OpenClaw cannot load a stale copy first.
+        kept = [
+            path
+            for path in paths
+            if not _is_missing_pre_blackbox_load_path(path)
+            and (_same_openclaw_load_path(path, load_path) or not _is_blackbox_openclaw_load_path(path))
+        ]
+        if kept != paths:
+            paths[:] = kept
+            changed = True
+        if not any(_same_openclaw_load_path(path, load_path) for path in paths):
             paths.append(load_path)
             changed = True
 
@@ -593,10 +911,8 @@ def _merge_openclaw(data: Dict[str, Any], cfg: Dict[str, Any], load_path: Option
 
 def detach_openclaw(workspace: Path, *, dry_run: bool = False) -> Dict[str, Any]:
     """Disable Blackbox in a single OpenClaw *workspace* (idempotent, fail-open)."""
-    import json
-
     workspace = workspace.expanduser()
-    config_path = workspace / "openclaw.json"
+    config_path = _openclaw_config_path(workspace)
     report: Dict[str, Any] = {
         "target": str(workspace),
         "kind": "openclaw",
@@ -610,12 +926,7 @@ def detach_openclaw(workspace: Path, *, dry_run: bool = False) -> Dict[str, Any]
             report["already"] = True
             report["ok"] = True
             return report
-        try:
-            data = json.loads(config_path.read_text(encoding="utf-8"))
-        except Exception:
-            data = {}
-        if not isinstance(data, dict):
-            data = {}
+        data = _load_openclaw_config(config_path)
         plugins = data.get("plugins")
         changed = False
         if isinstance(plugins, dict):
@@ -628,10 +939,9 @@ def detach_openclaw(workspace: Path, *, dry_run: bool = False) -> Dict[str, Any]
                 # Remove ANY blackbox openclaw load path, not just the one that
                 # resolves from this location — detaching an installed home would
                 # otherwise orphan an entry pointing at a now-removed plugin.
-                marker = os.path.join("integrations", "openclaw")
                 kept = [
                     p for p in load["paths"]
-                    if not (isinstance(p, str) and p.rstrip("/").endswith(marker))
+                    if not _is_blackbox_openclaw_load_path(p)
                 ]
                 if len(kept) != len(load["paths"]):
                     load["paths"] = kept

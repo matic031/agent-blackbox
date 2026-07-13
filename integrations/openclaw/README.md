@@ -71,7 +71,7 @@ Point OpenClaw at the plugin directory and set its config in
 ```json
 {
   "plugins": {
-    "load": { "paths": ["/absolute/path/to/agent-guardian/integrations/openclaw"] },
+    "load": { "paths": ["/absolute/path/to/agent-blackbox/integrations/openclaw"] },
     "enabled": ["blackbox"],
     "entries": {
       "blackbox": {
@@ -211,6 +211,8 @@ Ruleset cache is stored under the OpenClaw state dir
 
 ## Requirements
 
+- OpenClaw ≥ 2026.6.11. Earlier releases do not expose the stable Plugin SDK
+  hooks Blackbox uses.
 - Node ≥ 22.19 (OpenClaw runtime). Zero runtime dependencies — uses global
   `fetch`, `node:crypto`, and `node:fs`.
 - A running local DKG v10 node. Without one, the plugin loads and fails open

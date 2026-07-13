@@ -1,6 +1,6 @@
 # Seeding the Blackbox public threat graph
 
-This is the working runbook for building the Agent Guardian / Blackbox threat
+This is the working runbook for building the Agent Blackbox threat
 graph into the moat: a high-quality, source-rich corpus of known-bad agent
 artifacts that ordinary OSV/CVE scanning, local heuristics, and one-off agent
 rules do not cover.

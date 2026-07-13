@@ -13,6 +13,9 @@
     "extensions": [
       "./src/index.ts"
     ],
+    "install": {
+      "minHostVersion": ">=2026.6.11"
+    },
     "compat": {
       "pluginApi": ">=2026.6.11",
       "minGatewayVersion": "2026.6.11"

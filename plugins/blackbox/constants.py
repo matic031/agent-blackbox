@@ -21,11 +21,10 @@ __version__ = "1.1.0"
 # Ontology
 # ---------------------------------------------------------------------------
 
-#: Base IRI for the Blackbox ontology (``g:`` prefix in SPARQL). The path stays
-#: ``/guardian/`` (not ``/blackbox/``) on purpose: the already-published threat
-#: corpus uses these predicate/type IRIs, so keeping them leaves that data
-#: queryable after the Guardian->Blackbox rename. The ``urn:guardian:`` subject
-#: schemes in quads.py are kept for the same reason.
+#: Base IRI for the Blackbox ontology (``g:`` prefix in SPARQL). The legacy
+#: ``/guardian/`` path remains byte-stable because the published corpus already
+#: uses these predicate/type IRIs. The ``urn:guardian:`` subject schemes in
+#: quads.py remain stable for the same reason.
 BLACKBOX_ONTOLOGY = "http://umanitek.ai/ontology/guardian/"
 
 # rdf:type IRIs -------------------------------------------------------------
@@ -106,7 +105,7 @@ SCHEMA_CONTRIBUTOR_PRED = "http://schema.org/contributor"
 #: path. Approved members read and write SWM. The independent curated publish
 #: policy keeps VM promotion restricted to the curator.
 # Old default, parked for now: the correct graph is the blackbox one below, NOT
-# the guardian one. Do not re-enable without discussion.
+# the legacy one. Do not re-enable without discussion.
 # DEFAULT_CONTEXT_GRAPH_ID = "umanitek/guardian-threats-staging"
 DEFAULT_CONTEXT_GRAPH_ID = "umanitek/blackbox-threats-staging"
 

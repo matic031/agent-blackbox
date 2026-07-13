@@ -1,6 +1,6 @@
 # DKG V10 — Public SWM catch-up cannot onboard a fresh node to a large shared-memory graph
 
-**Reporter:** Umanitek (Agent Guardian)
+**Reporter:** Umanitek (Agent Blackbox)
 **DKG version:** v10.0.2 (monorepo build), network `mainnet-base`, `nodeRole: edge`
 **Severity:** blocks the core "subscribe to a public community graph and read it" flow once the SWM pool is large
 

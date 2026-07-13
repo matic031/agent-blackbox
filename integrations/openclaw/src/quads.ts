@@ -32,8 +32,8 @@ export const SEVERITY_RANK: Record<BlackboxSeverity, number> = {
 };
 
 // --- Ontology IRIs (shared vocabulary; identical to constants.py) ----------
-// The IRI path and the `urn:guardian:` schemes below stay `guardian` (not
-// `blackbox`) so the already-published corpus stays queryable post-rename.
+// The legacy IRI path and `urn:guardian:` schemes below remain byte-stable so
+// the already-published corpus stays queryable.
 export const BLACKBOX_ONTOLOGY = "http://umanitek.ai/ontology/guardian/";
 export const BLACKBOX_THREAT_TYPE_IRI = `${BLACKBOX_ONTOLOGY}Threat`;
 export const BLACKBOX_DEP_THREAT_TYPE_IRI = `${BLACKBOX_ONTOLOGY}VulnerabilityAdvisory`;

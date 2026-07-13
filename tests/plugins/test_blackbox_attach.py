@@ -1,6 +1,7 @@
 """Tests for ``blackbox attach`` / ``blackbox detach`` discovery + merge logic."""
 
 import json
+from pathlib import Path
 
 import pytest
 import yaml
@@ -12,6 +13,13 @@ attach = load_blackbox("attach")
 constants = load_blackbox("constants")
 hooks = load_blackbox("hooks")
 config_mod = load_blackbox("config")
+
+
+def test_openclaw_package_declares_enforced_minimum_host_version():
+    package = json.loads(
+        (Path(__file__).parents[2] / "integrations" / "openclaw" / "package.json").read_text(encoding="utf-8")
+    )
+    assert package["openclaw"]["install"]["minHostVersion"] == ">=2026.6.11"
 
 
 # ---------------------------------------------------------------------------
@@ -102,6 +110,18 @@ def test_discover_openclaw_only_existing_installs(fake_env):
     assert (fake_env["home"] / ".openclaw-dev") not in workspaces
 
 
+def test_discover_openclaw_honors_custom_config_path(fake_env, monkeypatch):
+    config = fake_env["home"] / "service" / "custom-openclaw.json5"
+    config.parent.mkdir()
+    config.write_text("{ plugins: {}, }\n", encoding="utf-8")
+    monkeypatch.setenv("OPENCLAW_CONFIG_PATH", str(config))
+
+    workspaces = attach.discover_openclaw_workspaces()
+
+    assert config in workspaces
+    assert workspaces.count(config) == 1
+
+
 # ---------------------------------------------------------------------------
 # attach_hermes — copies plugin + enables idempotently
 # ---------------------------------------------------------------------------
@@ -171,6 +191,20 @@ def test_attach_hermes_dry_run_writes_nothing(fake_env):
     # No plugin dir, no config change.
     assert not (home / "plugins" / "blackbox").exists()
     assert (home / "config.yaml").read_text() == before
+
+
+def test_attach_hermes_dry_run_does_not_claim_missing_plugin_is_protected(fake_env):
+    home = fake_env["hermes_default"]
+    data = yaml.safe_load((home / "config.yaml").read_text())
+    data["plugins"]["enabled"] = ["blackbox"]
+    (home / "config.yaml").write_text(yaml.safe_dump(data), encoding="utf-8")
+
+    report = attach.attach_hermes(home, dry_run=True)
+
+    assert report["ok"] is True
+    assert report["protected"] is False
+    assert report["already"] is False
+    assert report["copied"] is True
 
 
 # ---------------------------------------------------------------------------
@@ -257,6 +291,110 @@ def test_attach_openclaw_dry_run_writes_nothing(fake_env):
     assert (ws / "openclaw.json").read_text() == before
 
 
+def test_attach_openclaw_supports_json5_without_losing_other_config(fake_env):
+    ws = fake_env["openclaw_ws"]
+    (ws / "openclaw.json").write_text(
+        """{
+          // OpenClaw accepts JSON5.
+          gateway: { url: 'http://127.0.0.1:18789', },
+          plugins: { allow: ['other',], },
+          customFlag: true,
+        }\n""",
+        encoding="utf-8",
+    )
+
+    report = attach.attach_openclaw(ws)
+    data = json.loads((ws / "openclaw.json").read_text(encoding="utf-8"))
+
+    assert report["ok"] is True
+    assert data["gateway"]["url"] == "http://127.0.0.1:18789"
+    assert data["customFlag"] is True
+    assert data["plugins"]["allow"] == ["other", "blackbox"]
+
+
+def test_attach_openclaw_parse_failure_never_replaces_config(fake_env):
+    ws = fake_env["openclaw_ws"]
+    broken = "{ gateway: { token: 0xNOT_JSON5 } }\n"
+    (ws / "openclaw.json").write_text(broken, encoding="utf-8")
+
+    report = attach.attach_openclaw(ws)
+
+    assert report["ok"] is False
+    assert report.get("error")
+    assert (ws / "openclaw.json").read_text(encoding="utf-8") == broken
+
+
+def test_attach_openclaw_rejects_known_unsupported_version_without_writing(fake_env):
+    ws = fake_env["openclaw_ws"]
+    config = ws / "openclaw.json"
+    config.write_text(
+        json.dumps({"meta": {"lastTouchedVersion": "2026.5.31"}, "keep": "yes"}, indent=2),
+        encoding="utf-8",
+    )
+    before = config.read_text(encoding="utf-8")
+
+    report = attach.attach_openclaw(ws)
+
+    assert report["ok"] is False
+    assert report["unsupported"] is True
+    assert "2026.6.11+" in report["error"]
+    assert config.read_text(encoding="utf-8") == before
+
+
+def test_attach_openclaw_replaces_stale_blackbox_path_but_keeps_other_plugins(fake_env):
+    ws = fake_env["openclaw_ws"]
+    config = ws / "openclaw.json"
+    pre_blackbox_plugin = fake_env["home"] / "plugins" / "guardian" / "_openclaw"
+    pre_blackbox_plugin.mkdir(parents=True)
+    (pre_blackbox_plugin / "openclaw.plugin.json").write_text(
+        '{"id":"guardian"}\n', encoding="utf-8"
+    )
+    missing_pre_blackbox_plugin = "/tmp/missing/plugins/guardian/_openclaw"
+    stale_canonical_checkout = "/tmp/agent-blackbox/integrations/openclaw"
+    config.write_text(
+        json.dumps(
+            {
+                "plugins": {
+                    "load": {
+                        "paths": [
+                            "/tmp/blackbox-clean-client-old/integrations/openclaw",
+                            stale_canonical_checkout,
+                            str(pre_blackbox_plugin),
+                            missing_pre_blackbox_plugin,
+                        ]
+                    }
+                }
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    report = attach.attach_openclaw(ws)
+    paths = json.loads(config.read_text(encoding="utf-8"))["plugins"]["load"]["paths"]
+
+    assert report["ok"] is True
+    assert "/tmp/blackbox-clean-client-old/integrations/openclaw" not in paths
+    assert stale_canonical_checkout not in paths
+    assert str(pre_blackbox_plugin) in paths
+    assert missing_pre_blackbox_plugin not in paths
+    assert any(attach._same_openclaw_load_path(path, attach._openclaw_load_paths_entry()) for path in paths)
+
+
+def test_attach_openclaw_accepts_custom_config_file(fake_env):
+    config = fake_env["home"] / "custom" / "agent-config.json5"
+    config.parent.mkdir()
+    config.write_text("{ keep: 'value', plugins: {}, }\n", encoding="utf-8")
+
+    report = attach.attach_openclaw(config)
+    data = json.loads(config.read_text(encoding="utf-8"))
+
+    assert report["ok"] is True
+    assert report["config_path"] == str(config)
+    assert data["keep"] == "value"
+    assert data["plugins"]["entries"]["blackbox"]["enabled"] is True
+
+
 def test_copy_plugin_tree_bundles_openclaw(tmp_path):
     # An installed copy has no sibling integrations/, so the OpenClaw JS plugin
     # must be bundled INTO the copy — otherwise OpenClaw has nothing to load
@@ -267,6 +405,27 @@ def test_copy_plugin_tree_bundles_openclaw(tmp_path):
     assert (bundle / "openclaw.plugin.json").is_file()
     assert (bundle / "src" / "index.ts").is_file()
     assert not (bundle / "node_modules").exists()  # deps excluded from the bundle
+
+
+def test_copy_plugin_tree_bundles_from_explicit_checkout_source(tmp_path, monkeypatch):
+    """Fresh installed-plugin execution must not depend on its own marker yet."""
+    repo = tmp_path / "checkout"
+    src = repo / "plugins" / "blackbox"
+    integration = repo / "integrations" / "openclaw"
+    src.mkdir(parents=True)
+    integration.mkdir(parents=True)
+    (repo / ".git").mkdir()
+    (src / "__init__.py").write_text("", encoding="utf-8")
+    (src / "constants.py").write_text("__version__ = '1.0.0'\n", encoding="utf-8")
+    (integration / "openclaw.plugin.json").write_text('{"id":"blackbox"}\n', encoding="utf-8")
+    (integration / "index.ts").write_text("export {};\n", encoding="utf-8")
+    monkeypatch.setattr(attach, "_repo_openclaw_dir", lambda: tmp_path / "missing")
+
+    dest = tmp_path / "installed" / "plugins" / "blackbox"
+    attach._copy_plugin_tree(src, dest)
+
+    assert (dest / "_openclaw" / "openclaw.plugin.json").is_file()
+    assert (dest / ".blackbox-install-stamp").is_file()
 
 
 def test_openclaw_load_path_resolves_from_installed_copy(tmp_path, monkeypatch):
@@ -322,6 +481,19 @@ def test_auto_attach_due_stamps_and_throttles(tmp_path, monkeypatch):
     monkeypatch.setenv("BLACKBOX_HOME", str(tmp_path / "ghome"))
     assert hooks._auto_attach_due() is True
     assert hooks._auto_attach_due() is False  # inside the interval
+
+
+def test_auto_attach_due_runs_immediately_when_target_set_changes(tmp_path, monkeypatch):
+    monkeypatch.setenv("BLACKBOX_HOME", str(tmp_path / "ghome"))
+    targets = [tmp_path / ".hermes"]
+    monkeypatch.setattr(attach, "discover_hermes_homes", lambda: list(targets))
+    monkeypatch.setattr(attach, "discover_openclaw_workspaces", lambda: [])
+
+    assert hooks._auto_attach_due() is True
+    assert hooks._auto_attach_due() is False
+
+    targets.append(tmp_path / ".hermes" / "profiles" / "new")
+    assert hooks._auto_attach_due() is True
 
 
 def test_session_start_spawns_attach_sweep_once(tmp_path, monkeypatch):

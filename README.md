@@ -31,8 +31,8 @@ The installer only automates the steps below (idempotent, no sudo). Run them you
 
 ```bash
 # 1. Get the code
-git clone -b feat/guardian https://github.com/matic031/agent-guardian.git
-cd agent-guardian
+git clone -b feat/guardian https://github.com/matic031/agent-guardian.git agent-blackbox
+cd agent-blackbox
 
 # 2. Python env (3.11-3.13) with the dashboard extras
 python3 -m venv venv
@@ -203,8 +203,8 @@ Set under `plugins.entries.blackbox.*` in `config.yaml`.
 |-----|---------|---------|
 | `mode` | `audit` | `audit` or `block` |
 | `dkg_url` | `http://127.0.0.1:9320` | Blackbox-managed local DKG node |
-| `dkg_home` | `<agent-guardian>/.dkg` | isolated DKG node config, token, pid, and cache |
-| `context_graph_id` | `umanitek/guardian-threats-staging` | staging Guardian threat graph until production is seeded |
+| `dkg_home` | `<agent-blackbox>/.dkg` | isolated DKG node config, token, pid, and cache |
+| `context_graph_id` | `umanitek/blackbox-threats-staging` | staging Blackbox threat graph until production is seeded |
 | `daily_report_limit` | `9999` | max threat reports sent to the community graph per day |
 | `report_min_severity` | `high` | minimum severity for heuristic candidates to be flagged and reported |
 | `detection.<category>.enabled` | `true` | turn a whole category on/off (`injection`, `escalation`, `dependency`, `fileaccess`, `skill`) |

@@ -55,8 +55,8 @@ hermes blackbox setup-graph            # create + register the public threat gra
 hermes blackbox status                 # confirm node health + which graph you're pointed at
 ```
 
-`context_graph_id` in your `config.yaml` must point at the public Guardian
-threat graph you created (default `umanitek/guardian-threats-staging`).
+`context_graph_id` in your `config.yaml` must point at the public Blackbox
+threat graph you created (default `umanitek/blackbox-threats-staging`).
 
 ## Day-to-day curation
 

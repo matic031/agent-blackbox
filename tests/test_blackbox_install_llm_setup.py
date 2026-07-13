@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shlex
 import shutil
@@ -52,6 +53,23 @@ def _extract_powershell_function_body(name: str) -> str:
     )
     assert match is not None, f"{name} not found in scripts/blackbox-install.ps1"
     return match["body"]
+
+
+def _select_unix_install_root(home: Path, explicit: Path | None = None) -> Path:
+    """Evaluate only the install-root preamble with an isolated fake home."""
+    text = INSTALL_SH.read_text(encoding="utf-8")
+    preamble = text.split('DKG_NETWORK="${BLACKBOX_DKG_NETWORK', 1)[0]
+    env = {"HOME": str(home), "PATH": os.environ.get("PATH", "")}
+    if explicit is not None:
+        env["BLACKBOX_INSTALL_DIR"] = str(explicit)
+    result = subprocess.run(
+        ["bash", "-c", f'{preamble}\nprintf %s "$BLACKBOX_INSTALL_ROOT"'],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    return Path(result.stdout)
 
 
 def test_llm_setup_reuses_existing_config_without_prompting() -> None:
@@ -106,7 +124,8 @@ def test_unix_installer_uses_isolated_blackbox_dkg_node() -> None:
     assert 'BLACKBOX_DKG_PORT="${BLACKBOX_DKG_PORT:-9320}"' in text
     assert 'BLACKBOX_DKG_STORE_PORT="${BLACKBOX_DKG_STORE_PORT:-9999}"' in text
     assert 'BLACKBOX_DKG_STORE_URL="${BLACKBOX_DKG_STORE_URL:-}"' in text
-    assert 'BLACKBOX_INSTALL_ROOT="${BLACKBOX_INSTALL_DIR:-$HOME/agent-guardian}"' in text
+    assert 'BLACKBOX_INSTALL_ROOT="$HOME/agent-blackbox"' in text
+    assert 'BLACKBOX_INSTALL_ROOT="$HOME/agent-guardian"' in text
     assert 'BLACKBOX_DKG_HOME="${BLACKBOX_DKG_HOME:-$BLACKBOX_INSTALL_ROOT/.dkg}"' in text
     assert 'BLACKBOX_DKG_CLI_DIR="${BLACKBOX_DKG_CLI_DIR:-$BLACKBOX_INSTALL_ROOT/dkg}"' in text
     assert 'BLACKBOX_DKG_BIN="${BLACKBOX_DKG_BIN:-$BLACKBOX_DKG_CLI_DIR/node_modules/.bin/dkg}"' in text
@@ -131,6 +150,36 @@ def test_unix_installer_uses_isolated_blackbox_dkg_node() -> None:
     assert "npm i -g" not in text
     assert "npm install -g" not in text
     assert '"dkg_url": "http://127.0.0.1:9200"' not in text
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash is unavailable")
+def test_unix_installer_prefers_canonical_root_but_reuses_legacy_checkout(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+
+    assert _select_unix_install_root(home) == home / "agent-blackbox"
+
+    legacy = home / "agent-guardian"
+    (legacy / ".git").mkdir(parents=True)
+    assert _select_unix_install_root(home) == legacy
+
+    canonical = home / "agent-blackbox"
+    (canonical / ".git").mkdir(parents=True)
+    assert _select_unix_install_root(home) == canonical
+
+    explicit = tmp_path / "custom-blackbox"
+    assert _select_unix_install_root(home, explicit) == explicit
+
+
+def test_windows_installer_uses_canonical_root_with_legacy_fallback() -> None:
+    text = INSTALL_PS1.read_text(encoding="utf-8")
+
+    assert 'Test-Path "$env:USERPROFILE\\agent-blackbox\\.git"' in text
+    assert '$DefaultRepoDir = "$env:USERPROFILE\\agent-blackbox"' in text
+    assert 'Test-Path "$env:USERPROFILE\\agent-guardian\\.git"' in text
+    assert '$DefaultRepoDir = "$env:USERPROFILE\\agent-guardian"' in text
 
 
 # The 4 mainnet-base core relays the installer seeds into config.relayPeers.
@@ -458,7 +507,7 @@ def test_unix_legacy_dkg_state_moves_into_project_without_losing_identity(
 ) -> None:
     home = tmp_path / "home"
     legacy = home / ".hermes" / "blackbox" / "dkg"
-    target = home / "agent-guardian" / ".dkg"
+    target = home / "agent-blackbox" / ".dkg"
     legacy.mkdir(parents=True)
     target.parent.mkdir(parents=True)
     (legacy / "config.json").write_text('{"apiPort":9320}\n', encoding="utf-8")

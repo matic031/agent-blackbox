@@ -532,10 +532,12 @@ _AUTO_ATTACH_INTERVAL_SECS = 24 * 60 * 60
 
 
 def _auto_attach_due() -> bool:
-    """True at most once per interval, tracked in a state file.
+    """True once per interval, or immediately when a new agent target appears.
 
     Stamps the timestamp *before* the sweep so concurrent session starts don't
-    each fan out their own attach thread.
+    each fan out their own attach thread.  Including the discovered target set
+    prevents the 24-hour throttle from delaying protection for a Hermes profile
+    or OpenClaw workspace installed after the last sweep.
     """
     import json
     import time
@@ -544,13 +546,25 @@ def _auto_attach_due() -> bool:
         path = constants.blackbox_home() / "auto_attach.json"
         now = time.time()
         try:
-            last = float(json.loads(path.read_text(encoding="utf-8")).get("last_run", 0.0))
+            from . import attach
+
+            targets = sorted(
+                [f"hermes:{item}" for item in attach.discover_hermes_homes()]
+                + [f"openclaw:{item}" for item in attach.discover_openclaw_workspaces()]
+            )
+        except Exception:
+            targets = []
+        try:
+            state = json.loads(path.read_text(encoding="utf-8"))
+            last = float(state.get("last_run", 0.0))
+            previous_targets = sorted(str(item) for item in (state.get("targets") or []))
         except Exception:
             last = 0.0
-        if now - last < _AUTO_ATTACH_INTERVAL_SECS:
+            previous_targets = []
+        if now - last < _AUTO_ATTACH_INTERVAL_SECS and targets == previous_targets:
             return False
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps({"last_run": now}), encoding="utf-8")
+        path.write_text(json.dumps({"last_run": now, "targets": targets}), encoding="utf-8")
         return True
     except Exception as exc:
         logger.debug("blackbox: auto-attach throttle failed: %s", exc)

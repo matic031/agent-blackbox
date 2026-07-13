@@ -23,10 +23,20 @@ set -euo pipefail
 REPO_URL="${BLACKBOX_REPO_URL:-https://github.com/matic031/agent-guardian.git}"
 REPO_BRANCH="${BLACKBOX_REPO_BRANCH:-feat/guardian}"
 HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
-# Keep the managed DKG checkout and node state inside the Agent Guardian
+# Keep the managed DKG checkout and node state inside the Agent Blackbox
 # checkout.  For a local script this is the current repository; for curl | bash
 # it is the checkout the installer creates at BLACKBOX_INSTALL_DIR.
-BLACKBOX_INSTALL_ROOT="${BLACKBOX_INSTALL_DIR:-$HOME/agent-guardian}"
+if [ -n "${BLACKBOX_INSTALL_DIR:-}" ]; then
+    BLACKBOX_INSTALL_ROOT="$BLACKBOX_INSTALL_DIR"
+elif [ -e "$HOME/agent-blackbox/.git" ]; then
+    BLACKBOX_INSTALL_ROOT="$HOME/agent-blackbox"
+elif [ -e "$HOME/agent-guardian/.git" ]; then
+    # Reuse the pre-Blackbox checkout in place: moving it would invalidate
+    # absolute venv shebangs, OpenClaw load paths, and managed DKG state.
+    BLACKBOX_INSTALL_ROOT="$HOME/agent-guardian"
+else
+    BLACKBOX_INSTALL_ROOT="$HOME/agent-blackbox"
+fi
 BLACKBOX_INSTALL_SCRIPT="${BASH_SOURCE[0]:-}"
 if [ -n "$BLACKBOX_INSTALL_SCRIPT" ] && [ -f "$BLACKBOX_INSTALL_SCRIPT" ]; then
     _blackbox_script_root="$(cd "$(dirname "$BLACKBOX_INSTALL_SCRIPT")/.." && pwd)"
@@ -439,7 +449,7 @@ data["relayReservationCount"] = int(data.get("relayReservationCount") or 4)
 graphs = data.get("contextGraphs")
 if not isinstance(graphs, list):
     graphs = []
-# Do not keep subscribing a migrated Blackbox node to the retired Guardian
+# Do not keep subscribing a migrated Blackbox node to the retired pre-Blackbox
 # graph: each extra graph competes for the same catch-up budget.  Preserve it
 # when the operator explicitly selected it as the active graph.
 legacy_graphs = {"umanitek/guardian-threats-staging", "umanitek/guardian-threats"}
@@ -768,7 +778,7 @@ minimal_python_env() {
     else
         step "Reusing existing venv at $VENV_DIR"
     fi
-    step "Installing agent-guardian[web] (editable) ..."
+    step "Installing Hermes + Agent Blackbox (web extras, editable) ..."
     # A uv-built venv ships no pip, so install with uv when it's available.
     if command -v uv >/dev/null 2>&1; then
         ( cd "$REPO_DIR" && VIRTUAL_ENV="$VENV_DIR" uv pip install -e ".[web]" )

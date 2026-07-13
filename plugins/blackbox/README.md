@@ -19,6 +19,17 @@ The installer sets up an isolated DKG node for Blackbox and protects detected
 Hermes and OpenClaw agents. Docker must be installed and running for its
 Blazegraph store. The installer does not replace or modify an existing DKG node.
 
+## Compatibility
+
+- Hermes builds dated 2026-04-13 or later are supported. The installer uses a
+  compatible Hermes build.
+- OpenClaw 2026.6.11 or later is supported. Older releases do not provide the
+  stable plugin hooks Blackbox requires.
+
+Standard Hermes profiles and OpenClaw profiles are attached automatically. A
+running OpenClaw Gateway must be restarted once after its plugin config changes.
+For a remote or containerized agent, install Blackbox on the Gateway host.
+
 ## Use
 
 ```bash
