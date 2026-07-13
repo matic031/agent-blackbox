@@ -326,6 +326,19 @@ class DkgClient:
             timeout=_STORE_TIMEOUT,
         )
 
+    def catchup_status(self, cg_id: str) -> Dict[str, Any]:
+        """Return the latest asynchronous catch-up job for ``cg_id``.
+
+        The daemon applies a recovered graph snapshot atomically, so consumers
+        cannot count partial rows while it is running.  This status lets UI
+        callers distinguish that active transfer from a genuinely empty graph.
+        """
+        encoded = urllib.parse.quote(cg_id, safe="")
+        return self._request(
+            "GET",
+            f"/api/sync/catchup-status?contextGraphId={encoded}",
+        )
+
     def request_join(self, cg_id: str, curator_peer_id: str,
                      agent_name: str = "agent-blackbox") -> Dict[str, Any]:
         """Consumer-side: sign a join request and forward it to the curator.

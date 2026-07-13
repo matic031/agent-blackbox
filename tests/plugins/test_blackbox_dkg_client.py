@@ -160,6 +160,20 @@ def test_register_context_graph_sends_policies(monkeypatch):
     assert cap["url"].endswith("/api/context-graph/register")
 
 
+def test_catchup_status_encodes_context_graph_id(monkeypatch):
+    cap = _capture(monkeypatch, '{"status":"running"}')
+    client = dkg_client.DkgClient(url="http://node", token="tok")
+
+    result = client.catchup_status("umanitek/blackbox threats")
+
+    assert result == {"status": "running"}
+    assert cap["method"] == "GET"
+    assert cap["url"] == (
+        "http://node/api/sync/catchup-status?"
+        "contextGraphId=umanitek%2Fblackbox%20threats"
+    )
+
+
 def test_create_context_graph_can_seed_allowed_agents(monkeypatch):
     cap = _capture(monkeypatch)
     client = dkg_client.DkgClient(url="http://node", token=None)

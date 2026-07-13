@@ -153,8 +153,14 @@
   .refresh-btn:disabled { cursor: default; opacity: 0.6; }
   .refresh-btn:disabled:hover svg { transform: none; }
   /* While a refresh is in flight the icon spins; overrides the hover tilt. */
-  .refresh-btn.spinning svg { animation: bb-spin 0.8s linear infinite; }
-  @keyframes bb-spin { to { transform: rotate(360deg); } }
+  .refresh-btn.spinning svg {
+    animation: bb-spin 0.8s linear infinite;
+    transform-origin: center;
+  }
+  @keyframes bb-spin {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
+  }
 
   /* ---------- Blackbox chat sidebar ---------- */
   .chat-scrim {
@@ -849,15 +855,19 @@
      node reads as "syncing" rather than a settled 0. */
   .bb-loader {
     display: inline-block;
+    flex: 0 0 auto;
     width: 14px; height: 14px;
     border: 2px solid var(--border);
     border-top-color: var(--muted);
     border-radius: 50%;
     animation: bb-spin 0.9s linear infinite;
+    will-change: transform;
     vertical-align: middle;
   }
   .stat .value .bb-loader { width: 18px; height: 18px; }
+  .stat .value .sync-count-value + .bb-loader { margin-left: 9px; }
   .tab-count .bb-loader { width: 11px; height: 11px; border-width: 1.5px; }
+  .tab-count .sync-count-value + .bb-loader { margin-left: 4px; }
   .graph-empty .e-msg .bb-loader { border-top-color: var(--mint); margin-right: 9px; }
 
   @media (max-width: 1020px) {
@@ -1670,28 +1680,38 @@
   }
 
   // ---- Sync-aware counts -------------------------------------------------
-  // A graph tier shows a loader only until its first API payload arrives. An
-  // empty successful payload is a real current value, even while background
-  // catch-up may later make it positive. Treating every reachable zero as
-  // "syncing" made a legitimately empty Public/VM graph spin forever.
+  // Show a loader only while the DKG reports a real queued/running catch-up.
+  // A settled empty graph remains 0 instead of spinning forever.
   var LOADER_HTML = '<span class="bb-loader" role="status" aria-label="Syncing"></span>';
-  var loaderLatch = {};
+  function countTier(key) {
+    key = String(key || "");
+    if (key.indexOf("community") >= 0) return "community";
+    if (key.indexOf("public") >= 0 || key.indexOf("curated") >= 0) return "public";
+    return null;
+  }
   function countSyncing(key, value) {
     if (value == null) return true;
-    if (Number(value) > 0) { loaderLatch[key] = true; return false; }
-    return false;
+    var tier = countTier(key);
+    return !!tier && isTierPending(tier);
   }
   // Render a count element as either the loader or the number. fmt adds
   // thousands separators (stat cards); tab chips stay compact/raw. Leaves an
   // existing loader in place so the poll doesn't restart its spin animation.
   function showsLoader(el) {
-    return el.firstElementChild && el.firstElementChild.classList.contains("bb-loader");
+    return !!el.querySelector(".bb-loader");
   }
   function setCount(id, value, key, fmt) {
     var el = $(id);
     if (!el) return;
     if (countSyncing(key, value)) {
-      if (!showsLoader(el)) el.innerHTML = LOADER_HTML;
+      var positive = value != null && Number(value) > 0;
+      var shown = positive ? (fmt ? num(value) : String(value)) : "";
+      var prior = el.querySelector(".sync-count-value");
+      if (!showsLoader(el) || (prior && prior.textContent !== shown) || (positive && !prior)) {
+        el.innerHTML = positive
+          ? '<span class="sync-count-value">' + esc(shown) + '</span>' + LOADER_HTML
+          : LOADER_HTML;
+      }
     } else {
       el.textContent = fmt ? num(value) : (value == null ? 0 : value);
     }
@@ -1708,16 +1728,25 @@
 
   function isTierPending(tier) {
     var p = tierProgress(tier);
-    return p && (p.state === "pending" || p.state === "loading");
+    return p && (
+      p.state === "syncing" || p.state === "refreshing" ||
+      p.state === "pending" || p.state === "loading"
+    );
   }
 
   function graphTotalForTier(tier) {
+    // /api/graph-status is the freshest cache generation. Prefer it over an
+    // older page payload so a 0/partial graph is reloaded as soon as sync lands.
+    var progress = lastStatus && lastStatus.sync_progress && lastStatus.sync_progress[tier];
+    if (progress && progress.count != null) return Number(progress.count) || 0;
+    if (lastStatus) {
+      var statusCount = tier === "public"
+        ? (lastStatus.curated != null ? lastStatus.curated : lastStatus.curated_threats)
+        : lastStatus.community;
+      if (statusCount != null) return Number(statusCount) || 0;
+    }
     var data = graphCache[tier];
     if (data && data.total != null) return Number(data.total) || 0;
-    if (lastStatus) {
-      if (tier === "public") return Number(lastStatus.curated != null ? lastStatus.curated : lastStatus.curated_threats) || 0;
-      if (tier === "community") return Number(lastStatus.community) || 0;
-    }
     return data != null ? asList(data).length : null;
   }
 
@@ -1770,6 +1799,9 @@
     function next(pageOffset) {
       return getJSON(graphPageUrl(tier, pageOffset)).then(function (page) {
         mergeGraphPage(tier, page);
+        // Paint every completed page. Large graphs now visibly fill instead of
+        // waiting for the entire multi-page download before the first redraw.
+        if (tier === activeTier) renderGraphTab();
         var nowLoaded = graphLoaded(tier);
         var total = Number((graphCache[tier] && graphCache[tier].total) || nowLoaded);
         if (nowLoaded < total || (graphCache[tier] && graphCache[tier].partial)) {
@@ -3257,8 +3289,17 @@
       });
       var count = $("graph-count");
       if (count) {
-        count.style.display = meta.focusLabel ? "" : "none";
-        count.innerHTML = meta.focusLabel ? '<strong>' + esc(meta.focusLabel) + '</strong>' : "";
+        var loaded = graphLoaded(activeTier);
+        var total = graphTotalForTier(activeTier);
+        var syncing = isTierPending(activeTier);
+        var loading = total != null && loaded < total;
+        count.style.display = (syncing || loading || meta.focusLabel) ? "" : "none";
+        count.innerHTML = syncing
+          ? LOADER_HTML + '<strong>' + esc(tierProgress(activeTier).label || "Syncing") +
+            (loaded > 0 ? ' · ' + num(loaded) + ' available' : '') + '</strong>'
+          : (loading
+            ? LOADER_HTML + '<strong>Loading ' + num(loaded) + ' of ' + num(total) + '</strong>'
+            : (meta.focusLabel ? '<strong>' + esc(meta.focusLabel) + '</strong>' : ""));
       }
     }
 
@@ -3481,7 +3522,9 @@
 
     // still loading this tier
     if (data == null) {
-      showGraphEmpty(isLocal ? "Loading activity…" : "Loading threats…");
+      showGraphEmpty(isLocal
+        ? "Loading activity…"
+        : LOADER_HTML + '<strong>Loading threats…</strong>');
       if (fg) fg.graphData({ nodes: [], links: [] });
       fgTierShown = null;
       return;
@@ -3492,9 +3535,11 @@
     // rather than the "nothing here" message.
     var hasContent = isLocal ? ((data.sessions || []).length > 0) : (asList(data).length > 0);
     if (!hasContent) {
-      if (activeTier === "community" && isTierPending(activeTier)) {
+      if (!isLocal && isTierPending(activeTier)) {
         var p = tierProgress(activeTier);
-        showGraphEmpty('<span class="bb-loader"></span><strong>' + esc(p.label || "Syncing") + '</strong>Community SWM is still loading from the network.');
+        showGraphEmpty(LOADER_HTML + '<strong>' + esc(p.label || "Syncing") + '</strong>' +
+          (activeTier === "public" ? "Public VM" : "Community SWM") +
+          ' is still loading from the network.');
       } else {
         showGraphEmpty("<strong>Nothing to show</strong>" + (TIER_EMPTY[activeTier] || "No threats yet."));
       }

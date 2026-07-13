@@ -28,7 +28,7 @@ from typing import Any, Dict, List, Set, Tuple
 logger = logging.getLogger(__name__)
 
 _RESCAN_INTERVAL_SEC = 5.0
-_RULESET_EMPTY_RETRY_SEC = 30.0
+_RULESET_EMPTY_RETRY_SEC = 10.0
 _RULESET_MIN_RETRY_SEC = 5.0
 
 _STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -56,6 +56,17 @@ def _sync_ruleset_once(load_config: Any, dkg_client_cls: Any, ruleset_mod: Any) 
     rs = ruleset_mod.refresh(cfg, client)
     counts = _ruleset_sync_counts(rs)
     return counts
+
+
+def _graph_sync_state(count: int, node_reachable: bool, catchup_status: str) -> str:
+    """Map queryable rows + DKG recovery state to an honest UI state."""
+    if node_reachable and str(catchup_status or "").lower() in {"queued", "running"}:
+        return "syncing"
+    if int(count or 0) > 0:
+        return "ready"
+    if not node_reachable:
+        return "unreachable"
+    return "empty"
 
 
 def create_app():
@@ -417,32 +428,50 @@ def create_app():
         public = rs.source_count("public")
         community = rs.source_count("community")
 
-        # Sightings + liveness are the only node-dependent bits left. Serve them
-        # stale-while-revalidate and skip them when the node is down.
-        def _node_counts() -> Any:
-            # None (not {}) when unreachable so _swr keeps the default and
-            # retries next poll instead of caching "down" for the whole TTL.
+        # Catch-up state must stay independent from the potentially expensive
+        # SWM sightings COUNT. Otherwise a busy store can hide the live
+        # queued/running state (and therefore the dashboard loader) for minutes.
+        def _node_sync() -> Any:
             if not _node_reachable(cfg):
                 return None
             client = DkgClient(url=cfg.dkg_url, dkg_home=cfg.dkg_home)
+            try:
+                catchup = client.catchup_status(cfg.context_graph_id)
+            except Exception:
+                # No job is normal on the curator and on already-settled nodes.
+                catchup = {}
             return {
                 "node_reachable": True,
-                "sightings": ruleset.community_report_count(client, cfg),
+                "catchup": catchup,
             }
 
-        g = _swr("graph-status", _node_counts,
-                 {"node_reachable": False, "sightings": 0})
+        def _sightings() -> Any:
+            if not _node_reachable(cfg):
+                return None
+            client = DkgClient(url=cfg.dkg_url, dkg_home=cfg.dkg_home)
+            return ruleset.community_report_count(client, cfg)
+
+        g = _swr(
+            "graph-sync-status",
+            _node_sync,
+            {"node_reachable": False, "catchup": {}},
+            ttl=4.0,
+        )
+        sightings = _swr("graph-sightings", _sightings, 0)
         total_rules = sum(int(v or 0) for v in counts.values())
-        public_state = (
-            "ready" if int(public or 0) > 0
-            else "pending" if g["node_reachable"]
-            else "unreachable"
-        )
-        community_state = (
-            "ready" if int(community or 0) > 0
-            else "loading" if g["node_reachable"]
-            else "unreachable"
-        )
+        catchup = g.get("catchup") if isinstance(g.get("catchup"), dict) else {}
+        catchup_state = str(catchup.get("status") or "")
+        public_state = _graph_sync_state(public, g["node_reachable"], catchup_state)
+        community_state = _graph_sync_state(community, g["node_reachable"], catchup_state)
+
+        def _sync_label(tier: str, state: str) -> str:
+            suffix = {
+                "ready": "synced",
+                "syncing": "syncing",
+                "unreachable": "offline",
+                "empty": "empty",
+            }.get(state, state)
+            return f"{tier} {suffix}"
         return {
             "mode": cfg.mode,
             "context_graph_id": cfg.context_graph_id,
@@ -455,18 +484,23 @@ def create_app():
             "ruleset": counts,
             "curated": public,
             "community": community,
-            "sightings": g["sightings"],
+            "sightings": sightings,
             "findings_logged": audit.count_findings(),
             "sync_progress": {
                 "public": {
                     "count": int(public or 0),
                     "state": public_state,
-                    "label": "VM synced" if public_state == "ready" else "VM pending",
+                    "label": _sync_label("VM", public_state),
                 },
                 "community": {
                     "count": int(community or 0),
                     "state": community_state,
-                    "label": "SWM synced" if community_state == "ready" else "SWM loading",
+                    "label": _sync_label("SWM", community_state),
+                },
+                "catchup": {
+                    "status": catchup_state or "idle",
+                    "started_at": catchup.get("startedAt"),
+                    "finished_at": catchup.get("finishedAt"),
                 },
                 "ruleset_total": total_rules,
                 "age_seconds": max(0, int(time.time() - float(rs.synced_at or 0))) if rs.synced_at else None,

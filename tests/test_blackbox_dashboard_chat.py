@@ -135,14 +135,23 @@ def test_ruleset_sync_once_refreshes_without_directly_requeueing_catchup():
     ]
 
 
-def test_dashboard_zero_graph_count_settles_after_first_payload():
+def test_dashboard_zero_graph_count_spins_only_for_active_catchup():
     html = (Path(server.__file__).parent / "static" / "index.html").read_text(
         encoding="utf-8"
     )
 
     assert "if (value == null) return true;" in html
-    assert "Treating every reachable zero" in html
+    assert 'p.state === "syncing"' in html
+    assert "return !!tier && isTierPending(tier);" in html
     assert "return !(lastStatus && lastStatus.node_reachable === false);" not in html
+
+
+def test_dashboard_graph_sync_state_tracks_real_dkg_catchup():
+    assert server._graph_sync_state(5, True, "running") == "syncing"
+    assert server._graph_sync_state(0, False, "running") == "unreachable"
+    assert server._graph_sync_state(0, True, "queued") == "syncing"
+    assert server._graph_sync_state(0, True, "running") == "syncing"
+    assert server._graph_sync_state(0, True, "done") == "empty"
 
 
 def test_dashboard_retries_empty_ruleset_promptly():
