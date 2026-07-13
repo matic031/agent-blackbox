@@ -17,11 +17,21 @@ const tokenPath = join(temp, 'auth.token');
 const registryPath = join(temp, 'registry.json');
 const progressPath = join(temp, 'progress.json');
 const sourcePath = join(temp, 'source.json');
-const cg = '0xtest/private-blackbox';
+const owner = '0x1111111111111111111111111111111111111111';
+const cg = `${owner}/private-blackbox`;
+const staleAssertion = 'ab'.repeat(32);
+const staleOrdinal = 7n;
+const staleKaId = ((BigInt(owner) << 96n) | staleOrdinal).toString();
+const freshOrdinal = 8n;
+const freshKaId = ((BigInt(owner) << 96n) | freshOrdinal).toString();
 let accessPolicy = 1;
 let publishState = 'finalized';
 let rejectCreateStatus;
 let synchronousPublish = false;
+let staleVmStatus = false;
+let chainMerkleRoot = `0x${staleAssertion}`;
+let membershipChanges = false;
+let participantReads = 0;
 const calls = { create: 0, share: 0, publish: 0, pull: 0 };
 
 function run(script, args, env = {}) {
@@ -49,14 +59,26 @@ const server = createServer((request, response) => {
   if (request.method === 'GET' && url.pathname === '/api/status') return json(response, 200, { name: 'fixture', version: '10.0.6', networkConfig: 'mainnet-base', connectedPeers: 3 });
   if (request.method === 'GET' && url.pathname === '/api/context-graph/exists') return json(response, 200, { id: cg, exists: true });
   if (request.method === 'GET' && url.pathname === '/api/context-graph/list') return json(response, 200, { contextGraphs: [{ id: cg, accessPolicy, onChainId: '13' }] });
-  if (request.method === 'GET' && url.pathname.endsWith('/participants')) return json(response, 200, { contextGraphId: cg, allowedAgents: ['0xtest'] });
+  if (request.method === 'GET' && url.pathname.endsWith('/participants')) {
+    participantReads += 1;
+    const allowedAgents = membershipChanges && participantReads > 1
+      ? [owner, '0x2222222222222222222222222222222222222222']
+      : [owner];
+    return json(response, 200, { contextGraphId: cg, allowedAgents });
+  }
   if (request.method === 'GET' && url.pathname === '/api/wallets/balances') return json(response, 200, {
     chainId: 'base:8453',
     rpcUrl: 'https://rpc.example/private-provider-secret',
-    wallets: ['0xtest'],
-    balances: [{ address: '0xtest', eth: '1', trac: '10000' }],
+    wallets: [owner],
+    balances: [{ address: owner, eth: '1', trac: '10000' }],
   });
   if (request.method === 'GET' && url.pathname === '/api/publisher/stats') return json(response, 200, { accepted: 0, finalized: 0, failed: 0 });
+  if (request.method === 'GET' && url.pathname === `/api/kc/${staleKaId}`) {
+    return json(response, 200, { kaId: staleKaId, merkleRoot: chainMerkleRoot, author: owner });
+  }
+  if (request.method === 'GET' && url.pathname === `/api/kc/${freshKaId}`) {
+    return json(response, 200, { kaId: freshKaId, merkleRoot: `0x${'0'.repeat(64)}`, author: null });
+  }
   if (request.method === 'POST' && url.pathname === '/api/query') {
     const batch = JSON.parse(readFileSync(join(batches, 'batch-001.json')));
     const bindings = batch.records.flatMap(recordQuads).map((quad) => ({
@@ -95,6 +117,20 @@ const server = createServer((request, response) => {
     calls.publish += 1;
     synchronousPublish = true;
     return json(response, 200, { status: 'confirmed', txHash: '0xsync', ual: 'did:dkg:sync', blockNumber: 456 });
+  }
+  if (request.method === 'GET' && url.pathname.endsWith('/vm')) {
+    const assertion = staleVmStatus ? staleAssertion : 'ef'.repeat(32);
+    const ordinal = staleVmStatus ? staleOrdinal : freshOrdinal;
+    return json(response, 200, {
+      state: 'promoted',
+      status: staleVmStatus ? 'draft-open' : 'swm-shared',
+      memoryLayer: 'SWM',
+      wmCurrentAssertion: assertion,
+      swmCurrentAssertion: assertion,
+      vmCurrentAssertion: null,
+      publishedUal: null,
+      reservedUal: `did:dkg:base:8453/${owner}/${ordinal}`,
+    });
   }
   if (request.method === 'GET' && url.pathname === '/api/publisher/job') {
     if (publishState === 'failed') return json(response, 200, { job: { jobId: 'publish-1', status: 'failed', failure: { message: 'fixture chain failure' } } });
@@ -219,6 +255,69 @@ try {
   assert.equal(syncRegistry.batches['batch-001'].publishMode, 'sync');
   assert.equal(syncRegistry.batches['batch-001'].status, 'finalized');
   assert.equal(typeof syncRegistry.batches['batch-001'].swmReplicatedAt, 'string');
+
+  const staleRegistry = structuredClone(syncRegistry);
+  const staleRecord = staleRegistry.batches['batch-001'];
+  for (const field of [
+    'txHash', 'ual', 'blockNumber', 'finalizedAt', 'dkgFinalizationMode',
+    'swmReplicatedAt', 'swmRestoreJobId', 'swmRestorePulledAt',
+  ]) delete staleRecord[field];
+  staleRecord.status = 'publishing';
+  staleRecord.publishMode = 'sync';
+  staleRecord.publishStartedAt = '2026-01-01T00:00:00.000Z';
+
+  const chainRegistryPath = join(temp, 'chain-registry.json');
+  const chainProgressPath = join(temp, 'chain-progress.json');
+  writeFileSync(chainRegistryPath, `${JSON.stringify(staleRegistry, null, 2)}\n`);
+  staleVmStatus = true;
+  synchronousPublish = false;
+  const callsBeforeChainReconcile = { ...calls };
+  const chainReconcile = await run('publish.mjs', ['--publish', '--confirm', confirmation], {
+    ...env,
+    KC_VM_PUBLISH_MODE: 'sync',
+    KC_REGISTRY_PATH: chainRegistryPath,
+    KC_PROGRESS_PATH: chainProgressPath,
+  });
+  assert.equal(chainReconcile.code, 0, chainReconcile.stderr);
+  assert.equal(synchronousPublish, false, 'chain reconciliation replayed the paid endpoint');
+  assert.deepEqual(calls, callsBeforeChainReconcile, 'chain reconciliation replayed a mutating operation');
+  const chainRegistry = JSON.parse(readFileSync(chainRegistryPath, 'utf8'));
+  assert.equal(chainRegistry.batches['batch-001'].status, 'finalized');
+  assert.equal(chainRegistry.batches['batch-001'].chainKaId, staleKaId);
+  assert.equal(chainRegistry.batches['batch-001'].chainMerkleRoot, `0x${staleAssertion}`);
+  assert.equal(chainRegistry.batches['batch-001'].vmVerifiedSubjectCount, 2);
+  assert.equal(chainRegistry.batches['batch-001'].dkgFinalizationMode, 'published-chain-reconciled');
+
+  const collisionRegistryPath = join(temp, 'collision-registry.json');
+  const collisionProgressPath = join(temp, 'collision-progress.json');
+  writeFileSync(collisionRegistryPath, `${JSON.stringify(staleRegistry, null, 2)}\n`);
+  chainMerkleRoot = `0x${'cd'.repeat(32)}`;
+  const collision = await run('publish.mjs', ['--publish', '--confirm', confirmation], {
+    ...env,
+    KC_VM_PUBLISH_MODE: 'sync',
+    KC_REGISTRY_PATH: collisionRegistryPath,
+    KC_PROGRESS_PATH: collisionProgressPath,
+  });
+  assert.notEqual(collision.code, 0, 'different on-chain assertion unexpectedly reconciled');
+  assert.match(collision.stderr, /already published with a different assertion/);
+  assert.deepEqual(calls, callsBeforeChainReconcile, 'collision check reached a mutating operation');
+
+  const membershipRegistryPath = join(temp, 'membership-registry.json');
+  const membershipProgressPath = join(temp, 'membership-progress.json');
+  staleVmStatus = false;
+  membershipChanges = true;
+  participantReads = 0;
+  const callsBeforeMembershipChange = { ...calls };
+  const membershipChange = await run('publish.mjs', ['--publish', '--confirm', confirmation], {
+    ...env,
+    KC_REGISTRY_PATH: membershipRegistryPath,
+    KC_PROGRESS_PATH: membershipProgressPath,
+  });
+  assert.notEqual(membershipChange.code, 0, 'changed private-CG membership unexpectedly published');
+  assert.match(membershipChange.stderr, /membership changed during the publishing run/);
+  assert.equal(calls.publish, callsBeforeMembershipChange.publish, 'membership change reached the paid endpoint');
+  assert.equal(calls.share, callsBeforeMembershipChange.share, 'membership change reached SWM sharing');
+  assert.equal(calls.create, callsBeforeMembershipChange.create + 1, 'membership guard did not stop at the expected boundary');
   console.log('publisher integration smoke test: PASS');
 } finally {
   await new Promise((resolvePromise) => server.close(resolvePromise));

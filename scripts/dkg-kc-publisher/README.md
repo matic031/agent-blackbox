@@ -33,6 +33,8 @@ the branch.
   `mainnet-base`;
 - requires the target context graph to already exist and be verifiably
   curated/private;
+- snapshots the private graph allowlist during preflight and refuses to share
+  or publish if membership changes during the run;
 - enforces exactly 12 epochs and requires a manifest-bound confirmation token
   before any paid work;
 - uses the DKG's persistent async SWM-share queue and synchronous VM endpoint,
@@ -72,6 +74,8 @@ Important distinctions:
 - do **not** use CLI `--private` for this job: that creates a local-only graph
   which cannot be published to VM;
 - all allowed agents must have valid workspace encryption keys;
+- freeze membership while a production publisher is active: disable automatic
+  join approval before starting, then review and add new members between runs;
 - private access is not a substitute for reviewing the source. Never publish
   secrets, credentials, personal data, or other sensitive plaintext merely
   because the graph is private;
@@ -218,15 +222,19 @@ node run.mjs preflight
 ```
 
 Preflight repeats the complete local validation, checks node version/network,
-verifies that this token can see a private CG, prints wallet balances, and
-prints a paid confirmation token like:
+verifies that this token can see a private CG, pins the sorted allowed-agent
+membership fingerprint, prints wallet balances, and prints a paid confirmation
+token like:
 
 ```text
 <full-context-graph-id>:12:<manifest-hash-prefix>
 ```
 
 Do not proceed if the wallet output is unclear, the graph policy is not
-private, or the node is not official npm 10.0.6.
+private, the allowlist is still changing, or the node is not official npm
+10.0.6. Automatic join approval must remain disabled for the complete paid
+run. The publisher checks the fingerprint again immediately before SWM sharing
+and immediately before each paid publish.
 
 ## 5. Smoke-test one paid collection
 
@@ -338,9 +346,14 @@ restore path; it is not sent to the paid endpoint again.
 DKG 10.0.5's async VM queue lost the large first-batch job while rewriting its
 claimed state. The default is therefore `KC_VM_PUBLISH_MODE=sync`. A synchronous
 request writes `publishStartedAt` before entering the paid endpoint. If the
-request times out or disconnects without a complete response, the script stops
-and refuses to retry that batch until its chain state is manually reconciled.
-This is deliberate duplicate-spend protection. Do not remove
+request times out, disconnects, or the local lifecycle view remains stale, the
+script derives the full KA ID from the reserved UAL and checks the official
+`/api/kc/:kaId` chain metadata. It adopts an existing publish only when the
+on-chain Merkle root and author match the prepared assertion and every expected
+threat is queryable through the official VM view. The endpoint's all-zero root
+with a null author is the official unminted placeholder and is not treated as a
+collision. Any nonzero different root is a hard collision and stops before
+another paid call. Do not remove
 `publishStartedAt` merely to make a retry proceed.
 
 - `registry.json` is the authoritative local ledger. Every update preserves the
@@ -354,6 +367,12 @@ This is deliberate duplicate-spend protection. Do not remove
   registry entries.
 - A client timeout during KA creation is reconciled against the node's sealed
   WM quads and adopted only when the entire quad set matches.
+- A chain-confirmed publish is reconciled only from matching author, Merkle
+  root, and complete expected VM content. Extra DKG metadata quads are allowed;
+  missing prepared quads are not.
+- If the private allowlist fingerprint changes after preflight, the publisher
+  stops before SWM sharing or payment. Review membership and encryption-key
+  rotation, then start a new preflight rather than bypassing the guard.
 - There are no automatic paid retries. Ambiguous or failed publishes must be
   inspected against chain state before retrying.
 

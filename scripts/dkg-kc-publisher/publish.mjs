@@ -228,6 +228,20 @@ function definitiveCreateRejection(error) {
     || (error?.status === 400 && /Assertion name cannot contain "\/"/.test(error.message ?? ''));
 }
 
+async function readGraphMembership() {
+  const participants = await api('GET', `/api/context-graph/${encodeURIComponent(contextGraphId)}/participants`);
+  const allowedAgents = [...new Set((participants.allowedAgents ?? []).map((address) => String(address).toLowerCase()))].sort();
+  if (allowedAgents.length === 0) throw new Error(`context graph ${contextGraphId} has no readable allowed-agent membership`);
+  return { allowedAgents, fingerprint: sha256(JSON.stringify(allowedAgents)) };
+}
+
+async function assertGraphMembershipUnchanged(expected) {
+  const current = await readGraphMembership();
+  if (current.fingerprint !== expected.fingerprint) {
+    throw new Error(`private context graph membership changed during the publishing run (expected ${expected.allowedAgents.length} agents, found ${current.allowedAgents.length}); refusing to share or publish until membership and encryption keys are reviewed`);
+  }
+}
+
 async function nodePreflight(manifestSha256) {
   authToken = readToken();
   const status = await api('GET', '/api/status');
@@ -242,16 +256,15 @@ async function nodePreflight(manifestSha256) {
     if (!graph && attempt < 3) await new Promise((resolvePromise) => setTimeout(resolvePromise, 2_000));
   }
   if (!graph) throw new Error(`context graph ${contextGraphId} exists but is not visible to this token in /api/context-graph/list`);
+  const membership = await readGraphMembership();
   let privacyEvidence = `accessPolicy=${String(graph.accessPolicy ?? 'private flag')}`;
   if (!privatePolicy(graph.accessPolicy) && !graph.private && !graph.isPrivate) {
     const onChainId = String(graph.onChainId ?? '');
     if (!expectedOnChainCgId || onChainId !== expectedOnChainCgId) {
       throw new Error(`context graph ${contextGraphId} is not verifiably private/curated (accessPolicy=${String(graph.accessPolicy)}, onChainId=${onChainId || 'missing'}); refusing to write corpus data`);
     }
-    const participants = await api('GET', `/api/context-graph/${encodeURIComponent(contextGraphId)}/participants`);
     const ownerAddress = contextGraphId.split('/')[0]?.toLowerCase();
-    const allowedAgents = (participants.allowedAgents ?? []).map((address) => String(address).toLowerCase());
-    if (!ownerAddress || !allowedAgents.includes(ownerAddress)) {
+    if (!ownerAddress || !membership.allowedAgents.includes(ownerAddress)) {
       throw new Error(`context graph ${contextGraphId} has pinned on-chain id ${onChainId}, but its owner is not in the curated allowlist`);
     }
     privacyEvidence = `pinned onChainId=${onChainId}, curated owner allowlist`;
@@ -263,12 +276,13 @@ async function nodePreflight(manifestSha256) {
   const publisherStats = await api('GET', '/api/publisher/stats');
   log(`node OK: ${status.name} v${status.version} ${status.networkConfig}, peers=${status.connectedPeers ?? 'unknown'}`);
   log(`private context graph OK: ${contextGraphId} (${privacyEvidence})`);
+  log(`private context graph membership pinned: ${membership.allowedAgents.length} agents, sha256:${membership.fingerprint}`);
   log(`wallet preflight: ${JSON.stringify(walletBalanceSummary(wallets))}`);
   log(`async publisher queue: ${JSON.stringify(publisherStats).slice(0, 1000)}`);
   log(`VM publish mode: ${vmPublishMode}; publisher node identity id: ${publisherNodeIdentityId}`);
   const confirmation = `${contextGraphId}:12:${manifestSha256.slice(0, 12)}`;
   log(`paid confirmation token: ${confirmation}`);
-  return { status, graph, wallets, publisherStats, confirmation };
+  return { status, graph, membership, wallets, publisherStats, confirmation };
 }
 
 function loadRegistry(manifest, manifestSha256) {
@@ -328,29 +342,54 @@ function sparqlIri(value) {
   return `<${value}>`;
 }
 
-async function querySwmQuads(expectedQuads) {
+async function queryMemoryQuads(view, expectedQuads) {
   const subjects = [...new Set(expectedQuads.map((quad) => quad.subject))];
   const quads = [];
   for (let offset = 0; offset < subjects.length; offset += 100) {
     const values = subjects.slice(offset, offset + 100).map(sparqlIri).join(' ');
     const response = await api('POST', '/api/query', {
       contextGraphId,
-      view: 'shared-working-memory',
+      view,
       sparql: `SELECT DISTINCT ?s ?p ?o WHERE { VALUES ?s { ${values} } ?s ?p ?o }`,
     }, requestTimeoutMs);
     const bindings = response?.result?.bindings ?? response?.bindings;
-    if (!Array.isArray(bindings)) throw new Error(`unexpected SWM query response at subject offset ${offset}`);
+    if (!Array.isArray(bindings)) throw new Error(`unexpected ${view} query response at subject offset ${offset}`);
     for (const binding of bindings) {
       const subject = typeof binding.s === 'string' ? binding.s : binding.s?.value;
       const predicate = typeof binding.p === 'string' ? binding.p : binding.p?.value;
       const object = typeof binding.o === 'string' ? binding.o : binding.o?.value;
       if (![subject, predicate, object].every((value) => typeof value === 'string')) {
-        throw new Error(`malformed SWM binding at subject offset ${offset}`);
+        throw new Error(`malformed ${view} binding at subject offset ${offset}`);
       }
       quads.push({ subject, predicate, object, graph: '' });
     }
   }
   return { quads, subjectCount: new Set(quads.map((quad) => quad.subject)).size };
+}
+
+const querySwmQuads = (expectedQuads) => queryMemoryQuads('shared-working-memory', expectedQuads);
+
+function memoryVerificationMode(stored, expectedQuads) {
+  const expectedSubjectCount = new Set(expectedQuads.map((quad) => quad.subject)).size;
+  if (stored.subjectCount !== expectedSubjectCount) return null;
+  const storedSet = new Set(stored.quads.map((quad) => JSON.stringify(quad)));
+  if (expectedQuads.every((quad) => storedSet.has(JSON.stringify(quad)))) return 'exact';
+  if (legacyBlazegraphQuads(expectedQuads).every((quad) => storedSet.has(JSON.stringify(quad)))) {
+    return 'legacy-blazegraph-unicode';
+  }
+  return null;
+}
+
+function reservedKaIdentity(reservedUal) {
+  const match = String(reservedUal ?? '').match(/^did:dkg:[^/]+\/(0x[0-9a-fA-F]{40})\/(\d+)$/);
+  if (!match) return null;
+  const ordinal = BigInt(match[2]);
+  if (ordinal >= (1n << 96n)) throw new Error(`reserved KA ordinal exceeds 96 bits: ${match[2]}`);
+  return {
+    agentAddress: match[1],
+    ordinal: match[2],
+    kaId: ((BigInt(match[1]) << 96n) | ordinal).toString(),
+  };
 }
 
 async function reconcileCreate(kaName, expectedQuads) {
@@ -459,7 +498,72 @@ function vmStatusIsFinalized(status) {
     && status.vmCurrentAssertion === assertion;
 }
 
-async function reconcileSynchronousPublish(entry, rec, kaName, registry, waitForCompletion) {
+async function reconcileChainConfirmedVm(entry, rec, status, expectedQuads, registry) {
+  const reserved = reservedKaIdentity(status?.reservedUal);
+  const assertion = status?.swmCurrentAssertion;
+  if (!reserved || typeof assertion !== 'string' || !assertion) return false;
+  if (status.wmCurrentAssertion !== assertion) return false;
+
+  let chain;
+  try {
+    chain = await api('GET', `/api/kc/${reserved.kaId}`);
+  } catch (error) {
+    if (error.status === 404) return false;
+    throw error;
+  }
+
+  const chainRoot = String(chain.merkleRoot ?? '').toLowerCase();
+  const emptyRoot = `0x${'0'.repeat(64)}`;
+  if (chainRoot === emptyRoot && (chain.author === null || chain.author === undefined)) return false;
+  const expectedRoot = `0x${assertion.replace(/^0x/, '')}`.toLowerCase();
+  if (chainRoot !== expectedRoot) {
+    throw new Error(`[${entry.name}] reserved KA ${reserved.kaId} is already published with a different assertion (chain=${chainRoot || 'missing'}, prepared=${expectedRoot}); refusing to publish or reconcile`);
+  }
+  if (String(chain.author ?? '').toLowerCase() !== reserved.agentAddress.toLowerCase()) {
+    throw new Error(`[${entry.name}] reserved KA ${reserved.kaId} has unexpected chain author ${String(chain.author ?? 'missing')}; refusing to reconcile`);
+  }
+
+  const vm = await queryMemoryQuads('verifiable-memory', expectedQuads);
+  const vmVerificationMode = memoryVerificationMode(vm, expectedQuads);
+  if (!vmVerificationMode) {
+    log(`[${entry.name}] chain assertion is confirmed but expected VM quads are not fully queryable yet`);
+    return false;
+  }
+
+  const finalizedAt = new Date().toISOString();
+  Object.assign(rec, {
+    status: 'vm-finalized',
+    publishMode: 'sync-chain-reconciled',
+    publishJobState: 'chain-confirmed',
+    finalizedAt,
+    dkgFinalizationMode: 'published-chain-reconciled',
+    chainKaId: reserved.kaId,
+    chainKaOrdinal: reserved.ordinal,
+    chainMerkleRoot: chainRoot,
+    chainAuthor: chain.author,
+    vmAssertion: assertion,
+    vmVerifiedAt: finalizedAt,
+    vmVerificationMode,
+    vmVerifiedQuadCount: vm.quads.length,
+    vmVerifiedSubjectCount: vm.subjectCount,
+  });
+
+  const swm = await querySwmQuads(expectedQuads);
+  const swmVerificationMode = memoryVerificationMode(swm, expectedQuads);
+  if (swmVerificationMode) {
+    rec.swmRestoreQuadCount = swm.quads.length;
+    rec.swmRestoreSubjectCount = swm.subjectCount;
+    rec.swmVerificationMode = swmVerificationMode;
+    rec.swmReplicatedAt = finalizedAt;
+    rec.status = 'finalized';
+  }
+  delete rec.lastError;
+  saveRegistry(registry);
+  log(`[${entry.name}] reconciled chain-confirmed KA ${reserved.kaId} from matching Merkle root and ${vm.subjectCount.toLocaleString()} VM subjects`);
+  return true;
+}
+
+async function reconcileSynchronousPublish(entry, rec, kaName, expectedQuads, registry, waitForCompletion) {
   const deadline = Date.now() + requestTimeoutMs;
   const query = `contextGraphId=${encodeURIComponent(contextGraphId)}`;
   for (;;) {
@@ -487,6 +591,7 @@ async function reconcileSynchronousPublish(entry, rec, kaName, registry, waitFor
       log(`[${entry.name}] reconciled paid publish from matching WM/SWM/VM state: ${status.publishedUal}`);
       return true;
     }
+    if (status && await reconcileChainConfirmedVm(entry, rec, status, expectedQuads, registry)) return true;
     if (!waitForCompletion) return false;
     if (Date.now() >= deadline) {
       throw new Error(`[${entry.name}] paid publish response was lost and VM did not become confirmed within ${duration(requestTimeoutMs)}; inspect chain and node state before retrying`);
@@ -497,11 +602,12 @@ async function reconcileSynchronousPublish(entry, rec, kaName, registry, waitFor
   }
 }
 
-async function publishSynchronous(entry, rec, kaName, registry) {
+async function publishSynchronous(entry, rec, kaName, expectedQuads, registry, membership) {
+  if (await reconcileSynchronousPublish(entry, rec, kaName, expectedQuads, registry, false)) return;
   if (rec.publishStartedAt) {
-    if (await reconcileSynchronousPublish(entry, rec, kaName, registry, false)) return;
     throw new Error(`[${entry.name}] an earlier synchronous paid publish started at ${rec.publishStartedAt} without a recorded terminal result; verify chain and node state, then reconcile registry.json before retrying`);
   }
+  await assertGraphMembershipUnchanged(membership);
   rec.publishMode = 'sync';
   rec.publishStartedAt = new Date().toISOString();
   rec.status = 'publishing';
@@ -516,14 +622,14 @@ async function publishSynchronous(entry, rec, kaName, registry) {
   } catch (error) {
     if (error.code !== 'CLIENT_TIMEOUT' && !/fetch failed/i.test(error.message ?? '')) throw error;
     log(`[${entry.name}] paid publish response was lost; reconciling VM state without retrying the paid request`);
-    await reconcileSynchronousPublish(entry, rec, kaName, registry, true);
+    await reconcileSynchronousPublish(entry, rec, kaName, expectedQuads, registry, true);
     return;
   }
   recordSynchronousFinalized(rec, result);
 }
 
 function hasFinalizedVm(rec) {
-  return Boolean(rec.txHash || rec.ual || rec.dkgFinalizationMode === 'noop');
+  return Boolean(rec.txHash || rec.ual || ['noop', 'published-chain-reconciled'].includes(rec.dkgFinalizationMode));
 }
 
 async function restorePublishedAssetToSwm(entry, rec, kaName, expectedQuads, registry) {
@@ -670,6 +776,7 @@ async function publishAll(validated, preflight) {
 
     if (!hasFinalizedVm(rec) && !rec.sharedAt) {
       if (!rec.shareJobId) {
+        await assertGraphMembershipUnchanged(preflight.membership);
         log(`[${entry.name}] enqueueing persistent SWM share job`);
         try {
           const queued = await api('POST', `/api/knowledge-assets/${encodeURIComponent(kaName)}/swm/share-async`, { contextGraphId });
@@ -698,10 +805,11 @@ async function publishAll(validated, preflight) {
 
     try {
       if (!hasFinalizedVm(rec) && vmPublishMode === 'sync') {
-        await publishSynchronous(entry, rec, kaName, registry);
+        await publishSynchronous(entry, rec, kaName, quads, registry, preflight.membership);
         saveRegistry(registry);
       } else if (!hasFinalizedVm(rec)) {
         if (!rec.publishJobId) {
+          await assertGraphMembershipUnchanged(preflight.membership);
           log(`[${entry.name}] enqueueing PAID async VM publish for ${epochs} epochs`);
           try {
             const queued = await api('POST', `/api/knowledge-assets/${encodeURIComponent(kaName)}/vm/publish-async`, {
