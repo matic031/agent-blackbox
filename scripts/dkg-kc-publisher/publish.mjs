@@ -713,7 +713,7 @@ async function publishAll(validated, preflight) {
 
   const registry = loadRegistry(validated.manifest, validated.manifestSha256);
   saveRegistry(registry);
-  const entries = onlyBatch ? validated.selected : validated.manifest.batches;
+  const entries = validated.selected;
   let completed = Object.values(registry.batches).filter((record) => record.status === 'finalized' && record.swmReplicatedAt).length;
   let processedThisRun = 0;
   updateProgress({

@@ -32,6 +32,8 @@ let staleVmStatus = false;
 let chainMerkleRoot = `0x${staleAssertion}`;
 let membershipChanges = false;
 let participantReads = 0;
+let queryBatchDir = batches;
+let queryBatchName = 'batch-001';
 const calls = { create: 0, share: 0, publish: 0, pull: 0 };
 
 function run(script, args, env = {}) {
@@ -80,7 +82,7 @@ const server = createServer((request, response) => {
     return json(response, 200, { kaId: freshKaId, merkleRoot: `0x${'0'.repeat(64)}`, author: null });
   }
   if (request.method === 'POST' && url.pathname === '/api/query') {
-    const batch = JSON.parse(readFileSync(join(batches, 'batch-001.json')));
+    const batch = JSON.parse(readFileSync(join(queryBatchDir, `${queryBatchName}.json`)));
     const bindings = batch.records.flatMap(recordQuads).map((quad) => ({
       s: quad.subject,
       p: quad.predicate,
@@ -189,6 +191,36 @@ try {
   const manifestHash = createHash('sha256').update(readFileSync(join(batches, 'manifest.json'))).digest('hex');
   const confirmation = `${cg}:12:${manifestHash.slice(0, 12)}`;
   assert.match(preflight.stdout, new RegExp(confirmation.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+
+  const rangeBatches = join(temp, 'range-batches');
+  const rangeRegistryPath = join(temp, 'range-registry.json');
+  const rangeProgressPath = join(temp, 'range-progress.json');
+  const rangeChunk = await run('chunk.mjs', [sourcePath, '--size', '1', '--expect-records', '2', '--out-dir', rangeBatches]);
+  assert.equal(rangeChunk.code, 0, rangeChunk.stderr);
+  const rangeManifestHash = createHash('sha256').update(readFileSync(join(rangeBatches, 'manifest.json'))).digest('hex');
+  const rangeConfirmation = `${cg}:12:${rangeManifestHash.slice(0, 12)}`;
+  queryBatchDir = rangeBatches;
+  queryBatchName = 'batch-002';
+  synchronousPublish = false;
+  const rangedPublish = await run('publish.mjs', [
+    '--publish', '--from-batch', 'batch-002', '--to-batch', 'batch-002', '--confirm', rangeConfirmation,
+  ], {
+    ...env,
+    KC_BATCH_DIR: rangeBatches,
+    KC_VM_PUBLISH_MODE: 'sync',
+    KC_REGISTRY_PATH: rangeRegistryPath,
+    KC_PROGRESS_PATH: rangeProgressPath,
+  });
+  assert.equal(rangedPublish.code, 0, rangedPublish.stderr);
+  assert.equal(synchronousPublish, true);
+  assert.deepEqual(calls, { create: 1, share: 2, publish: 1, pull: 1 });
+  const rangeRegistry = JSON.parse(readFileSync(rangeRegistryPath, 'utf8'));
+  assert.equal(rangeRegistry.batches['batch-001'], undefined, 'range publish processed a batch before --from-batch');
+  assert.equal(rangeRegistry.batches['batch-002'].status, 'finalized');
+  queryBatchDir = batches;
+  queryBatchName = 'batch-001';
+  synchronousPublish = false;
+  Object.assign(calls, { create: 0, share: 0, publish: 0, pull: 0 });
 
   rejectCreateStatus = 413;
   const rejected = await run('publish.mjs', ['--publish', '--confirm', confirmation], env);
