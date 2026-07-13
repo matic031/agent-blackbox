@@ -135,11 +135,12 @@ def community_report_count(client: DkgClient, cfg: BlackboxConfig) -> int:
 
 
 # ---------------------------------------------------------------------------
-# Curation-proof verification (raw data on SWM, proofs on VM)
+# Legacy curation-proof verification (backward compatibility)
 # ---------------------------------------------------------------------------
 
-# Mirrors `_PROOFS_SPARQL` in cli.py — the curator publishes these anchors via
-# `curate anchor`; consumers verify their synced SWM rows against them.
+# Proof-era graphs already contain these anchors. New curator commands publish
+# full threat rows directly to VM; this fallback keeps old anchors effective
+# until those rows are migrated.
 _PROOFS_SPARQL = """PREFIX g: <http://umanitek.ai/ontology/guardian/>
 SELECT ?proof ?root ?member WHERE {
   ?proof a g:CurationProof .
@@ -569,10 +570,10 @@ def refresh(config: Optional[BlackboxConfig] = None, client: Optional[DkgClient]
                 _memory_cache = existing
             return existing
 
-    # Curated SWM rows whose batch root matches an on-chain curation proof are
-    # promoted to the blockable public tier: the raw data lives in SWM, the VM
-    # carries only the anchor. Fail-open — verification errors leave every
-    # community row at the flag-only tier.
+    # Backward compatibility: proof-era curated SWM rows whose batch root
+    # matches an old on-chain anchor are promoted to the blockable public tier.
+    # New rows arrive directly from the VM tier as complete threat assets.
+    # Fail-open — verification errors leave community rows flag-only.
     verified: set = set()
     community_rows = fetched.get("community")
     if community_rows:

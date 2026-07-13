@@ -1,5 +1,6 @@
 """Tests for the curator catalog import: bumblebee fan-out + legacy formats."""
 
+import argparse
 from types import SimpleNamespace
 
 from _blackbox_loader import load_blackbox
@@ -119,7 +120,7 @@ def test_seed_entries_requires_source_provenance():
     assert new_ids == []
 
 
-def test_seed_entries_splits_full_swm_from_minimal_vm(monkeypatch):
+def test_seed_entries_publishes_one_full_threat_knowledge_asset(monkeypatch):
     class FakeClient:
         def __init__(self):
             self.shares = []
@@ -143,9 +144,10 @@ def test_seed_entries_splits_full_swm_from_minimal_vm(monkeypatch):
         "name": "evil",
         "version": "1.0.0",
         "severity": "critical",
-        "description": "rich private context stays in SWM",
+        "description": "rich threat context is public in VM",
         "source": "UnitTest",
         "references": ["https://example.test/advisory"],
+        "contributor": "Umanitek",
     }]
 
     seeded, skipped, errors, new_ids, attempted = cli._seed_entries(
@@ -164,23 +166,136 @@ def test_seed_entries_splits_full_swm_from_minimal_vm(monkeypatch):
     assert attempted == 1
     assert new_ids == ["dep:npm:evil@1.0.0"]
     assert ledger == ["dep:npm:evil@1.0.0"]
-    assert [name for _cg, name, _q in client.shares] == [
-        "candidate-dep-npm-evil-1.0.0",
-        "threat-vm-dep-npm-evil-1.0.0",
-    ]
-    assert client.publishes == [("cg/test", "threat-vm-dep-npm-evil-1.0.0", 3, 12, 2)]
+    assert len(client.shares) == 1
+    cg_id, ka_name, published_quads = client.shares[0]
+    assert cg_id == "cg/test"
+    assert client.publishes == [("cg/test", ka_name, 3, 12, 2)]
 
-    full_preds = {t["predicate"] for _cg, _name, q in client.shares[:1] for t in q}
-    vm_preds = {t["predicate"] for _cg, _name, q in client.shares[1:] for t in q}
-    assert constants.SCHEMA_DESCRIPTION_PRED in full_preds
-    assert constants.SCHEMA_DESCRIPTION_PRED not in vm_preds
-    assert constants.IDENTIFIER_PRED in vm_preds
-    assert constants.SEVERITY_PRED in vm_preds
-    assert constants.SOURCE_PRED in vm_preds
-    assert constants.REFERENCE_PRED in vm_preds
-    assert constants.PACKAGE_NAME_PRED in vm_preds
-    assert constants.PACKAGE_VERSION_PRED in vm_preds
-    assert constants.PACKAGE_ECOSYSTEM_PRED in vm_preds
+    # VM receives the complete threat itself in this per-threat KA. It must not
+    # get a second lean copy or a proof-only anchor that depends on SWM data.
+    preds = {t["predicate"] for t in published_quads}
+    objects = {t["object"] for t in published_quads}
+    assert constants.SCHEMA_NAME_PRED in preds
+    assert constants.SCHEMA_DESCRIPTION_PRED in preds
+    assert constants.IDENTIFIER_PRED in preds
+    assert constants.SEVERITY_PRED in preds
+    assert constants.SOURCE_PRED in preds
+    assert constants.REFERENCE_PRED in preds
+    assert constants.SCHEMA_CONTRIBUTOR_PRED in preds
+    assert constants.PACKAGE_NAME_PRED in preds
+    assert constants.PACKAGE_VERSION_PRED in preds
+    assert constants.PACKAGE_ECOSYSTEM_PRED in preds
+    assert '"rich threat context is public in VM"' in objects
+    assert constants.CURATION_PROOF_TYPE_IRI not in objects
+
+
+def test_curate_import_defaults_to_vm_publish_and_no_publish_opts_out(monkeypatch, tmp_path):
+    catalog = tmp_path / "threats.json"
+    catalog.write_text(
+        '{"threats":[{"type":"dependency","ecosystem":"npm",'
+        '"name":"evil","version":"1.0.0","source":"UnitTest"}]}',
+        encoding="utf-8",
+    )
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+    publish_modes = []
+
+    def fake_seed_entries(_client, _cfg, entries, *, publish, **kwargs):
+        assert entries
+        publish_modes.append(publish)
+        return 1, 0, 0, (["dep:npm:evil@1.0.0"] if publish else []), 1
+
+    monkeypatch.setattr(cli, "DkgClient", FakeClient)
+    monkeypatch.setattr(
+        cli,
+        "load_blackbox_config",
+        lambda: SimpleNamespace(dkg_url="http://node", dkg_home="/tmp/dkg", context_graph_id="cg/test"),
+    )
+    monkeypatch.setattr(cli, "_require_mainnet_for_publish", lambda _client: True)
+    monkeypatch.setattr(cli, "_load_seeded_ledger", set)
+    monkeypatch.setattr(cli, "_seed_entries", fake_seed_entries)
+
+    parser = argparse.ArgumentParser()
+    cli.setup_cli(parser)
+    default_args = parser.parse_args(["curate", "import", "--file", str(catalog)])
+    no_publish_args = parser.parse_args(["curate", "import", "--file", str(catalog), "--no-publish"])
+
+    assert default_args.func(default_args) == 0
+    assert no_publish_args.func(no_publish_args) == 0
+    assert publish_modes == [True, False]
+
+
+def test_curate_approve_defaults_to_full_vm_publish_and_no_publish_opts_out(monkeypatch):
+    clients = []
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            self.shares = []
+            self.publishes = []
+            clients.append(self)
+
+        def share_knowledge_asset(self, cg_id, name, q):
+            self.shares.append((cg_id, name, q))
+            return {"shareOperationId": "share-ok"}
+
+        def publish_async_and_wait(self, cg_id, name, epochs=1, timeout_s=600, poll_s=5):
+            self.publishes.append((cg_id, name, epochs, timeout_s, poll_s))
+            return {"status": "finalized"}
+
+    seeded_ledger = []
+    monkeypatch.setattr(cli, "DkgClient", FakeClient)
+    monkeypatch.setattr(
+        cli,
+        "load_blackbox_config",
+        lambda: SimpleNamespace(dkg_url="http://node", dkg_home="/tmp/dkg", context_graph_id="cg/test"),
+    )
+    monkeypatch.setattr(cli, "_require_mainnet_for_publish", lambda _client: True)
+    monkeypatch.setattr(
+        cli,
+        "_threat_fields_from_reports",
+        lambda *_args: (
+            "dependency",
+            {
+                "severity": "critical",
+                "ecosystem": "npm",
+                "package_name": "evil",
+                "package_version": "1.0.0",
+            },
+        ),
+    )
+    monkeypatch.setattr(cli, "_append_seeded_ledger", lambda ids: seeded_ledger.extend(ids))
+    monkeypatch.setattr(cli, "_append_curated_ledger", lambda _ids: None, raising=False)
+
+    parser = argparse.ArgumentParser()
+    cli.setup_cli(parser)
+    common = [
+        "curate", "approve", "dep:npm:evil@1.0.0",
+        "--description", "complete public threat",
+        "--source", "UnitTest",
+        "--contributor", "Umanitek",
+        "--epochs", "3",
+        "--publish-timeout", "12",
+        "--publish-poll-interval", "2",
+    ]
+    default_args = parser.parse_args(common)
+    no_publish_args = parser.parse_args([*common, "--no-publish"])
+
+    assert default_args.func(default_args) == 0
+    assert no_publish_args.func(no_publish_args) == 0
+
+    published, swm_only = clients
+    assert len(published.shares) == 1
+    published_cg, published_name, published_quads = published.shares[0]
+    assert published.publishes == [(published_cg, published_name, 3, 12, 2)]
+    assert constants.SCHEMA_NAME_PRED in {t["predicate"] for t in published_quads}
+    assert constants.SCHEMA_DESCRIPTION_PRED in {t["predicate"] for t in published_quads}
+    assert constants.CURATION_PROOF_TYPE_IRI not in {t["object"] for t in published_quads}
+    assert len(swm_only.shares) == 1
+    assert swm_only.publishes == []
+    assert seeded_ledger == ["dep:npm:evil@1.0.0"]
 
 
 def test_seed_entries_no_publish_only_shares_full_swm(monkeypatch):

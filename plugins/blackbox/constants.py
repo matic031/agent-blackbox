@@ -43,10 +43,9 @@ SUSPICIOUS_SKILL_THREAT_TYPE_IRI = f"{BLACKBOX_ONTOLOGY}SuspiciousSkillThreat"
 IOC_THREAT_TYPE_IRI = f"{BLACKBOX_ONTOLOGY}IndicatorThreat"
 REPORT_TYPE_IRI = f"{BLACKBOX_ONTOLOGY}ThreatReport"
 FALSE_POSITIVE_TYPE_IRI = f"{BLACKBOX_ONTOLOGY}FalsePositive"
-#: Curation proof: raw threat data lives in SWM; the VM carries only these
-#: compact anchors (batch root + member identifiers). One paid publish proves
-#: a whole batch of curated threats, and consumers verify their synced SWM
-#: rows against it before granting the blockable public tier.
+#: Legacy curation-proof format. New curation publishes a complete threat KA to
+#: VM; this type remains solely so Python consumers can verify proof-era data
+#: that is already on-chain while operators migrate it to full assets.
 CURATION_PROOF_TYPE_IRI = f"{BLACKBOX_ONTOLOGY}CurationProof"
 
 # Blackbox predicates -------------------------------------------------------
@@ -126,12 +125,12 @@ LEGACY_CONTEXT_GRAPH_IDS = frozenset({
 #: Default Blackbox-managed local DKG node HTTP endpoint. Deliberately not the
 #: DKG CLI's default 9200, so Agent Blackbox never collides with a user's own
 #: DKG node/cache.
-#: Curated threats per curation-proof KA (each member is ~1 RDF triple).
-#: One paid VM publish anchors this many SWM rows; consumers verify per batch,
-#: so partial SWM sync still confirms every fully-synced batch. Kept small on
-#: purpose: a large single assertion (~1000+ triples) can stall the node's
-#: seal path under concurrent sync load, so we favour more, lighter proofs.
-DEFAULT_ANCHOR_BATCH_SIZE = 250
+#: Full threat assets handled per compatibility-migration batch. Each threat is
+#: still its own paid, self-contained VM knowledge asset; batching only controls
+#: how much work one ``curate anchor`` migration invocation attempts.
+DEFAULT_VM_MIGRATION_BATCH_SIZE = 250
+# Backward-compatible constant name for callers built against the proof era.
+DEFAULT_ANCHOR_BATCH_SIZE = DEFAULT_VM_MIGRATION_BATCH_SIZE
 
 DEFAULT_DKG_PORT = 9320
 DEFAULT_DKG_URL = f"http://127.0.0.1:{DEFAULT_DKG_PORT}"

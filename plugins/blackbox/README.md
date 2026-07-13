@@ -54,7 +54,8 @@ plugins:
 Blackbox uses two shared graphs:
 
 - The **public graph** contains curator-approved threats. These can be blocked
-  in block mode.
+  in block mode. Each public entry is a complete, self-contained threat
+  knowledge asset, including its descriptive, provenance, and matching fields.
 - The **community graph** contains reports awaiting review. These warn but
   never block.
 

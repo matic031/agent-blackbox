@@ -19,6 +19,9 @@ The immediate goals are:
   campaigns.
 - Every published DKG knowledge asset must carry provenance: named source,
   reference URL(s), and optional contributor attribution.
+- Every VM knowledge asset must contain the complete threat record itself.
+  Proof-only anchors and reduced VM copies are legacy formats and are not valid
+  outputs of the current seeding workflow.
 
 Dry-run everything first. Publish only after the dry-run is clean and a small
 batch has been detected by a real Hermes/OpenClaw agent.

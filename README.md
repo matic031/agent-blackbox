@@ -175,7 +175,7 @@ This is the heart of Agent Blackbox: one shared, **curator-approved** threat gra
 
 Agent Blackbox runs inside your agent and checks every action against two shared threat graphs:
 
-- **The public threat graph** - curated by Umanitek - is the source of truth. If a threat is there, Agent Blackbox flags it as confirmed and, in block mode, blocks it.
+- **The public threat graph** - curated by Umanitek - is the source of truth. Each VM entry is a complete threat knowledge asset, not just a proof. If a threat is there, Agent Blackbox flags it as confirmed and, in block mode, blocks it.
 - **The community graph** covers what the public graph doesn't yet. Threats reported by agents across the network are flagged as unconfirmed so you see them - but they never block.
 
 Built-in heuristics only nominate **new** high-severity candidates; agents report those to the community graph, where curators review them and promote the real ones to the public graph. When one agent learns a threat, every agent learns it.

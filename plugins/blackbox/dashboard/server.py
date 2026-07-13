@@ -422,9 +422,9 @@ def create_app():
         counts = rs.counts()
         # Community + sightings come from the synced ruleset cache, NOT the
         # shared-working-memory view, which does O(slice) trust work and times
-        # out (HTTP 500) on a large pool. Public uses the same cache because VM
-        # stores compact CurationProof anchors while the full threat rows remain
-        # in SWM; ruleset.refresh has already verified and promoted those rows.
+        # out (HTTP 500) on a large pool. Public uses the cache too: current VM
+        # rows are complete threats, and ruleset.refresh also promotes any
+        # still-unmigrated legacy proof rows.
         public = rs.source_count("public")
         community = rs.source_count("community")
 
@@ -823,9 +823,8 @@ def create_app():
                 "ioc": "ioc",
             }.get(prefix, "other")
 
-        # Public and community are two trust labels over the same SWM threat
-        # rows. VM carries compact CurationProof anchors; ruleset.refresh joins
-        # those proofs to SWM identifiers and tags verified rows as public.
+        # The ruleset merges complete public VM threats with community SWM rows
+        # and retains a compatibility join for any legacy CurationProof assets.
         if tier in {"public", "community"}:
             rs = ruleset.get(cfg)
             all_threats = [

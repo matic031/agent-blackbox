@@ -129,6 +129,24 @@ def test_build_threat_quads_dependency_shape():
     assert any(t["object"] == '"true"' and t["predicate"] == constants.CURATED_PRED for t in q)
 
 
+def test_legacy_minimal_builder_cannot_drop_full_vm_fields():
+    q = quads.build_minimal_threat_quads(
+        category="dependency",
+        identifier="dep:npm:legacy@1.0.0",
+        severity="critical",
+        name="legacy malware",
+        description="complete public context",
+        ecosystem="npm",
+        package_name="legacy",
+        package_version="1.0.0",
+        fixed_version="1.0.1",
+    )
+    preds = {item["predicate"] for item in q}
+    assert constants.SCHEMA_NAME_PRED in preds
+    assert constants.SCHEMA_DESCRIPTION_PRED in preds
+    assert constants.FIXED_VERSION_PRED in preds
+
+
 def test_build_threat_quads_emits_provenance_for_any_category():
     # source (named feed), reference (URL) and contributor now emit for every
     # category — injection references used to be dropped.

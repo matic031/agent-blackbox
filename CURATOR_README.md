@@ -111,6 +111,13 @@ lives in **[seed.md](seed.md)** (the single seeding guide).
 
 `approve` (without `--no-publish`) writes on-chain, which means:
 
+- Every approved threat is published as its own **complete, self-contained
+  knowledge asset**. VM carries the threat name, description, severity,
+  provenance, references, and category-specific match fields—not merely a
+  batch proof or reduced copy.
+- `import` follows the same rule for every entry. `--no-publish` is the only
+  opt-out and leaves the complete asset in SWM for review or later publishing.
+
 - It uses your DKG node and requires the curator wallet to be the authorized
   publisher — the network rejects anyone else.
 - On-chain publishing needs a storage-ACK quorum from mainnet core nodes. If

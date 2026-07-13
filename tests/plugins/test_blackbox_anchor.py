@@ -1,8 +1,11 @@
-"""Curation-proof anchors: raw threat data on SWM, only proofs on VM."""
+"""Backward compatibility for proof-era VM anchors."""
+
+from types import SimpleNamespace
 
 from _blackbox_loader import load_blackbox
 
 
+cli = load_blackbox("cli")
 constants = load_blackbox("constants")
 quads = load_blackbox("quads")
 ruleset = load_blackbox("ruleset")
@@ -57,6 +60,85 @@ class TestProofQuads:
             by_pred.setdefault(item["predicate"], []).append(item["object"])
         assert by_pred[constants.RDF_TYPE] == [constants.CURATION_PROOF_TYPE_IRI]
         assert by_pred[constants.ANCHOR_COUNT_PRED] == ['"2"']
+
+
+class TestFullAssetMigration:
+    def test_anchor_publishes_existing_full_candidate_without_writing_proof(self, monkeypatch):
+        identifier = "dep:npm:evil@1.0.0"
+        candidate_name = f"candidate-{quads.slug(identifier)}"
+        pulled = []
+        published = []
+        full_ledger = []
+
+        class FakeClient:
+            def pull_knowledge_asset_from(self, cg_id, name, source, on_conflict=None):
+                pulled.append((cg_id, name, source, on_conflict))
+                return {"status": "pulled"}
+
+            def share_knowledge_asset(self, *args, **kwargs):  # pragma: no cover - must never run
+                raise AssertionError("migration must not create/share a proof KA")
+
+            def publish_async_and_wait(self, cg_id, name, epochs=1, timeout_s=600, poll_s=5):
+                published.append((cg_id, name, epochs, timeout_s, poll_s))
+                return {"status": "finalized", "ual": "did:dkg:full-threat"}
+
+        client = FakeClient()
+        cfg = SimpleNamespace(
+            dkg_url="http://node",
+            dkg_home="/tmp/dkg",
+            context_graph_id="cg/test",
+        )
+        monkeypatch.setattr(cli, "DkgClient", lambda **_kwargs: client)
+        monkeypatch.setattr(cli, "load_blackbox_config", lambda: cfg)
+        monkeypatch.setattr(cli, "_require_mainnet_for_publish", lambda _client: True)
+        monkeypatch.setattr(cli, "_community_full_threat_identifiers", lambda *_args: {identifier})
+        monkeypatch.setattr(cli, "_load_curated_ledger", lambda: {identifier})
+        monkeypatch.setattr(cli, "_existing_graph_identifiers", lambda *_args: set())
+        monkeypatch.setattr(cli, "_append_seeded_ledger", lambda ids: full_ledger.extend(ids))
+        monkeypatch.setattr(
+            cli.quads,
+            "build_curation_proof_quads",
+            lambda **_kwargs: (_ for _ in ()).throw(AssertionError("must not build CurationProof")),
+        )
+
+        args = SimpleNamespace(
+            dry_run=False,
+            adopt_existing=False,
+            batch_size=250,
+            max_batches=0,
+            epochs=3,
+            publish_timeout=12,
+            publish_poll_interval=2,
+        )
+        assert cli._cmd_curate_anchor(args) == 0
+        assert pulled == [("cg/test", candidate_name, "swm", "replace")]
+        assert published == [("cg/test", candidate_name, 3, 12, 2)]
+        assert full_ledger == [identifier]
+
+    def test_legacy_reduced_vm_row_is_not_counted_as_complete(self):
+        full = "dep:npm:full@1.0.0"
+        legacy_reduced = "dep:npm:reduced@1.0.0"
+
+        class FakeClient:
+            def query(self, sparql, cg_id, view=None):
+                assert cg_id == "cg/test"
+                assert view == constants.VIEW_VERIFIABLE_MEMORY
+                # Model the store's result: the legacy reduced row is returned
+                # only if the completeness constraints disappear from SPARQL.
+                rows = [{"identifier": full}]
+                if not (
+                    "schema:name ?name" in sparql
+                    and "schema:description ?description" in sparql
+                ):
+                    rows.append({"identifier": legacy_reduced})
+                return rows
+
+        found = cli._existing_graph_identifiers(
+            FakeClient(),
+            SimpleNamespace(context_graph_id="cg/test"),
+        )
+        assert found == {full}
+        assert legacy_reduced not in found
 
 
 class TestVerification:
@@ -127,17 +209,16 @@ class TestVerification:
 
 
 class TestDualFormat:
-    """Detection must work with BOTH the old format (full threat KAs published
-    to VM) and the new format (raw threats in SWM, compact proofs on VM)."""
+    """Detection supports current full VM threats plus legacy proof-era data."""
 
-    def test_old_format_vm_threat_is_public(self):
-        # A node with legacy full-threat KAs on VM: the VM tier yields threat
+    def test_full_format_vm_threat_is_public(self):
+        # A node with current full-threat KAs on VM: the VM tier yields threat
         # rows directly, tagged public — no proof needed.
         vm_rows = [{"identifier": "dep:npm:legacy@1.0.0", "severity": "critical", "name": "legacy"}]
         rs = ruleset.build_from_rows([(r, "public") for r in vm_rows])
         assert next(iter(rs.dependency.values()))["source"] == "public"
 
-    def test_new_format_swm_plus_proof_is_public(self):
+    def test_legacy_format_swm_plus_proof_is_public(self):
         swm = [_row("dep:npm:modern@2.0.0", severity="critical", name="modern")]
         verified = ruleset.verified_identifiers(swm, {"p": _proof_for(swm)})
         rs = ruleset.build_from_rows(
@@ -146,7 +227,7 @@ class TestDualFormat:
         assert next(iter(rs.dependency.values()))["source"] == "public"
 
     def test_both_formats_coexist_in_one_ruleset(self):
-        # Old-format threat from VM + new-format threat from SWM+proof, merged.
+        # Full threat from VM + legacy threat from SWM+proof, merged.
         vm = [{"identifier": "dep:npm:legacy@1.0.0", "severity": "high", "name": "legacy"}]
         swm = [_row("dep:npm:modern@2.0.0", severity="high", name="modern")]
         verified = ruleset.verified_identifiers(swm, {"p": _proof_for(swm)})
