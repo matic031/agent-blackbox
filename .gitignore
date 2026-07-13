@@ -155,8 +155,10 @@ wallets.json
 dkg.json
 # DKG node home / config — holds chain.rpcUrl with the paid RPC provider key
 .dkg/
-# Installer-managed OriginTrail DKG source/build checkout.
+# Installer-managed OriginTrail DKG npm package.
 /dkg/
+# Preserved custom checkout created during the one-time npm migration.
+/dkg.custom-backup-*/
 # Internal ops notes / support reports (may name infra: wallet, RPC provider, peer ids)
 ORIGINTRAIL_DKG_ISSUE_REPORT.md
 *_DKG_ISSUE_REPORT.md

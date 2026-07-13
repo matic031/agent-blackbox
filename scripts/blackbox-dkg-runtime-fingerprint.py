@@ -109,6 +109,28 @@ def compute_fingerprint(
     return digest.hexdigest()
 
 
+def installed_commit(cli_dir: Path) -> str:
+    """Return the build commit advertised by the installed DKG package."""
+    cli_dir = cli_dir.expanduser().resolve()
+    package_roots = (
+        cli_dir / "node_modules" / "@origintrail-official" / "dkg",
+        cli_dir / "packages" / "cli",
+    )
+    for package_root in package_roots:
+        build_info = package_root / "build-info.json"
+        if not build_info.is_file():
+            continue
+        try:
+            payload = json.loads(build_info.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise FingerprintError(f"could not read DKG build metadata: {exc}") from exc
+        commit = str(payload.get("commit") or "").strip().lower()
+        if len(commit) >= 7 and all(ch in "0123456789abcdef" for ch in commit):
+            return commit
+        raise FingerprintError(f"invalid DKG build commit in {build_info}")
+    raise FingerprintError(f"DKG build-info.json not found under {cli_dir}")
+
+
 def record_fingerprint(marker: Path, fingerprint: str) -> None:
     normalized = fingerprint.strip().lower()
     if len(normalized) != 64 or any(ch not in "0123456789abcdef" for ch in normalized):
@@ -178,6 +200,9 @@ def main(argv: list[str] | None = None) -> int:
         if len(args) == 5 and args[0] == "compute":
             print(compute_fingerprint(*(Path(value) for value in args[1:])))
             return 0
+        if len(args) == 2 and args[0] == "commit":
+            print(installed_commit(Path(args[1])))
+            return 0
         if len(args) == 3 and args[0] == "record":
             record_fingerprint(Path(args[1]), args[2])
             return 0
@@ -192,6 +217,7 @@ def main(argv: list[str] | None = None) -> int:
     print(
         f"usage: {Path(sys.argv[0]).name} compute <dkg-cli-dir> <dkg-home> "
         "<node-bin> <dkg-bin>\n"
+        f"       {Path(sys.argv[0]).name} commit <dkg-cli-dir>\n"
         f"       {Path(sys.argv[0]).name} record <marker> <sha256>\n"
         f"       {Path(sys.argv[0]).name} wait <daemon-url> <expected-commit> <timeout-seconds>",
         file=sys.stderr,

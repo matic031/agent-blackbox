@@ -110,6 +110,21 @@ def test_cli_compute_and_atomic_record(tmp_path, capsys):
     assert marker.read_text(encoding="utf-8") == fingerprint + "\n"
 
 
+def test_installed_commit_reads_published_npm_build_metadata(tmp_path, capsys):
+    cli_dir = tmp_path / "dkg"
+    package = cli_dir / "node_modules" / "@origintrail-official" / "dkg"
+    package.mkdir(parents=True)
+    expected = "539429d419a01148a974e7db705d6e777eb9eb8f"
+    (package / "build-info.json").write_text(
+        json.dumps({"commit": expected, "commitShort": expected[:8]}),
+        encoding="utf-8",
+    )
+
+    assert FINGERPRINTER.installed_commit(cli_dir) == expected
+    assert FINGERPRINTER.main(["commit", str(cli_dir)]) == 0
+    assert capsys.readouterr().out.strip() == expected
+
+
 def test_invalid_record_value_fails_closed(tmp_path, capsys):
     marker = tmp_path / "marker"
 

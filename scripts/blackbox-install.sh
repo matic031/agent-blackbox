@@ -8,7 +8,7 @@
 # sensible config defaults — so onboarding is one command and dead simple.
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/matic031/agent-guardian/feat/guardian/scripts/blackbox-install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/matic031/agent-guardian/feat/blackbox/scripts/blackbox-install.sh | bash
 #   # or, from a clone:
 #   ./scripts/blackbox-install.sh [--help]
 #
@@ -21,10 +21,10 @@ set -euo pipefail
 
 # ── Configuration (override via env) ────────────────────────────────────────
 REPO_URL="${BLACKBOX_REPO_URL:-https://github.com/matic031/agent-guardian.git}"
-REPO_BRANCH="${BLACKBOX_REPO_BRANCH:-feat/guardian}"
+REPO_BRANCH="${BLACKBOX_REPO_BRANCH:-feat/blackbox}"
 HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
-# Keep the managed DKG checkout and node state inside the Agent Blackbox
-# checkout.  For a local script this is the current repository; for curl | bash
+# Keep the managed npm DKG package and node state inside the Agent Blackbox
+# checkout. For a local script this is the current repository; for curl | bash
 # it is the checkout the installer creates at BLACKBOX_INSTALL_DIR.
 if [ -n "${BLACKBOX_INSTALL_DIR:-}" ]; then
     BLACKBOX_INSTALL_ROOT="$BLACKBOX_INSTALL_DIR"
@@ -64,8 +64,7 @@ BLACKBOX_DKG_ACCEPT_STORE_RESET=false
 BLACKBOX_DKG_HOME="${BLACKBOX_DKG_HOME:-$BLACKBOX_INSTALL_ROOT/.dkg}"
 BLACKBOX_DKG_CLI_DIR="${BLACKBOX_DKG_CLI_DIR:-$BLACKBOX_INSTALL_ROOT/dkg}"
 BLACKBOX_DKG_BIN="${BLACKBOX_DKG_BIN:-$BLACKBOX_DKG_CLI_DIR/node_modules/.bin/dkg}"
-BLACKBOX_DKG_REPO_URL="${BLACKBOX_DKG_REPO_URL:-https://github.com/matic031/dkg.git}"
-BLACKBOX_DKG_REPO_BRANCH="${BLACKBOX_DKG_REPO_BRANCH:-feat/blackbox}"
+BLACKBOX_DKG_PACKAGE="${BLACKBOX_DKG_PACKAGE:-@origintrail-official/dkg@10.0.5}"
 BLACKBOX_DKG_DAEMON_URL="${BLACKBOX_DKG_DAEMON_URL:-${BLACKBOX_DKG_URL:-http://127.0.0.1:$BLACKBOX_DKG_PORT}}"
 NODE_MAJOR="${BLACKBOX_NODE_MAJOR:-22}"
 # Old default, parked for now: umanitek/guardian-threats-staging
@@ -170,7 +169,7 @@ prepare_blackbox_dkg_runtime_fingerprint() {
     if [ ! -f "$fingerprinter" ]; then
         BLACKBOX_INSTALL_INCOMPLETE=true
         BLACKBOX_THREAT_GRAPH_INCOMPLETE=true
-        warn "DKG runtime fingerprint helper is missing; loaded checkout state cannot be verified."
+        warn "DKG runtime fingerprint helper is missing; loaded npm runtime cannot be verified."
         return 1
     fi
     node_bin="$(command -v node)"
@@ -205,15 +204,21 @@ record_blackbox_dkg_runtime_fingerprint() {
 wait_for_blackbox_dkg_runtime() {
     local verifier="$REPO_DIR/scripts/blackbox-dkg-runtime-fingerprint.py"
     local expected_commit
-    expected_commit="$(git -C "$BLACKBOX_DKG_CLI_DIR" rev-parse HEAD)" || return 1
+    if ! expected_commit="$("$VENV_DIR/bin/python" "$verifier" commit \
+        "$BLACKBOX_DKG_CLI_DIR")"; then
+        BLACKBOX_INSTALL_INCOMPLETE=true
+        BLACKBOX_THREAT_GRAPH_INCOMPLETE=true
+        warn "Could not resolve the published DKG build commit."
+        return 1
+    fi
     if ! "$VENV_DIR/bin/python" "$verifier" wait \
         "$BLACKBOX_DKG_DAEMON_URL" "$expected_commit" 90 >/dev/null; then
         BLACKBOX_INSTALL_INCOMPLETE=true
         BLACKBOX_THREAT_GRAPH_INCOMPLETE=true
-        warn "The DKG daemon did not activate checkout ${expected_commit:0:12}."
+        warn "The DKG daemon did not activate npm build ${expected_commit:0:12}."
         return 1
     fi
-    ok "DKG daemon is ready on checkout ${expected_commit:0:12}"
+    ok "DKG daemon is ready on npm build ${expected_commit:0:12}"
 }
 
 migrate_legacy_blackbox_dkg_home() {
@@ -547,7 +552,7 @@ Environment overrides:
   BLACKBOX_NODE_MAJOR, BLACKBOX_INSTALL_DIR, BLACKBOX_CONTEXT_GRAPH_ID,
   BLACKBOX_DKG_PORT, BLACKBOX_DKG_STORE_PORT, BLACKBOX_DKG_STORE_URL,
   BLACKBOX_DKG_HOME, BLACKBOX_DKG_CLI_DIR,
-  BLACKBOX_DKG_BIN, BLACKBOX_DKG_REPO_URL, BLACKBOX_DKG_REPO_BRANCH,
+  BLACKBOX_DKG_BIN, BLACKBOX_DKG_PACKAGE,
   BLACKBOX_DKG_DAEMON_URL, BLACKBOX_DKG_CATCHUP_TIMEOUT,
   BLACKBOX_LLM_PROVIDER,
   BLACKBOX_LLM_MODEL, BLACKBOX_LLM_KEY_SOURCE, BLACKBOX_LLM_API_KEY,
@@ -950,77 +955,47 @@ run_hermes_setup() {
 }
 
 # ── DKG node CLI + bootstrap ────────────────────────────────────────────────
-install_blackbox_dkg_checkout() {
-    local previous_commit=""
-    local current_commit
+install_blackbox_dkg_package() {
     local backup_dir=""
-    local needs_build=false
-    local entrypoint="$BLACKBOX_DKG_CLI_DIR/packages/cli/dist/cli.js"
-    local build_marker="$BLACKBOX_DKG_CLI_DIR/.git/blackbox-build-commit"
-    local built_commit=""
-    local node_bin
+    local package_json="$BLACKBOX_DKG_CLI_DIR/node_modules/@origintrail-official/dkg/package.json"
+    local installed_version=""
 
-    if ! command -v git >/dev/null 2>&1 || ! command -v corepack >/dev/null 2>&1; then
-        warn "git and Corepack are required to build the Blackbox DKG checkout."
+    if ! command -v npm >/dev/null 2>&1; then
+        warn "npm is required to install the published OriginTrail DKG package."
         return 1
     fi
 
     if [ -d "$BLACKBOX_DKG_CLI_DIR/.git" ]; then
-        if ! git -C "$BLACKBOX_DKG_CLI_DIR" diff --quiet ||
-            ! git -C "$BLACKBOX_DKG_CLI_DIR" diff --cached --quiet; then
-            warn "Managed DKG checkout has local changes; refusing to overwrite $BLACKBOX_DKG_CLI_DIR."
+        backup_dir="${BLACKBOX_DKG_CLI_DIR}.custom-backup-$(date +%Y%m%d%H%M%S)"
+        step "Moving the custom DKG checkout to $backup_dir"
+        if ! mv "$BLACKBOX_DKG_CLI_DIR" "$backup_dir"; then
+            warn "Could not preserve the custom DKG checkout before installing npm DKG."
             return 1
         fi
-        previous_commit="$(git -C "$BLACKBOX_DKG_CLI_DIR" rev-parse HEAD)"
-        if ! git -C "$BLACKBOX_DKG_CLI_DIR" remote set-url origin "$BLACKBOX_DKG_REPO_URL" ||
-            ! git -C "$BLACKBOX_DKG_CLI_DIR" fetch --depth 1 origin "$BLACKBOX_DKG_REPO_BRANCH" ||
-            ! git -C "$BLACKBOX_DKG_CLI_DIR" checkout --detach FETCH_HEAD; then
-            warn "Could not update DKG from $BLACKBOX_DKG_REPO_URL#$BLACKBOX_DKG_REPO_BRANCH."
-            return 1
-        fi
-    else
-        if [ -d "$BLACKBOX_DKG_CLI_DIR" ] &&
-            [ -n "$(find "$BLACKBOX_DKG_CLI_DIR" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]; then
-            backup_dir="${BLACKBOX_DKG_CLI_DIR}.npm-backup-$(date +%Y%m%d%H%M%S)"
-            step "Moving the legacy npm DKG install to $backup_dir"
-            mv "$BLACKBOX_DKG_CLI_DIR" "$backup_dir"
-        fi
-        if ! git clone --depth 1 --branch "$BLACKBOX_DKG_REPO_BRANCH" \
-            "$BLACKBOX_DKG_REPO_URL" "$BLACKBOX_DKG_CLI_DIR"; then
-            [ -n "$backup_dir" ] && [ ! -e "$BLACKBOX_DKG_CLI_DIR" ] &&
-                mv "$backup_dir" "$BLACKBOX_DKG_CLI_DIR"
-            warn "Could not clone DKG from $BLACKBOX_DKG_REPO_URL#$BLACKBOX_DKG_REPO_BRANCH."
-            return 1
-        fi
-        needs_build=true
     fi
 
-    current_commit="$(git -C "$BLACKBOX_DKG_CLI_DIR" rev-parse HEAD)"
-    [ -f "$build_marker" ] && built_commit="$(tr -d '\r\n' <"$build_marker")"
-    if [ "$previous_commit" != "$current_commit" ] ||
-        [ "$built_commit" != "$current_commit" ] || [ ! -f "$entrypoint" ]; then
-        needs_build=true
-    fi
-    if [ "$needs_build" = true ]; then
-        step "Building DKG feat/blackbox at ${current_commit:0:12} ..."
-        if ! (cd "$BLACKBOX_DKG_CLI_DIR" &&
-            corepack pnpm install --frozen-lockfile &&
-            corepack pnpm run build:runtime:packages); then
-            warn "Could not install or build the Blackbox DKG checkout."
-            return 1
+    mkdir -p "$BLACKBOX_DKG_CLI_DIR"
+    if ! npm install --prefix "$BLACKBOX_DKG_CLI_DIR" \
+        "$BLACKBOX_DKG_PACKAGE" >/dev/null 2>&1; then
+        if [ -n "$backup_dir" ]; then
+            rm -rf "$BLACKBOX_DKG_CLI_DIR"
+            mv "$backup_dir" "$BLACKBOX_DKG_CLI_DIR"
         fi
-        printf '%s\n' "$current_commit" >"$build_marker"
-        BLACKBOX_DKG_RESTART_REQUIRED=true
+        warn "Could not install the published DKG package $BLACKBOX_DKG_PACKAGE."
+        return 1
     fi
 
-    node_bin="$(command -v node)"
-    mkdir -p "$(dirname "$BLACKBOX_DKG_BIN")"
-    {
-        printf '%s\n' '#!/bin/sh'
-        printf 'exec "%s" "%s" "$@"\n' "$node_bin" "$entrypoint"
-    } >"$BLACKBOX_DKG_BIN"
-    chmod 755 "$BLACKBOX_DKG_BIN"
-    ok "Blackbox DKG checkout ready (${current_commit:0:12}, $BLACKBOX_DKG_REPO_BRANCH)"
+    if [ ! -x "$BLACKBOX_DKG_BIN" ] || [ ! -f "$package_json" ]; then
+        if [ -n "$backup_dir" ]; then
+            rm -rf "$BLACKBOX_DKG_CLI_DIR"
+            mv "$backup_dir" "$BLACKBOX_DKG_CLI_DIR"
+        fi
+        warn "npm completed, but the DKG CLI entrypoint is missing at $BLACKBOX_DKG_BIN."
+        return 1
+    fi
+    installed_version="$(node -p \
+        "require(process.argv[1]).version" "$package_json" 2>/dev/null || true)"
+    ok "Published DKG npm package ready (${installed_version:-installed})"
 }
 
 install_dkg() {
@@ -1040,9 +1015,9 @@ install_dkg() {
         return 0
     fi
 
-    step "Installing the Blackbox DKG checkout ($BLACKBOX_DKG_REPO_URL#$BLACKBOX_DKG_REPO_BRANCH) ..."
-    step "  Checkout: $BLACKBOX_DKG_CLI_DIR"
-    if ! install_blackbox_dkg_checkout; then
+    step "Installing the published OriginTrail DKG package ($BLACKBOX_DKG_PACKAGE) ..."
+    step "  npm prefix: $BLACKBOX_DKG_CLI_DIR"
+    if ! install_blackbox_dkg_package; then
         BLACKBOX_INSTALL_INCOMPLETE=true
         BLACKBOX_THREAT_GRAPH_INCOMPLETE=true
         dkg_manual_hint
@@ -1203,8 +1178,8 @@ wait_for_dkg_catchup() {
 
 dkg_manual_hint() {
     step "To set up the DKG node later:"
-    echo "      git clone --depth 1 --branch \"$BLACKBOX_DKG_REPO_BRANCH\" \"$BLACKBOX_DKG_REPO_URL\" \"$BLACKBOX_DKG_CLI_DIR\""
-    echo "      cd \"$BLACKBOX_DKG_CLI_DIR\" && corepack pnpm install --frozen-lockfile && corepack pnpm run build:runtime:packages"
+    echo "      mkdir -p \"$BLACKBOX_DKG_CLI_DIR\""
+    echo "      npm install --prefix \"$BLACKBOX_DKG_CLI_DIR\" \"$BLACKBOX_DKG_PACKAGE\""
     echo "      export BLACKBOX_DKG_HOME=\"$BLACKBOX_DKG_HOME\""
     echo "      export BLACKBOX_DKG_BIN=\"$BLACKBOX_DKG_BIN\""
     echo "      export BLACKBOX_DKG_PORT=\"$BLACKBOX_DKG_PORT\""

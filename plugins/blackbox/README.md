@@ -12,12 +12,13 @@ confirmed threats before they execute.
 Run the installer:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/matic031/agent-guardian/feat/guardian/scripts/blackbox-install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/matic031/agent-guardian/feat/blackbox/scripts/blackbox-install.sh | bash
 ```
 
-The installer sets up an isolated DKG node for Blackbox and protects detected
-Hermes and OpenClaw agents. Docker must be installed and running for its
-Blazegraph store. The installer does not replace or modify an existing DKG node.
+The installer sets up an isolated node from the official
+`@origintrail-official/dkg` npm package and protects detected Hermes and
+OpenClaw agents. Docker must be installed and running for its Blazegraph store.
+The installer does not replace or modify an existing DKG node.
 
 ## Compatibility
 

@@ -129,12 +129,15 @@ def test_unix_installer_uses_isolated_blackbox_dkg_node() -> None:
     assert 'BLACKBOX_DKG_HOME="${BLACKBOX_DKG_HOME:-$BLACKBOX_INSTALL_ROOT/.dkg}"' in text
     assert 'BLACKBOX_DKG_CLI_DIR="${BLACKBOX_DKG_CLI_DIR:-$BLACKBOX_INSTALL_ROOT/dkg}"' in text
     assert 'BLACKBOX_DKG_BIN="${BLACKBOX_DKG_BIN:-$BLACKBOX_DKG_CLI_DIR/node_modules/.bin/dkg}"' in text
-    assert 'BLACKBOX_DKG_REPO_URL="${BLACKBOX_DKG_REPO_URL:-https://github.com/matic031/dkg.git}"' in text
-    assert 'BLACKBOX_DKG_REPO_BRANCH="${BLACKBOX_DKG_REPO_BRANCH:-feat/blackbox}"' in text
+    assert re.search(
+        r'BLACKBOX_DKG_PACKAGE="\$\{BLACKBOX_DKG_PACKAGE:-'
+        r'@origintrail-official/dkg@\d+\.\d+\.\d+\}"',
+        text,
+    )
     assert 'BLACKBOX_DKG_DAEMON_URL="${BLACKBOX_DKG_DAEMON_URL:-${BLACKBOX_DKG_URL:-http://127.0.0.1:$BLACKBOX_DKG_PORT}}"' in text
-    assert 'git clone --depth 1 --branch "$BLACKBOX_DKG_REPO_BRANCH"' in text
-    assert "corepack pnpm run build:runtime:packages" in text
-    assert "blackbox-build-commit" in text
+    assert 'npm install --prefix "$BLACKBOX_DKG_CLI_DIR"' in text
+    assert "BLACKBOX_DKG_REPO_URL" not in text
+    assert "corepack pnpm" not in text
     assert "ensure_blackbox_dkg_config" in text
     assert 'blackbox_dkg start' in text
     assert '"apiPort"] = api_port' in text
@@ -233,12 +236,15 @@ def test_windows_installer_uses_isolated_blackbox_dkg_node() -> None:
     assert 'Join-Path $DefaultRepoDir ".dkg"' in text
     assert 'Join-Path $DefaultRepoDir "dkg"' in text
     assert '$DkgBin      = if ($env:BLACKBOX_DKG_BIN)' in text
-    assert '$DkgRepoUrl  = if ($env:BLACKBOX_DKG_REPO_URL)' in text
-    assert '$DkgRepoBranch = if ($env:BLACKBOX_DKG_REPO_BRANCH)' in text
+    assert re.search(
+        r'\$DkgPackage\s+= if \(\$env:BLACKBOX_DKG_PACKAGE\).*'
+        r'@origintrail-official/dkg@\d+\.\d+\.\d+',
+        text,
+    )
     assert '$DkgDaemonUrl = if ($env:BLACKBOX_DKG_DAEMON_URL)' in text
-    assert "git clone --depth 1 --branch $DkgRepoBranch" in text
-    assert "corepack pnpm run build:runtime:packages" in text
-    assert "blackbox-build-commit" in text
+    assert "npm install --prefix $DkgCliDir $DkgPackage" in text
+    assert "BLACKBOX_DKG_REPO_URL" not in text
+    assert "corepack pnpm" not in text
     assert "Ensure-BlackboxDkgConfig" in text
     assert "Invoke-BlackboxDkg start" in text
     assert 'data["apiPort"] = api_port' in text
@@ -387,7 +393,7 @@ def test_blazegraph_helper_uses_built_dkg_provisioner(tmp_path: Path) -> None:
     node = shutil.which("node")
     if not node:
         pytest.skip("Node.js is not installed")
-    cli = tmp_path / "packages" / "cli"
+    cli = tmp_path / "node_modules" / "@origintrail-official" / "dkg"
     module = cli / "dist" / "daemon" / "blazegraph-docker.js"
     module.parent.mkdir(parents=True)
     (cli / "package.json").write_text('{"type":"module"}', encoding="utf-8")
@@ -454,7 +460,7 @@ def test_installers_apply_native_dkg_membership_and_relay_defaults() -> None:
         assert "DKG_SYNC_RESPONDER_PER_SNAPSHOT_ROW_LIMIT" not in text
         assert "DKG_SYNC_RESPONDER_GLOBAL_SNAPSHOT_ROW_LIMIT" not in text
         assert "blackbox-dkg-runtime-fingerprint.py" in text
-        assert "DKG daemon is ready on checkout" in text
+        assert "DKG daemon is ready on npm build" in text
         assert 'data["autoApproveJoinRequests"] = auto_approve' in text
         assert 'data.pop("syncOnConnectEnabled", None)' in text
         assert 'data.pop("syncGlobalMaxInflight", None)' in text
@@ -472,7 +478,7 @@ def test_installers_restart_running_owned_dkg_only_for_runtime_changes() -> None
     assert "BLACKBOX_DKG_RESTART_REQUIRED" in INSTALL_SH.read_text(encoding="utf-8")
     assert 'if [ "$BLACKBOX_DKG_RESTART_REQUIRED" != true ]; then' in unix
     assert "blackbox_dkg stop && blackbox_dkg start && wait_for_blackbox_dkg_runtime" in unix
-    assert "install_blackbox_dkg_checkout" in unix
+    assert "install_blackbox_dkg_package" in unix
     assert "prepare_blackbox_dkg_runtime_fingerprint" in unix
     assert "record_blackbox_dkg_runtime_fingerprint" in unix
     assert ".blackbox-runtime.sha256" in INSTALL_SH.read_text(encoding="utf-8")
@@ -641,7 +647,7 @@ printf '%s|%s|%s|%s\n' "$prepare_rc" "$BLACKBOX_DKG_RESTART_REQUIRED" "$fingerpr
     assert invoke(record=False) == ("0", "true", "64", "skipped")
 
 
-def test_unix_installer_stops_dkg_setup_when_checkout_fails(tmp_path: Path) -> None:
+def test_unix_installer_stops_dkg_setup_when_npm_install_fails(tmp_path: Path) -> None:
     install_body = _extract_function_body("install_dkg")
     continued = tmp_path / "continued"
     command = f"""
@@ -650,7 +656,7 @@ ok() {{ :; }}
 step() {{ :; }}
 warn() {{ :; }}
 dkg_manual_hint() {{ printf 'manual-hint\n'; }}
-install_blackbox_dkg_checkout() {{ return 1; }}
+install_blackbox_dkg_package() {{ return 1; }}
 check_blackbox_dkg_port() {{ : > {shlex.quote(str(continued))}; return 0; }}
 install_dkg() {{
 {install_body}
@@ -659,8 +665,7 @@ SKIP_DKG=false
 HAS_NODE=true
 BLACKBOX_DKG_CLI_DIR={shlex.quote(str(tmp_path / 'dkg-cli'))}
 BLACKBOX_DKG_BIN=/bin/true
-BLACKBOX_DKG_REPO_URL=https://example.invalid/dkg.git
-BLACKBOX_DKG_REPO_BRANCH=feat/blackbox
+BLACKBOX_DKG_PACKAGE=@origintrail-official/dkg@10.0.5
 install_dkg
 """
     result = subprocess.run(
@@ -674,9 +679,9 @@ install_dkg
     assert not continued.exists(), "installer continued into DKG port/config setup"
 
 
-def test_windows_dkg_checkout_failure_is_fatal_to_dkg_setup() -> None:
+def test_windows_dkg_npm_failure_is_fatal_to_dkg_setup() -> None:
     install_body = _extract_powershell_function_body("Install-Dkg")
-    failure_guard = """if (-not (Install-BlackboxDkgCheckout)) {
+    failure_guard = """if (-not (Install-BlackboxDkgPackage)) {
         $script:InstallIncomplete = $true
         Show-DkgManualHint
         return

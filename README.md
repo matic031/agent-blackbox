@@ -15,12 +15,12 @@
 
 Agent Blackbox is a security plugin that lives inside your AI agent and checks every action it takes - prompts, shell commands, file access, package installs, skills - against a shared threat graph on the OriginTrail Decentralized Knowledge Graph (DKG). A threat discovered by one agent protects all of them: when the graph learns about an attack, every protected agent picks it up on its next sync. It flags by default; blocking is one config switch away.
 
-Blackbox runs its own local DKG node at `http://127.0.0.1:9320`. Its managed DKG checkout and state live inside the Agent Blackbox checkout under `dkg/` and `.dkg/`, so it never touches another DKG installation. The dashboard runs separately on `9700`.
+Blackbox runs its own local DKG node at `http://127.0.0.1:9320`. Its official npm DKG package and state live inside the Agent Blackbox checkout under `dkg/` and `.dkg/`, so it never touches another DKG installation. The node uses Blazegraph, and the dashboard runs separately on `9700`.
 
 ## Install
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/matic031/agent-guardian/feat/guardian/scripts/blackbox-install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/matic031/agent-guardian/feat/blackbox/scripts/blackbox-install.sh | bash
 ```
 
 <details>
@@ -31,7 +31,7 @@ The installer only automates the steps below (idempotent, no sudo). Run them you
 
 ```bash
 # 1. Get the code
-git clone -b feat/guardian https://github.com/matic031/agent-guardian.git agent-blackbox
+git clone -b feat/blackbox https://github.com/matic031/agent-guardian.git agent-blackbox
 cd agent-blackbox
 
 # 2. Python env (3.11-3.13) with the dashboard extras
@@ -42,9 +42,9 @@ venv/bin/pip install -e ".[web]"
 mkdir -p ~/.local/bin
 ln -sf "$PWD/venv/bin/hermes" ~/.local/bin/hermes
 
-# 4. Local DKG node (required for first-run protection)
-git clone --depth 1 -b feat/blackbox https://github.com/matic031/dkg.git dkg
-(cd dkg && corepack pnpm install --frozen-lockfile && corepack pnpm run build:runtime:packages)
+# 4. Official npm DKG node (required for first-run protection)
+mkdir -p dkg
+npm install --prefix dkg @origintrail-official/dkg@10.0.5
 export BLACKBOX_DKG_HOME="$PWD/.dkg"
 export BLACKBOX_DKG_BIN="$PWD/dkg/node_modules/.bin/dkg"
 export BLACKBOX_DKG_PORT=9320
@@ -63,7 +63,7 @@ hermes blackbox sync --wait --require-rules
 Or download the script, read it, then run it:
 
 ```bash
-curl -fsSLO https://raw.githubusercontent.com/matic031/agent-guardian/feat/guardian/scripts/blackbox-install.sh
+curl -fsSLO https://raw.githubusercontent.com/matic031/agent-guardian/feat/blackbox/scripts/blackbox-install.sh
 less blackbox-install.sh
 bash blackbox-install.sh
 ```

@@ -11,7 +11,7 @@
 # the end).
 #
 # Usage:
-#   iwr -useb https://raw.githubusercontent.com/matic031/agent-guardian/feat/guardian/scripts/blackbox-install.ps1 | iex
+#   iwr -useb https://raw.githubusercontent.com/matic031/agent-guardian/feat/blackbox/scripts/blackbox-install.ps1 | iex
 #   # or, from a clone:
 #   .\scripts\blackbox-install.ps1 [-SkipDkg]
 #
@@ -34,9 +34,9 @@ $ProgressPreference = "SilentlyContinue"
 
 # ── Configuration (override via env) ────────────────────────────────────────
 $RepoUrl     = if ($env:BLACKBOX_REPO_URL)    { $env:BLACKBOX_REPO_URL }    else { "https://github.com/matic031/agent-guardian.git" }
-$RepoBranch  = if ($env:BLACKBOX_REPO_BRANCH) { $env:BLACKBOX_REPO_BRANCH } else { "feat/guardian" }
+$RepoBranch  = if ($env:BLACKBOX_REPO_BRANCH) { $env:BLACKBOX_REPO_BRANCH } else { "feat/blackbox" }
 $HermesHome  = if ($env:HERMES_HOME)          { $env:HERMES_HOME }          else { "$env:USERPROFILE\.hermes" }
-# Keep the managed DKG checkout and state in the Agent Blackbox checkout. When
+# Keep the managed npm DKG package and state in the Agent Blackbox checkout. When
 # invoked from a clone, use that clone; when piped through iex, use the checkout
 # Resolve-Repo creates at BLACKBOX_INSTALL_DIR.
 if ($env:BLACKBOX_INSTALL_DIR) {
@@ -68,8 +68,7 @@ $DkgAcceptStoreReset = $false
 $DkgHome     = if ($env:BLACKBOX_DKG_HOME)    { $env:BLACKBOX_DKG_HOME }    else { Join-Path $DefaultRepoDir ".dkg" }
 $DkgCliDir   = if ($env:BLACKBOX_DKG_CLI_DIR) { $env:BLACKBOX_DKG_CLI_DIR } else { Join-Path $DefaultRepoDir "dkg" }
 $DkgBin      = if ($env:BLACKBOX_DKG_BIN)     { $env:BLACKBOX_DKG_BIN }     else { Join-Path $DkgCliDir "node_modules\.bin\dkg.cmd" }
-$DkgRepoUrl  = if ($env:BLACKBOX_DKG_REPO_URL) { $env:BLACKBOX_DKG_REPO_URL } else { "https://github.com/matic031/dkg.git" }
-$DkgRepoBranch = if ($env:BLACKBOX_DKG_REPO_BRANCH) { $env:BLACKBOX_DKG_REPO_BRANCH } else { "feat/blackbox" }
+$DkgPackage  = if ($env:BLACKBOX_DKG_PACKAGE) { $env:BLACKBOX_DKG_PACKAGE } else { "@origintrail-official/dkg@10.0.5" }
 $DkgDaemonUrl = if ($env:BLACKBOX_DKG_DAEMON_URL) { $env:BLACKBOX_DKG_DAEMON_URL } elseif ($env:BLACKBOX_DKG_URL) { $env:BLACKBOX_DKG_URL } else { "http://127.0.0.1:$DkgPort" }
 $NodeMajor   = if ($env:BLACKBOX_NODE_MAJOR)  { [int]$env:BLACKBOX_NODE_MAJOR } else { 22 }
 # Old default, parked for now: umanitek/guardian-threats-staging
@@ -118,8 +117,8 @@ Environment overrides:
 	  BLACKBOX_REPO_URL, BLACKBOX_REPO_BRANCH, HERMES_HOME, BLACKBOX_NODE_MAJOR,
 	  BLACKBOX_CONTEXT_GRAPH_ID, BLACKBOX_DKG_PORT, BLACKBOX_DKG_STORE_PORT,
 	  BLACKBOX_DKG_STORE_URL, BLACKBOX_DKG_HOME,
-	  BLACKBOX_DKG_CLI_DIR, BLACKBOX_DKG_BIN, BLACKBOX_DKG_REPO_URL,
-	  BLACKBOX_DKG_REPO_BRANCH, BLACKBOX_DKG_DAEMON_URL,
+	  BLACKBOX_DKG_CLI_DIR, BLACKBOX_DKG_BIN, BLACKBOX_DKG_PACKAGE,
+	  BLACKBOX_DKG_DAEMON_URL,
 	  BLACKBOX_DKG_CATCHUP_TIMEOUT
 
 Blackbox uses its own DKG home and port by default:
@@ -273,7 +272,7 @@ function Prepare-BlackboxDkgRuntimeFingerprint {
     $fingerprinter = Join-Path $RepoDir "scripts\blackbox-dkg-runtime-fingerprint.py"
     if (-not (Test-Path $fingerprinter)) {
         $script:InstallIncomplete = $true
-        Write-Warn2 "DKG runtime fingerprint helper is missing; loaded checkout state cannot be verified."
+        Write-Warn2 "DKG runtime fingerprint helper is missing; loaded npm runtime cannot be verified."
         return $false
     }
     $nodeCommand = Get-Command node -ErrorAction SilentlyContinue
@@ -321,19 +320,19 @@ function Save-BlackboxDkgRuntimeFingerprint {
 
 function Wait-BlackboxDkgRuntime {
     $verifier = Join-Path $RepoDir "scripts\blackbox-dkg-runtime-fingerprint.py"
-    $expectedCommit = (& git -C $DkgCliDir rev-parse HEAD).Trim()
+    $expectedCommit = (& $script:VenvPython $verifier commit $DkgCliDir).Trim()
     if ($LASTEXITCODE -ne 0 -or -not $expectedCommit) {
         $script:InstallIncomplete = $true
-        Write-Warn2 "Could not resolve the expected DKG checkout commit."
+        Write-Warn2 "Could not resolve the published DKG build commit."
         return $false
     }
     $null = & $script:VenvPython $verifier wait $DkgDaemonUrl $expectedCommit 90
     if ($LASTEXITCODE -ne 0) {
         $script:InstallIncomplete = $true
-        Write-Warn2 "The DKG daemon did not activate checkout $($expectedCommit.Substring(0, 12))."
+        Write-Warn2 "The DKG daemon did not activate npm build $($expectedCommit.Substring(0, 12))."
         return $false
     }
-    Write-Ok "DKG daemon is ready on checkout $($expectedCommit.Substring(0, 12))"
+    Write-Ok "DKG daemon is ready on npm build $($expectedCommit.Substring(0, 12))"
     return $true
 }
 
@@ -681,80 +680,49 @@ function Install-PythonEnv {
 }
 
 # ── DKG node CLI + bootstrap ────────────────────────────────────────────────
-function Install-BlackboxDkgCheckout {
-    $entrypoint = Join-Path $DkgCliDir "packages\cli\dist\cli.js"
-    $buildMarker = Join-Path $DkgCliDir ".git\blackbox-build-commit"
-    $previousCommit = ""
+function Install-BlackboxDkgPackage {
     $backupDir = ""
-    $needsBuild = $false
-    $gitCommand = Get-Command git -ErrorAction SilentlyContinue
-    $corepackCommand = Get-Command corepack -ErrorAction SilentlyContinue
-    $nodeCommand = Get-Command node -ErrorAction SilentlyContinue
-    if (-not $gitCommand -or -not $corepackCommand -or -not $nodeCommand) {
-        Write-Warn2 "git, Node.js, and Corepack are required to build the Blackbox DKG checkout."
+    $packageJson = Join-Path $DkgCliDir "node_modules\@origintrail-official\dkg\package.json"
+    $npmCommand = Get-Command npm -ErrorAction SilentlyContinue
+    if (-not $npmCommand) {
+        Write-Warn2 "npm is required to install the published OriginTrail DKG package."
         return $false
     }
 
     if (Test-Path (Join-Path $DkgCliDir ".git")) {
-        & git -C $DkgCliDir diff --quiet
-        $worktreeClean = $LASTEXITCODE -eq 0
-        & git -C $DkgCliDir diff --cached --quiet
-        $indexClean = $LASTEXITCODE -eq 0
-        if (-not $worktreeClean -or -not $indexClean) {
-            Write-Warn2 "Managed DKG checkout has local changes; refusing to overwrite $DkgCliDir."
-            return $false
-        }
-        $previousCommit = (& git -C $DkgCliDir rev-parse HEAD).Trim()
-        & git -C $DkgCliDir remote set-url origin $DkgRepoUrl
-        if ($LASTEXITCODE -ne 0) { return $false }
-        & git -C $DkgCliDir fetch --depth 1 origin $DkgRepoBranch
-        if ($LASTEXITCODE -ne 0) { return $false }
-        & git -C $DkgCliDir checkout --detach FETCH_HEAD
-        if ($LASTEXITCODE -ne 0) { return $false }
-    } else {
-        if ((Test-Path $DkgCliDir) -and @(Get-ChildItem -Force $DkgCliDir).Count -gt 0) {
-            $backupDir = "$DkgCliDir.npm-backup-$(Get-Date -Format yyyyMMddHHmmss)"
-            Write-Step "Moving the legacy npm DKG install to $backupDir"
-            Move-Item $DkgCliDir $backupDir
-        }
-        & git clone --depth 1 --branch $DkgRepoBranch $DkgRepoUrl $DkgCliDir
-        if ($LASTEXITCODE -ne 0) {
-            if ($backupDir -and -not (Test-Path $DkgCliDir)) {
-                Move-Item $backupDir $DkgCliDir
-            }
-            Write-Warn2 "Could not clone DKG from $DkgRepoUrl#$DkgRepoBranch."
-            return $false
-        }
-        $needsBuild = $true
-    }
-
-    $currentCommit = (& git -C $DkgCliDir rev-parse HEAD).Trim()
-    $builtCommit = if (Test-Path $buildMarker) { (Get-Content -Raw $buildMarker).Trim() } else { "" }
-    if ($previousCommit -ne $currentCommit -or $builtCommit -ne $currentCommit -or -not (Test-Path $entrypoint)) {
-        $needsBuild = $true
-    }
-    if ($needsBuild) {
-        Write-Step "Building DKG feat/blackbox at $($currentCommit.Substring(0, 12)) ..."
-        Push-Location $DkgCliDir
+        $backupDir = "$DkgCliDir.custom-backup-$(Get-Date -Format yyyyMMddHHmmss)"
+        Write-Step "Moving the custom DKG checkout to $backupDir"
         try {
-            & corepack pnpm install --frozen-lockfile
-            if ($LASTEXITCODE -ne 0) { throw "pnpm install exit $LASTEXITCODE" }
-            & corepack pnpm run build:runtime:packages
-            if ($LASTEXITCODE -ne 0) { throw "pnpm build exit $LASTEXITCODE" }
+            Move-Item $DkgCliDir $backupDir
         } catch {
-            Write-Warn2 "Could not install or build the Blackbox DKG checkout: $_"
+            Write-Warn2 "Could not preserve the custom DKG checkout before installing npm DKG: $_"
             return $false
-        } finally {
-            Pop-Location
         }
-        Set-Content -Path $buildMarker -Value "$currentCommit`n" -Encoding Ascii -NoNewline
-        $script:DkgRestartRequired = $true
     }
 
-    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $DkgBin) | Out-Null
-    $launcher = "@echo off`r`n`"$($nodeCommand.Source)`" `"$entrypoint`" %*`r`n"
-    Set-Content -Path $DkgBin -Value $launcher -Encoding Ascii -NoNewline
-    Write-Ok "Blackbox DKG checkout ready ($($currentCommit.Substring(0, 12)), $DkgRepoBranch)"
+    New-Item -ItemType Directory -Force -Path $DkgCliDir | Out-Null
+    try {
+        & npm install --prefix $DkgCliDir $DkgPackage 2>&1 | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "npm install exit $LASTEXITCODE" }
+    } catch {
+        if ($backupDir) {
+            Remove-Item $DkgCliDir -Recurse -Force -ErrorAction SilentlyContinue
+            Move-Item $backupDir $DkgCliDir
+        }
+        Write-Warn2 "Could not install the published DKG package ${DkgPackage}: $_"
+        return $false
+    }
+
+    if (-not (Test-Path $DkgBin) -or -not (Test-Path $packageJson)) {
+        if ($backupDir) {
+            Remove-Item $DkgCliDir -Recurse -Force -ErrorAction SilentlyContinue
+            Move-Item $backupDir $DkgCliDir
+        }
+        Write-Warn2 "npm completed, but the DKG CLI entrypoint is missing at $DkgBin."
+        return $false
+    }
+    $installedVersion = (& node -p "require(process.argv[1]).version" $packageJson 2>$null)
+    Write-Ok "Published DKG npm package ready ($installedVersion)"
     return $true
 }
 
@@ -773,9 +741,9 @@ function Install-Dkg {
         return
     }
 
-    Write-Step "Installing the Blackbox DKG checkout ($DkgRepoUrl#$DkgRepoBranch) ..."
-    Write-Step "  Checkout: $DkgCliDir"
-    if (-not (Install-BlackboxDkgCheckout)) {
+    Write-Step "Installing the published OriginTrail DKG package ($DkgPackage) ..."
+    Write-Step "  npm prefix: $DkgCliDir"
+    if (-not (Install-BlackboxDkgPackage)) {
         $script:InstallIncomplete = $true
         Show-DkgManualHint
         return
@@ -880,8 +848,8 @@ function Sync-Ruleset {
 
 function Show-DkgManualHint {
     Write-Step "To set up the DKG node later:"
-    Write-Host "      git clone --depth 1 --branch `"$DkgRepoBranch`" `"$DkgRepoUrl`" `"$DkgCliDir`""
-    Write-Host "      Set-Location `"$DkgCliDir`"; corepack pnpm install --frozen-lockfile; corepack pnpm run build:runtime:packages"
+    Write-Host "      New-Item -ItemType Directory -Force -Path `"$DkgCliDir`""
+    Write-Host "      npm install --prefix `"$DkgCliDir`" `"$DkgPackage`""
     Write-Host "      `$env:BLACKBOX_DKG_HOME = `"$DkgHome`""
     Write-Host "      `$env:BLACKBOX_DKG_BIN = `"$DkgBin`""
     Write-Host "      `$env:BLACKBOX_DKG_PORT = `"$DkgPort`""

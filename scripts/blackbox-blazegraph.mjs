@@ -19,17 +19,36 @@ if (!Number.isInteger(port) || port < 1 || port > 65535) {
   fail(`invalid preferred port: ${portText}`);
 }
 
-const modulePath = path.join(
-  path.resolve(dkgCheckout),
-  'packages',
-  'cli',
-  'dist',
-  'daemon',
-  'blazegraph-docker.js',
-);
+const dkgRoot = path.resolve(dkgCheckout);
+const modulePaths = [
+  path.join(
+    dkgRoot,
+    'node_modules',
+    '@origintrail-official',
+    'dkg',
+    'dist',
+    'daemon',
+    'blazegraph-docker.js',
+  ),
+  // Kept as a migration fallback so an interrupted custom-checkout install can
+  // still explain itself cleanly before the npm package replaces it.
+  path.join(dkgRoot, 'packages', 'cli', 'dist', 'daemon', 'blazegraph-docker.js'),
+];
 
 try {
-  await access(modulePath);
+  let modulePath;
+  for (const candidate of modulePaths) {
+    try {
+      await access(candidate);
+      modulePath = candidate;
+      break;
+    } catch {
+      // Try the next supported install layout.
+    }
+  }
+  if (!modulePath) {
+    throw new Error(`published DKG Blazegraph provisioner not found under ${dkgRoot}`);
+  }
   const { provisionBlazegraphDocker } = await import(pathToFileURL(modulePath).href);
   const result = await provisionBlazegraphDocker({
     namespace,
