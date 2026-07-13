@@ -37,8 +37,8 @@ the branch.
   before any paid work;
 - uses the DKG's persistent async SWM-share queue and synchronous VM endpoint,
   then pulls the finalized VM assertion back and re-shares it to encrypted SWM;
-- verifies the restored SWM quads exactly and records every DKG job ID and
-  transaction in `registry.json`;
+- verifies the restored SWM subjects and quads through the official DKG query
+  API and records every DKG job ID and transaction in `registry.json`;
 - publishes one collection at a time, polls it to a terminal state, and stops
   on the first error instead of stacking retries against Blazegraph;
 - writes live state to `progress.json` and a timestamped durable log.
@@ -84,6 +84,9 @@ Important distinctions:
 - Linux/macOS shell, Node.js 22 or newer, and npm 10 or newer.
 - Official DKG installed as `@origintrail-official/dkg@10.0.6`, running on
   port 9200 with Blazegraph configured.
+- Blazegraph operation timeout set to at least 10 minutes for the large VM
+  pull and SWM restore (`store.options.timeout: 600000`, or the equivalent
+  official `DKG_BLAZEGRAPH_OPERATION_TIMEOUT_MS=600000` setting).
 - Node admin token readable at `~/.dkg/auth.token`, or set
   `DKG_AUTH_TOKEN_PATH`.
 - The final curated/private CG already created and visible to this token.
@@ -267,7 +270,15 @@ VM publication drains the KA's active SWM data as part of the canonical
 `WM -> SWM -> VM` lifecycle. The publisher therefore performs a second,
 non-paid operation after VM confirmation: it pulls the finalized assertion
 from VM into WM and re-shares it to encrypted SWM. A batch is complete only
-after the restored SWM quads exactly match the prepared batch.
+after the official `shared-working-memory` query view returns all 1,000
+subjects and the restored quads match the prepared batch. DKG 10.0.6 does not
+expose a named-KA `/swm/quads` endpoint; do not use that nonexistent endpoint
+as a completion check.
+
+Assets first written by DKG 10.0.5 may contain Blazegraph's legacy replacement
+characters for non-ASCII RDF text. The publisher recognizes and records this
+specific historical normalization as `legacy-blazegraph-unicode`; newly
+created 10.0.6 assets must verify in `exact` mode.
 
 Confirm all three views before continuing:
 
@@ -358,6 +369,16 @@ node run.mjs status
 If Blazegraph is overloaded, stop this client cleanly, let the active DKG job
 settle, inspect the queue and node logs, and only then resume. Rapid retries can
 stack expensive graph work and make recovery take much longer.
+
+Before starting, also verify that only one DKG service owns the configured
+port. A second system or user service can continuously restart against the same
+port and destabilize otherwise healthy jobs:
+
+```bash
+systemctl status dkg-node.service
+systemctl --user status blackbox-dkg.service
+ss -ltnp | grep ':8900'
+```
 
 ## Files
 

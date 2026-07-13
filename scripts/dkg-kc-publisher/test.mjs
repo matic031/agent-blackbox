@@ -57,6 +57,15 @@ const server = createServer((request, response) => {
     balances: [{ address: '0xtest', eth: '1', trac: '10000' }],
   });
   if (request.method === 'GET' && url.pathname === '/api/publisher/stats') return json(response, 200, { accepted: 0, finalized: 0, failed: 0 });
+  if (request.method === 'POST' && url.pathname === '/api/query') {
+    const batch = JSON.parse(readFileSync(join(batches, 'batch-001.json')));
+    const bindings = batch.records.flatMap(recordQuads).map((quad) => ({
+      s: quad.subject,
+      p: quad.predicate,
+      o: quad.object,
+    }));
+    return json(response, 200, { result: { bindings } });
+  }
   if (request.method === 'POST' && url.pathname === '/api/knowledge-assets') {
     calls.create += 1;
     if (rejectCreateStatus) {
@@ -77,10 +86,6 @@ const server = createServer((request, response) => {
   if (request.method === 'POST' && url.pathname.endsWith('/wm/pull-from')) {
     calls.pull += 1;
     return json(response, 200, { wmDraft: 'open', seededFrom: { layer: 'vm' } });
-  }
-  if (request.method === 'GET' && url.pathname.endsWith('/swm/quads')) {
-    const batch = JSON.parse(readFileSync(join(batches, 'batch-001.json')));
-    return json(response, 200, { quads: batch.records.flatMap(recordQuads) });
   }
   if (request.method === 'POST' && url.pathname.endsWith('/vm/publish-async')) {
     calls.publish += 1;

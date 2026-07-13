@@ -308,6 +308,51 @@ function quadSetHash(quads) {
   return sha256([...quads].map((quad) => JSON.stringify(quad)).sort().join('\n'));
 }
 
+function legacyBlazegraphText(value) {
+  return [...value].map((character) => (
+    character.codePointAt(0) > 127 ? '\ufffd'.repeat(Buffer.byteLength(character)) : character
+  )).join('');
+}
+
+function legacyBlazegraphQuads(quads) {
+  return quads.map((quad) => ({
+    ...quad,
+    subject: legacyBlazegraphText(quad.subject),
+    predicate: legacyBlazegraphText(quad.predicate),
+    object: legacyBlazegraphText(quad.object),
+  }));
+}
+
+function sparqlIri(value) {
+  if (!/^[^<>"{}|^`\\\u0000-\u0020]+$/.test(value)) throw new Error(`unsafe RDF subject IRI: ${value}`);
+  return `<${value}>`;
+}
+
+async function querySwmQuads(expectedQuads) {
+  const subjects = [...new Set(expectedQuads.map((quad) => quad.subject))];
+  const quads = [];
+  for (let offset = 0; offset < subjects.length; offset += 100) {
+    const values = subjects.slice(offset, offset + 100).map(sparqlIri).join(' ');
+    const response = await api('POST', '/api/query', {
+      contextGraphId,
+      view: 'shared-working-memory',
+      sparql: `SELECT DISTINCT ?s ?p ?o WHERE { VALUES ?s { ${values} } ?s ?p ?o }`,
+    }, requestTimeoutMs);
+    const bindings = response?.result?.bindings ?? response?.bindings;
+    if (!Array.isArray(bindings)) throw new Error(`unexpected SWM query response at subject offset ${offset}`);
+    for (const binding of bindings) {
+      const subject = typeof binding.s === 'string' ? binding.s : binding.s?.value;
+      const predicate = typeof binding.p === 'string' ? binding.p : binding.p?.value;
+      const object = typeof binding.o === 'string' ? binding.o : binding.o?.value;
+      if (![subject, predicate, object].every((value) => typeof value === 'string')) {
+        throw new Error(`malformed SWM binding at subject offset ${offset}`);
+      }
+      quads.push({ subject, predicate, object, graph: '' });
+    }
+  }
+  return { quads, subjectCount: new Set(quads.map((quad) => quad.subject)).size };
+}
+
 async function reconcileCreate(kaName, expectedQuads) {
   const encoded = encodeURIComponent(kaName);
   const query = `contextGraphId=${encodeURIComponent(contextGraphId)}`;
@@ -510,15 +555,22 @@ async function restorePublishedAssetToSwm(entry, rec, kaName, expectedQuads, reg
       saveRegistry(registry);
     }
     const job = await pollShareJob(entry.name, rec.swmRestoreJobId);
-    const query = `contextGraphId=${encodeURIComponent(contextGraphId)}`;
-    const stored = await api('GET', `/api/knowledge-assets/${encodeURIComponent(kaName)}/swm/quads?${query}`, undefined, requestTimeoutMs);
-    if (!Array.isArray(stored.quads)
-      || stored.quads.length !== expectedQuads.length
-      || quadSetHash(stored.quads) !== quadSetHash(expectedQuads)) {
+    const stored = await querySwmQuads(expectedQuads);
+    const expectedSubjectCount = new Set(expectedQuads.map((quad) => quad.subject)).size;
+    const exactMatch = stored.quads.length === expectedQuads.length
+      && stored.subjectCount === expectedSubjectCount
+      && quadSetHash(stored.quads) === quadSetHash(expectedQuads);
+    const legacyMatch = stored.quads.length === expectedQuads.length
+      && stored.subjectCount === expectedSubjectCount
+      && quadSetHash(stored.quads) === quadSetHash(legacyBlazegraphQuads(expectedQuads));
+    if (!exactMatch && !legacyMatch) {
       throw new Error(`restored SWM content differs from ${entry.name}; refusing to mark the batch complete`);
     }
+    if (legacyMatch && !exactMatch) log(`[${entry.name}] SWM verification matched legacy Blazegraph Unicode normalization`);
     rec.swmRestorePromotedCount = job?.result?.promotedCount ?? job?.promotedCount ?? null;
     rec.swmRestoreQuadCount = stored.quads.length;
+    rec.swmRestoreSubjectCount = stored.subjectCount;
+    rec.swmVerificationMode = exactMatch ? 'exact' : 'legacy-blazegraph-unicode';
     rec.swmReplicatedAt = new Date().toISOString();
     rec.status = 'finalized';
     delete rec.lastError;
