@@ -415,9 +415,9 @@ if not isinstance(auto_approve, list):
 if context_graph not in auto_approve:
     auto_approve.append(context_graph)
 data["autoApproveJoinRequests"] = auto_approve
-# Blackbox recovery targets its curator directly. Disable generic peer-connect
-# fanout; incomplete private recovery is retried by DKG at its saved cursor.
-data["syncOnConnectEnabled"] = False
+# Use DKG's native default reconnect reconciler. The approval handler targets
+# the curator directly first; sync-on-connect retries interrupted transfers.
+data.pop("syncOnConnectEnabled", None)
 # Retire old Blackbox backpressure overrides. DKG owns sync scheduling,
 # admission catch-up, backpressure, and approval redelivery.
 data.pop("syncAgentsMeta", None)
