@@ -151,6 +151,11 @@ try {
   assert.equal(chunk.code, 0, chunk.stderr);
   const dry = await run('publish.mjs', ['--dry-run'], { KC_BATCH_DIR: batches, KC_EXPECT_RECORDS: '2', KC_PROGRESS_PATH: progressPath });
   assert.equal(dry.code, 0, dry.stderr);
+  const rangedDry = await run('publish.mjs', ['--dry-run', '--from-batch', 'batch-001', '--to-batch', 'batch-001'], { KC_BATCH_DIR: batches, KC_EXPECT_RECORDS: '2', KC_PROGRESS_PATH: progressPath });
+  assert.equal(rangedDry.code, 0, rangedDry.stderr);
+  const conflictingSelection = await run('publish.mjs', ['--dry-run', '--batch', 'batch-001', '--from-batch', 'batch-001'], { KC_BATCH_DIR: batches, KC_EXPECT_RECORDS: '2', KC_PROGRESS_PATH: progressPath });
+  assert.notEqual(conflictingSelection.code, 0, 'conflicting batch selectors unexpectedly succeeded');
+  assert.match(conflictingSelection.stderr, /--batch cannot be combined/);
 
   await new Promise((resolvePromise) => server.listen(0, '127.0.0.1', resolvePromise));
   const port = server.address().port;

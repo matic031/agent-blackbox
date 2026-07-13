@@ -18,7 +18,7 @@ function help() {
   console.error(`usage:
   node run.mjs prepare --source /path/prod-threats-400k.json
   KC_CG_ID=<id> node run.mjs preflight
-  KC_CG_ID=<id> node run.mjs publish --confirm <token>
+  KC_CG_ID=<id> node run.mjs publish --confirm <token> [--batch batch-001 | --from-batch batch-001 --to-batch batch-460]
   node run.mjs status
 
 prepare rebuilds all 460 checksummed collections and runs the complete dry-run.
@@ -92,6 +92,10 @@ async function main() {
       const args = ['--publish', '--confirm', confirmation];
       const batch = option('batch', null);
       if (batch) args.push('--batch', batch);
+      const fromBatch = option('from-batch', null);
+      if (fromBatch) args.push('--from-batch', fromBatch);
+      const toBatch = option('to-batch', null);
+      if (toBatch) args.push('--to-batch', toBatch);
       await run('publish.mjs', args, log);
     } else {
       help();

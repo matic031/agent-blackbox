@@ -29,6 +29,8 @@ const selectedModes = [
 ].filter(([flag]) => has(flag));
 const mode = selectedModes.length === 1 ? selectedModes[0][1] : null;
 const onlyBatch = option('batch', null);
+const fromBatch = option('from-batch', null);
+const toBatch = option('to-batch', null);
 const batchDir = resolve(process.env.KC_BATCH_DIR ?? join(here, 'batches'));
 const registryPath = resolve(process.env.KC_REGISTRY_PATH ?? join(here, 'registry.json'));
 const progressPath = resolve(process.env.KC_PROGRESS_PATH ?? join(here, 'progress.json'));
@@ -60,9 +62,9 @@ let progress = {};
 
 function usage() {
   console.error(`usage:
-  node publish.mjs --dry-run [--batch batch-001]
+  node publish.mjs --dry-run [--batch batch-001 | --from-batch batch-001 --to-batch batch-460]
   KC_CG_ID=<id> node publish.mjs --preflight
-  KC_CG_ID=<id> node publish.mjs --publish --confirm <token>
+  KC_CG_ID=<id> node publish.mjs --publish --confirm <token> [--batch batch-001 | --from-batch batch-001 --to-batch batch-460]
 
 The exact paid confirmation token is printed by --preflight.`);
 }
@@ -76,6 +78,7 @@ function assertConfig() {
   if (!Number.isSafeInteger(publisherNodeIdentityId) || publisherNodeIdentityId < 0) throw new Error(`KC_PUBLISHER_NODE_IDENTITY_ID must be a non-negative integer; got ${publisherNodeIdentityId}`);
   if ((mode === 'preflight' || mode === 'publish') && !contextGraphId) throw new Error('KC_CG_ID is required for node preflight/publish');
   if (mode === 'publish' && !kaPrefix) throw new Error('KC_KA_PREFIX or KC_CG_ID is required');
+  if (onlyBatch && (fromBatch || toBatch)) throw new Error('--batch cannot be combined with --from-batch or --to-batch');
 }
 
 function sha256(data) {
@@ -179,8 +182,20 @@ function loadAndValidateBatches() {
 
   const seenKeys = new Set();
   const stats = [];
-  const selected = onlyBatch ? manifest.batches.filter((batch) => batch.name === onlyBatch) : manifest.batches;
-  if (onlyBatch && selected.length !== 1) throw new Error(`batch not found in manifest: ${onlyBatch}`);
+  let selected = manifest.batches;
+  if (onlyBatch) {
+    selected = manifest.batches.filter((batch) => batch.name === onlyBatch);
+    if (selected.length !== 1) throw new Error(`batch not found in manifest: ${onlyBatch}`);
+  } else if (fromBatch || toBatch) {
+    const startName = fromBatch ?? manifest.batches[0]?.name;
+    const endName = toBatch ?? manifest.batches.at(-1)?.name;
+    const startIndex = manifest.batches.findIndex((batch) => batch.name === startName);
+    const endIndex = manifest.batches.findIndex((batch) => batch.name === endName);
+    if (startIndex === -1) throw new Error(`batch not found in manifest: ${startName}`);
+    if (endIndex === -1) throw new Error(`batch not found in manifest: ${endName}`);
+    if (startIndex > endIndex) throw new Error(`invalid batch range: ${startName} is after ${endName}`);
+    selected = manifest.batches.slice(startIndex, endIndex + 1);
+  }
 
   for (let index = 0; index < manifest.batches.length; index += 1) {
     const entry = manifest.batches[index];
@@ -203,7 +218,7 @@ function loadAndValidateBatches() {
       log(`validated ${index + 1}/${manifest.batches.length} batch files`);
     }
   }
-  if (!onlyBatch && seenKeys.size !== manifest.includedRecords) throw new Error('validated record-key count differs from manifest');
+  if (seenKeys.size !== manifest.includedRecords) throw new Error('validated record-key count differs from manifest');
   return { manifest, manifestSha256: sha256(manifestBytes), selected, stats };
 }
 

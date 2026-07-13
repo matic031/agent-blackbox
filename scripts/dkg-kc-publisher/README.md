@@ -311,6 +311,7 @@ finalized first batch and continues from `registry.json`:
 
 ```bash
 nohup node run.mjs publish \
+  --from-batch batch-002 \
   --confirm '<exact-token-from-preflight>' \
   > blackbox-publish-console.log 2>&1 &
 
@@ -328,6 +329,12 @@ dkg publisher stats
 `progress.json` includes the current batch, DKG job ID/state, completed count,
 percentage, last transaction, heartbeat, and ETA. Every invocation also writes
 `publish-<timestamp>.log` in this directory.
+
+Use one inclusive range invocation for a long continuation. This validates the
+full corpus once, holds the single-publisher lock for the run, processes every
+selected batch sequentially, and stops on the first error or insufficient-funds
+response. Do not run a shell loop of one process per batch when a contiguous
+range is intended.
 
 At the observed rate of about 30 minutes for two collections, a strictly
 sequential 460-collection run is approximately **115 hours (4.8 days)**, not a
