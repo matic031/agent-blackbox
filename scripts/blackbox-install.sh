@@ -40,14 +40,17 @@ DKG_NETWORK="${BLACKBOX_DKG_NETWORK:-mainnet-base}"   # a valid dkg mainnet (mai
 BLACKBOX_HOME="${BLACKBOX_HOME:-$HERMES_HOME/blackbox}"
 BLACKBOX_DKG_PORT_EXPLICIT=false
 [ -n "${BLACKBOX_DKG_PORT+x}" ] && BLACKBOX_DKG_PORT_EXPLICIT=true
-BLACKBOX_DKG_STORE_PORT_EXPLICIT=false
-[ -n "${BLACKBOX_DKG_STORE_PORT+x}" ] && BLACKBOX_DKG_STORE_PORT_EXPLICIT=true
+BLACKBOX_DKG_STORE_URL_EXPLICIT=false
+[ -n "${BLACKBOX_DKG_STORE_URL+x}" ] && BLACKBOX_DKG_STORE_URL_EXPLICIT=true
 BLACKBOX_DKG_URL_EXPLICIT=false
 if [ -n "${BLACKBOX_DKG_DAEMON_URL+x}" ] || [ -n "${BLACKBOX_DKG_URL+x}" ]; then
     BLACKBOX_DKG_URL_EXPLICIT=true
 fi
 BLACKBOX_DKG_PORT="${BLACKBOX_DKG_PORT:-9320}"
-BLACKBOX_DKG_STORE_PORT="${BLACKBOX_DKG_STORE_PORT:-7879}"
+BLACKBOX_DKG_STORE_PORT="${BLACKBOX_DKG_STORE_PORT:-9999}"
+BLACKBOX_DKG_STORE_URL="${BLACKBOX_DKG_STORE_URL:-}"
+BLACKBOX_DKG_STORE_MANAGED_BY_DKG=false
+BLACKBOX_DKG_ACCEPT_STORE_RESET=false
 BLACKBOX_DKG_HOME="${BLACKBOX_DKG_HOME:-$BLACKBOX_INSTALL_ROOT/.dkg}"
 BLACKBOX_DKG_CLI_DIR="${BLACKBOX_DKG_CLI_DIR:-$BLACKBOX_INSTALL_ROOT/dkg}"
 BLACKBOX_DKG_BIN="${BLACKBOX_DKG_BIN:-$BLACKBOX_DKG_CLI_DIR/node_modules/.bin/dkg}"
@@ -72,6 +75,7 @@ BLACKBOX_SYNC_LOG=""
 BLACKBOX_DKG_ALREADY_RUNNING=false
 BLACKBOX_DKG_RESTART_REQUIRED=false
 BLACKBOX_DKG_RUNTIME_MARKER="$BLACKBOX_DKG_HOME/.blackbox-runtime.sha256"
+BLACKBOX_DKG_STORE_RESET_MARKER="$BLACKBOX_DKG_HOME/.blackbox-store-reset-pending"
 BLACKBOX_DKG_RUNTIME_FINGERPRINT=""
 HERMES_API_KEY_VARS='OPENAI_API_KEY|ANTHROPIC_API_KEY|OPENROUTER_API_KEY|NOUS_API_KEY|ZAI_API_KEY|KIMI_API_KEY|KIMI_CN_API_KEY|MINIMAX_API_KEY|MINIMAX_CN_API_KEY|GOOGLE_API_KEY|GEMINI_API_KEY|MISTRAL_API_KEY|GROQ_API_KEY|TOGETHER_API_KEY|XAI_API_KEY'
 HERMES_API_KEY_RE="^[[:space:]]*(${HERMES_API_KEY_VARS})[[:space:]]*=[[:space:]]*[^[:space:]#]+"
@@ -110,14 +114,19 @@ blackbox_dkg() {
     # windows were exercised over reconnecting direct/relay paths. Keep DKG's
     # own snapshot budgets: raising the row threshold disables its bounded-page
     # fallback and can make a large curator reset streams under byte pressure.
-    local node_bin_dir
+    local node_bin_dir accept_store_reset=0
     node_bin_dir="$(dirname "$(command -v node)")"
+    if [ "$BLACKBOX_DKG_ACCEPT_STORE_RESET" = true ] ||
+        [ -f "$BLACKBOX_DKG_STORE_RESET_MARKER" ]; then
+        accept_store_reset=1
+    fi
     PATH="$node_bin_dir:$PATH" \
     DKG_HOME="$BLACKBOX_DKG_HOME" \
     DKG_CATCHUP_MAX_CONCURRENT_PEERS="${DKG_CATCHUP_MAX_CONCURRENT_PEERS:-1}" \
     DKG_SYNC_PAGE_TIMEOUT_MS="${DKG_SYNC_PAGE_TIMEOUT_MS:-180000}" \
     DKG_SYNC_TOTAL_TIMEOUT_MS="${DKG_SYNC_TOTAL_TIMEOUT_MS:-1200000}" \
     DKG_SYNC_MIN_GRAPH_BUDGET_MS="${DKG_SYNC_MIN_GRAPH_BUDGET_MS:-120000}" \
+    DKG_ACCEPT_STORE_RESET="$accept_store_reset" \
     "$BLACKBOX_DKG_BIN" "$@"
 }
 
@@ -272,19 +281,6 @@ choose_blackbox_dkg_port() {
     return 1
 }
 
-choose_blackbox_dkg_store_port() {
-    local start="$BLACKBOX_DKG_STORE_PORT"
-    local candidate
-    for candidate in $(seq "$start" 7899); do
-        if ! port_in_use "$candidate"; then
-            BLACKBOX_DKG_STORE_PORT="$candidate"
-            ok "Using Blackbox Oxigraph port $BLACKBOX_DKG_STORE_PORT"
-            return 0
-        fi
-    done
-    return 1
-}
-
 check_blackbox_dkg_port() {
     local port="$BLACKBOX_DKG_PORT"
     local url="$BLACKBOX_DKG_DAEMON_URL"
@@ -329,39 +325,84 @@ check_blackbox_dkg_port() {
     return 0
 }
 
-check_blackbox_store_port() {
-    if port_in_use "$BLACKBOX_DKG_STORE_PORT"; then
-        warn "Oxigraph port $BLACKBOX_DKG_STORE_PORT is already in use."
-        if [ "$BLACKBOX_DKG_STORE_PORT_EXPLICIT" = true ]; then
-            BLACKBOX_INSTALL_INCOMPLETE=true
-            BLACKBOX_THREAT_GRAPH_INCOMPLETE=true
-            step "Set BLACKBOX_DKG_STORE_PORT to a free port and re-run the installer."
-            return 1
-        fi
-        step "Choosing a different Blackbox-owned Oxigraph port."
-        choose_blackbox_dkg_store_port || {
-            BLACKBOX_INSTALL_INCOMPLETE=true
-            BLACKBOX_THREAT_GRAPH_INCOMPLETE=true
-            warn "Could not find a free Blackbox Oxigraph port in 7879-7899."
-            return 1
-        }
+provision_blackbox_blazegraph() {
+    local helper="$REPO_DIR/scripts/blackbox-blazegraph.mjs"
+    local existing_state namespace existing_backend existing_url existing_managed
+    local provisioned parsed
+
+    existing_state="$($VENV_DIR/bin/python - "$BLACKBOX_DKG_HOME" <<'PYEOF'
+import json
+import sys
+from pathlib import Path
+
+cfg = Path(sys.argv[1]).expanduser() / "config.json"
+try:
+    data = json.loads(cfg.read_text(encoding="utf-8"))
+except Exception:
+    data = {}
+store = data.get("store") if isinstance(data.get("store"), dict) else {}
+options = store.get("options") if isinstance(store.get("options"), dict) else {}
+print(data.get("name") or "agent-blackbox")
+print(store.get("backend") or "")
+print(options.get("url") or "")
+print("true" if options.get("managedByDkg") is True else "false")
+PYEOF
+    )"
+    namespace="$(printf '%s\n' "$existing_state" | sed -n '1p')"
+    existing_backend="$(printf '%s\n' "$existing_state" | sed -n '2p')"
+    existing_url="$(printf '%s\n' "$existing_state" | sed -n '3p')"
+    existing_managed="$(printf '%s\n' "$existing_state" | sed -n '4p')"
+
+    if [ "$BLACKBOX_DKG_STORE_URL_EXPLICIT" = true ]; then
+        BLACKBOX_DKG_STORE_MANAGED_BY_DKG=false
+        step "Using operator-managed Blazegraph at $BLACKBOX_DKG_STORE_URL"
+        return 0
     fi
-    return 0
+    if [ "$existing_backend" = "blazegraph" ] &&
+        [ "$existing_managed" != true ] && [ -n "$existing_url" ]; then
+        BLACKBOX_DKG_STORE_URL="$existing_url"
+        BLACKBOX_DKG_STORE_MANAGED_BY_DKG=false
+        step "Reusing operator-managed Blazegraph at $BLACKBOX_DKG_STORE_URL"
+        return 0
+    fi
+    if [ ! -f "$helper" ]; then
+        warn "Blazegraph provisioner helper is missing: $helper"
+        return 1
+    fi
+
+    step "Provisioning Blazegraph through the DKG Docker provisioner ..."
+    if ! provisioned="$(node "$helper" "$BLACKBOX_DKG_CLI_DIR" "$namespace" "$BLACKBOX_DKG_STORE_PORT")"; then
+        warn "Could not provision Blazegraph. Install/start Docker, then re-run the installer."
+        return 1
+    fi
+    parsed="$($VENV_DIR/bin/python - "$provisioned" <<'PYEOF'
+import json
+import sys
+
+result = json.loads(sys.argv[1])
+print(f'{result["url"]}|{int(result["port"])}')
+PYEOF
+    )"
+    IFS='|' read -r BLACKBOX_DKG_STORE_URL BLACKBOX_DKG_STORE_PORT <<< "$parsed"
+    BLACKBOX_DKG_STORE_MANAGED_BY_DKG=true
+    ok "Blazegraph ready at $BLACKBOX_DKG_STORE_URL"
 }
 
 ensure_blackbox_dkg_config() {
     local config_state
-    config_state="$("$VENV_DIR/bin/python" - "$BLACKBOX_DKG_HOME" "$BLACKBOX_DKG_PORT" "$BLACKBOX_DKG_STORE_PORT" "$BLACKBOX_CONTEXT_GRAPH_ID" <<'PYEOF'
+    config_state="$("$VENV_DIR/bin/python" - "$BLACKBOX_DKG_HOME" "$BLACKBOX_DKG_PORT" "$BLACKBOX_DKG_STORE_URL" "$BLACKBOX_DKG_STORE_MANAGED_BY_DKG" "$BLACKBOX_CONTEXT_GRAPH_ID" <<'PYEOF'
 import json
 import os
 import secrets
+import shutil
 import sys
 from pathlib import Path
 
 home = Path(sys.argv[1]).expanduser()
 api_port = int(sys.argv[2])
-store_port = int(sys.argv[3])
-context_graph = sys.argv[4]
+store_url = sys.argv[3]
+store_managed = sys.argv[4].lower() == "true"
+context_graph = sys.argv[5]
 home.mkdir(parents=True, exist_ok=True)
 cfg_path = home / "config.json"
 original = None
@@ -415,7 +456,7 @@ if not isinstance(auto_approve, list):
 if context_graph not in auto_approve:
     auto_approve.append(context_graph)
 data["autoApproveJoinRequests"] = auto_approve
-# Use DKG's native default reconnect reconciler. The approval handler targets
+# Use the DKG native default reconnect reconciler. The approval handler targets
 # the curator directly first; sync-on-connect retries interrupted transfers.
 data.pop("syncOnConnectEnabled", None)
 # Retire old Blackbox backpressure overrides. DKG owns sync scheduling,
@@ -435,12 +476,17 @@ data["chain"] = {
 auth = data.get("auth") if isinstance(data.get("auth"), dict) else {}
 data["auth"] = {**auth, "enabled": True}
 store = data.get("store") if isinstance(data.get("store"), dict) else {}
-options = store.get("options") if isinstance(store.get("options"), dict) else {}
-options["port"] = store_port
-# A populated curator store can need longer than the 30-second DKG default to
-# reopen its RocksDB state. Killing it at that boundary creates a restart loop.
-options["readyTimeoutMs"] = 120000
-data["store"] = {"backend": "oxigraph-server", "options": options}
+previous_backend = store.get("backend")
+switched = bool(previous_backend and previous_backend != "blazegraph")
+if switched and original is not None:
+    backup_path = home / "config.json.pre-blazegraph"
+    if not backup_path.exists():
+        shutil.copy2(cfg_path, backup_path)
+    (home / ".blackbox-store-reset-pending").write_text("blazegraph\n", encoding="utf-8")
+data["store"] = {
+    "backend": "blazegraph",
+    "options": {"url": store_url, "managedByDkg": store_managed},
+}
 rendered = json.dumps(data, indent=2) + "\n"
 changed = rendered != original
 if changed:
@@ -456,10 +502,15 @@ if not token_path.exists():
     )
     os.chmod(token_path, 0o600)
     changed = True
-print("changed" if changed else "unchanged")
+print("switched" if switched else ("changed" if changed else "unchanged"))
 PYEOF
     )"
-    if [ "$config_state" = "changed" ]; then
+    if [ "$config_state" = "switched" ]; then
+        BLACKBOX_DKG_ACCEPT_STORE_RESET=true
+        BLACKBOX_DKG_RESTART_REQUIRED=true
+        warn "Switching DKG storage to Blazegraph; the preserved Oxigraph store will not be deleted."
+        step "Backup config: $BLACKBOX_DKG_HOME/config.json.pre-blazegraph"
+    elif [ "$config_state" = "changed" ]; then
         BLACKBOX_DKG_RESTART_REQUIRED=true
     fi
 }
@@ -484,7 +535,8 @@ Options:
 Environment overrides:
   BLACKBOX_REPO_URL, BLACKBOX_REPO_BRANCH, HERMES_HOME,
   BLACKBOX_NODE_MAJOR, BLACKBOX_INSTALL_DIR, BLACKBOX_CONTEXT_GRAPH_ID,
-  BLACKBOX_DKG_PORT, BLACKBOX_DKG_STORE_PORT, BLACKBOX_DKG_HOME, BLACKBOX_DKG_CLI_DIR,
+  BLACKBOX_DKG_PORT, BLACKBOX_DKG_STORE_PORT, BLACKBOX_DKG_STORE_URL,
+  BLACKBOX_DKG_HOME, BLACKBOX_DKG_CLI_DIR,
   BLACKBOX_DKG_BIN, BLACKBOX_DKG_REPO_URL, BLACKBOX_DKG_REPO_BRANCH,
   BLACKBOX_DKG_DAEMON_URL, BLACKBOX_DKG_CATCHUP_TIMEOUT,
   BLACKBOX_LLM_PROVIDER,
@@ -500,7 +552,7 @@ a real terminal. Blackbox uses its own DKG home and port by default:
   DKG home: $BLACKBOX_DKG_HOME
   DKG CLI:  $BLACKBOX_DKG_BIN
   DKG URL:  $BLACKBOX_DKG_DAEMON_URL
-  Store:    http://127.0.0.1:$BLACKBOX_DKG_STORE_PORT/query
+  Store:    ${BLACKBOX_DKG_STORE_URL:-managed Blazegraph on port $BLACKBOX_DKG_STORE_PORT}
 EOF
 }
 
@@ -997,6 +1049,12 @@ install_dkg() {
         dkg_manual_hint
         return 0
     fi
+    if ! provision_blackbox_blazegraph; then
+        BLACKBOX_INSTALL_INCOMPLETE=true
+        BLACKBOX_THREAT_GRAPH_INCOMPLETE=true
+        dkg_manual_hint
+        return 0
+    fi
     if [ "$BLACKBOX_DKG_ALREADY_RUNNING" = true ]; then
         ensure_blackbox_dkg_config
         if ! prepare_blackbox_dkg_runtime_fingerprint; then
@@ -1013,6 +1071,7 @@ install_dkg() {
         fi
         step "Restarting the Blackbox-owned DKG node to activate sync and relay updates ..."
         if blackbox_dkg stop && blackbox_dkg start && wait_for_blackbox_dkg_runtime; then
+            rm -f "$BLACKBOX_DKG_STORE_RESET_MARKER"
             ok "Blackbox DKG node restarted with the current sync settings"
             if ! record_blackbox_dkg_runtime_fingerprint ||
                 ! clean_stale_dkg_subscriptions; then
@@ -1028,10 +1087,6 @@ install_dkg() {
         fi
         return 0
     fi
-    if ! check_blackbox_store_port; then
-        dkg_manual_hint
-        return 0
-    fi
     ensure_blackbox_dkg_config
     if ! prepare_blackbox_dkg_runtime_fingerprint; then
         dkg_manual_hint
@@ -1041,9 +1096,10 @@ install_dkg() {
     step "Bootstrapping a Blackbox-owned $DKG_NETWORK node at $BLACKBOX_DKG_DAEMON_URL ..."
     step "  DKG home: $BLACKBOX_DKG_HOME"
     step "  DKG CLI:  $BLACKBOX_DKG_BIN"
-    step "  Store:    http://127.0.0.1:$BLACKBOX_DKG_STORE_PORT/query"
+    step "  Store:    $BLACKBOX_DKG_STORE_URL"
     step "  (non-interactive; reading the public threat graph is free — no funds needed)"
     if blackbox_dkg start && wait_for_blackbox_dkg_runtime; then
+        rm -f "$BLACKBOX_DKG_STORE_RESET_MARKER"
         ok "DKG node bootstrapped on $DKG_NETWORK"
         if ! record_blackbox_dkg_runtime_fingerprint ||
             ! clean_stale_dkg_subscriptions; then
@@ -1142,7 +1198,7 @@ dkg_manual_hint() {
     echo "      export BLACKBOX_DKG_HOME=\"$BLACKBOX_DKG_HOME\""
     echo "      export BLACKBOX_DKG_BIN=\"$BLACKBOX_DKG_BIN\""
     echo "      export BLACKBOX_DKG_PORT=\"$BLACKBOX_DKG_PORT\""
-    echo "      export BLACKBOX_DKG_STORE_PORT=\"$BLACKBOX_DKG_STORE_PORT\""
+    echo "      export BLACKBOX_DKG_STORE_URL=\"$BLACKBOX_DKG_STORE_URL\""
     echo "      export BLACKBOX_DKG_DAEMON_URL=\"$BLACKBOX_DKG_DAEMON_URL\""
     echo "      # create config.json/auth.token as in scripts/blackbox-install.sh, then:"
     echo "      DKG_HOME=\"\$BLACKBOX_DKG_HOME\" \"\$BLACKBOX_DKG_BIN\" start"
@@ -1405,7 +1461,7 @@ ${path_note}
   DKG node:   $BLACKBOX_DKG_DAEMON_URL
   DKG home:   $BLACKBOX_DKG_HOME
   DKG CLI:    $BLACKBOX_DKG_BIN
-  Store:      http://127.0.0.1:$BLACKBOX_DKG_STORE_PORT/query
+  Store:      $BLACKBOX_DKG_STORE_URL
 
   The DKG catch-up/ruleset sync is running in the background. Do not treat this
   install as fully protected until this command succeeds:
@@ -1439,7 +1495,7 @@ EOF
   DKG node:   $BLACKBOX_DKG_DAEMON_URL
   DKG home:   $BLACKBOX_DKG_HOME
   DKG CLI:    $BLACKBOX_DKG_BIN
-  Store:      http://127.0.0.1:$BLACKBOX_DKG_STORE_PORT/query
+  Store:      ${BLACKBOX_DKG_STORE_URL:-not configured}
   Docs:        $docs_url
 EOF
         echo ""
@@ -1452,7 +1508,7 @@ ${path_note}
   DKG node:   $BLACKBOX_DKG_DAEMON_URL
   DKG home:   $BLACKBOX_DKG_HOME
   DKG CLI:    $BLACKBOX_DKG_BIN
-  Store:      http://127.0.0.1:$BLACKBOX_DKG_STORE_PORT/query
+  Store:      $BLACKBOX_DKG_STORE_URL
   Sync now:    hermes blackbox sync --wait
   Docs:        $docs_url
 EOF

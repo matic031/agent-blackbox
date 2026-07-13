@@ -16,7 +16,8 @@ curl -fsSL https://raw.githubusercontent.com/matic031/agent-guardian/feat/guardi
 ```
 
 The installer sets up an isolated DKG node for Blackbox and protects detected
-Hermes and OpenClaw agents. It does not replace or modify an existing DKG node.
+Hermes and OpenClaw agents. Docker must be installed and running for its
+Blazegraph store. The installer does not replace or modify an existing DKG node.
 
 ## Use
 

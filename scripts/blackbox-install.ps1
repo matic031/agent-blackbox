@@ -48,10 +48,13 @@ if ($PSCommandPath) {
 }
 $BlackboxHome = if ($env:BLACKBOX_HOME)       { $env:BLACKBOX_HOME }        else { Join-Path $HermesHome "blackbox" }
 $DkgPortExplicit = [bool]$env:BLACKBOX_DKG_PORT
-$DkgStorePortExplicit = [bool]$env:BLACKBOX_DKG_STORE_PORT
+$DkgStoreUrlExplicit = [bool]$env:BLACKBOX_DKG_STORE_URL
 $DkgUrlExplicit = [bool]($env:BLACKBOX_DKG_DAEMON_URL -or $env:BLACKBOX_DKG_URL)
 $DkgPort     = if ($env:BLACKBOX_DKG_PORT)    { [int]$env:BLACKBOX_DKG_PORT } else { 9320 }
-$DkgStorePort = if ($env:BLACKBOX_DKG_STORE_PORT) { [int]$env:BLACKBOX_DKG_STORE_PORT } else { 7879 }
+$DkgStorePort = if ($env:BLACKBOX_DKG_STORE_PORT) { [int]$env:BLACKBOX_DKG_STORE_PORT } else { 9999 }
+$DkgStoreUrl = if ($env:BLACKBOX_DKG_STORE_URL) { $env:BLACKBOX_DKG_STORE_URL } else { "" }
+$DkgStoreManagedByDkg = $false
+$DkgAcceptStoreReset = $false
 $DkgHome     = if ($env:BLACKBOX_DKG_HOME)    { $env:BLACKBOX_DKG_HOME }    else { Join-Path $DefaultRepoDir ".dkg" }
 $DkgCliDir   = if ($env:BLACKBOX_DKG_CLI_DIR) { $env:BLACKBOX_DKG_CLI_DIR } else { Join-Path $DefaultRepoDir "dkg" }
 $DkgBin      = if ($env:BLACKBOX_DKG_BIN)     { $env:BLACKBOX_DKG_BIN }     else { Join-Path $DkgCliDir "node_modules\.bin\dkg.cmd" }
@@ -66,6 +69,7 @@ $script:InstallIncomplete = $false
 $script:DkgAlreadyRunning = $false
 $script:DkgRestartRequired = $false
 $script:DkgRuntimeMarker = Join-Path $DkgHome ".blackbox-runtime.sha256"
+$script:DkgStoreResetMarker = Join-Path $DkgHome ".blackbox-store-reset-pending"
 $script:DkgRuntimeFingerprint = ""
 
 # ── Echo helpers (DRY) ──────────────────────────────────────────────────────
@@ -102,7 +106,8 @@ Reading it is free; publishing costs TRAC. Blackbox does not support testnet.
 
 Environment overrides:
 	  BLACKBOX_REPO_URL, BLACKBOX_REPO_BRANCH, HERMES_HOME, BLACKBOX_NODE_MAJOR,
-	  BLACKBOX_CONTEXT_GRAPH_ID, BLACKBOX_DKG_PORT, BLACKBOX_DKG_STORE_PORT, BLACKBOX_DKG_HOME,
+	  BLACKBOX_CONTEXT_GRAPH_ID, BLACKBOX_DKG_PORT, BLACKBOX_DKG_STORE_PORT,
+	  BLACKBOX_DKG_STORE_URL, BLACKBOX_DKG_HOME,
 	  BLACKBOX_DKG_CLI_DIR, BLACKBOX_DKG_BIN, BLACKBOX_DKG_REPO_URL,
 	  BLACKBOX_DKG_REPO_BRANCH, BLACKBOX_DKG_DAEMON_URL,
 	  BLACKBOX_DKG_CATCHUP_TIMEOUT
@@ -111,7 +116,7 @@ Blackbox uses its own DKG home and port by default:
   DKG home: $DkgHome
   DKG CLI:  $DkgBin
   DKG URL:  $DkgDaemonUrl
-  Store:    http://127.0.0.1:$DkgStorePort/query
+  Store:    $(if ($DkgStoreUrl) { $DkgStoreUrl } else { "managed Blazegraph on port $DkgStorePort" })
 
 Note: Run the Hermes agent under WSL2 on Windows for best results.
 This installer is idempotent. If DKG setup or the first ruleset sync cannot
@@ -200,6 +205,7 @@ function Invoke-BlackboxDkg {
         "DKG_SYNC_PAGE_TIMEOUT_MS",
         "DKG_SYNC_TOTAL_TIMEOUT_MS",
         "DKG_SYNC_MIN_GRAPH_BUDGET_MS",
+        "DKG_ACCEPT_STORE_RESET",
         "Path"
     )
     $previous = @{}
@@ -216,6 +222,9 @@ function Invoke-BlackboxDkg {
         if (-not $env:DKG_SYNC_PAGE_TIMEOUT_MS) { $env:DKG_SYNC_PAGE_TIMEOUT_MS = "180000" }
         if (-not $env:DKG_SYNC_TOTAL_TIMEOUT_MS) { $env:DKG_SYNC_TOTAL_TIMEOUT_MS = "1200000" }
         if (-not $env:DKG_SYNC_MIN_GRAPH_BUDGET_MS) { $env:DKG_SYNC_MIN_GRAPH_BUDGET_MS = "120000" }
+        $env:DKG_ACCEPT_STORE_RESET = if (
+            $script:DkgAcceptStoreReset -or (Test-Path $script:DkgStoreResetMarker)
+        ) { "1" } else { "0" }
         & $DkgBin @Args
     } finally {
         foreach ($name in $names) {
@@ -400,17 +409,6 @@ function Select-BlackboxDkgPort {
     return $false
 }
 
-function Select-BlackboxDkgStorePort {
-    for ($candidate = $DkgStorePort; $candidate -le 7899; $candidate++) {
-        if (-not (Test-PortInUse $candidate)) {
-            $script:DkgStorePort = $candidate
-            Write-Ok "Using Blackbox Oxigraph port $DkgStorePort"
-            return $true
-        }
-    }
-    return $false
-}
-
 function Test-BlackboxDkgPort {
     try {
         Invoke-WebRequest -Uri "$DkgDaemonUrl/api/status" -UseBasicParsing -TimeoutSec 3 | Out-Null
@@ -448,21 +446,53 @@ function Test-BlackboxDkgPort {
     return $true
 }
 
-function Test-BlackboxStorePort {
-    if (Test-PortInUse $DkgStorePort) {
-        Write-Warn2 "Oxigraph port $DkgStorePort is already in use."
-        if ($DkgStorePortExplicit) {
-            $script:InstallIncomplete = $true
-            Write-Step "Set BLACKBOX_DKG_STORE_PORT to a free port and re-run the installer."
-            return $false
-        }
-        Write-Step "Choosing a different Blackbox-owned Oxigraph port."
-        if (Select-BlackboxDkgStorePort) { return $true }
-        $script:InstallIncomplete = $true
-        Write-Warn2 "Could not find a free Blackbox Oxigraph port in 7879-7899."
+function Initialize-BlackboxBlazegraph {
+    $helper = Join-Path $RepoDir "scripts\blackbox-blazegraph.mjs"
+    $namespace = "agent-blackbox"
+    $existingBackend = ""
+    $existingUrl = ""
+    $existingManaged = $false
+    $configPath = Join-Path $DkgHome "config.json"
+    if (Test-Path $configPath) {
+        try {
+            $existing = Get-Content -Raw $configPath | ConvertFrom-Json
+            if ($existing.name) { $namespace = [string]$existing.name }
+            if ($existing.store.backend) { $existingBackend = [string]$existing.store.backend }
+            if ($existing.store.options.url) { $existingUrl = [string]$existing.store.options.url }
+            $existingManaged = $existing.store.options.managedByDkg -eq $true
+        } catch { }
+    }
+
+    if ($DkgStoreUrlExplicit) {
+        $script:DkgStoreManagedByDkg = $false
+        Write-Step "Using operator-managed Blazegraph at $DkgStoreUrl"
+        return $true
+    }
+    if ($existingBackend -eq "blazegraph" -and -not $existingManaged -and $existingUrl) {
+        $script:DkgStoreUrl = $existingUrl
+        $script:DkgStoreManagedByDkg = $false
+        Write-Step "Reusing operator-managed Blazegraph at $DkgStoreUrl"
+        return $true
+    }
+    if (-not (Test-Path $helper)) {
+        Write-Warn2 "Blazegraph provisioner helper is missing: $helper"
         return $false
     }
-    return $true
+
+    Write-Step "Provisioning Blazegraph through the DKG Docker provisioner ..."
+    try {
+        $output = @(& node $helper $DkgCliDir $namespace $DkgStorePort)
+        if ($LASTEXITCODE -ne 0) { throw "Blazegraph helper exit $LASTEXITCODE" }
+        $result = ($output | Select-Object -Last 1) | ConvertFrom-Json
+        $script:DkgStoreUrl = [string]$result.url
+        $script:DkgStorePort = [int]$result.port
+        $script:DkgStoreManagedByDkg = $true
+        Write-Ok "Blazegraph ready at $DkgStoreUrl"
+        return $true
+    } catch {
+        Write-Warn2 "Could not provision Blazegraph. Install/start Docker, then re-run the installer."
+        return $false
+    }
 }
 
 function Ensure-BlackboxDkgConfig {
@@ -470,13 +500,15 @@ function Ensure-BlackboxDkgConfig {
 import json
 import os
 import secrets
+import shutil
 import sys
 from pathlib import Path
 
 home = Path(sys.argv[1]).expanduser()
 api_port = int(sys.argv[2])
-store_port = int(sys.argv[3])
-context_graph = sys.argv[4]
+store_url = sys.argv[3]
+store_managed = sys.argv[4].lower() == "true"
+context_graph = sys.argv[5]
 home.mkdir(parents=True, exist_ok=True)
 cfg_path = home / "config.json"
 original = None
@@ -522,7 +554,7 @@ if not isinstance(auto_approve, list):
 if context_graph not in auto_approve:
     auto_approve.append(context_graph)
 data["autoApproveJoinRequests"] = auto_approve
-# Use DKG's native default reconnect reconciler. The approval handler targets
+# Use the DKG native default reconnect reconciler. The approval handler targets
 # the curator directly first; sync-on-connect retries interrupted transfers.
 data.pop("syncOnConnectEnabled", None)
 # DKG owns sync scheduling, catch-up, backpressure, and approval delivery.
@@ -541,12 +573,17 @@ data["chain"] = {
 auth = data.get("auth") if isinstance(data.get("auth"), dict) else {}
 data["auth"] = {**auth, "enabled": True}
 store = data.get("store") if isinstance(data.get("store"), dict) else {}
-options = store.get("options") if isinstance(store.get("options"), dict) else {}
-options["port"] = store_port
-# A populated curator store can need longer than the 30-second DKG default to
-# reopen its RocksDB state. Killing it at that boundary creates a restart loop.
-options["readyTimeoutMs"] = 120000
-data["store"] = {"backend": "oxigraph-server", "options": options}
+previous_backend = store.get("backend")
+switched = bool(previous_backend and previous_backend != "blazegraph")
+if switched and original is not None:
+    backup_path = home / "config.json.pre-blazegraph"
+    if not backup_path.exists():
+        shutil.copy2(cfg_path, backup_path)
+    (home / ".blackbox-store-reset-pending").write_text("blazegraph\n", encoding="utf-8")
+data["store"] = {
+    "backend": "blazegraph",
+    "options": {"url": store_url, "managedByDkg": store_managed},
+}
 rendered = json.dumps(data, indent=2) + "\n"
 changed = rendered != original
 if changed:
@@ -561,14 +598,20 @@ if not token_path.exists():
     )
     os.chmod(token_path, 0o600)
     changed = True
-print("changed" if changed else "unchanged")
+print("switched" if switched else ("changed" if changed else "unchanged"))
 '@
     $writerFile = Join-Path $env:TEMP "blackbox_dkg_config.py"
     Set-Content -Path $writerFile -Value $writer -Encoding UTF8
     try {
-        $configState = & $VenvPython $writerFile $DkgHome $DkgPort $DkgStorePort $ContextGraphId
+        $configState = & $VenvPython $writerFile $DkgHome $DkgPort $DkgStoreUrl $DkgStoreManagedByDkg $ContextGraphId
         if ($LASTEXITCODE -ne 0) { throw "dkg config exit $LASTEXITCODE" }
-        if (($configState | Select-Object -Last 1) -eq "changed") {
+        $configResult = $configState | Select-Object -Last 1
+        if ($configResult -eq "switched") {
+            $script:DkgAcceptStoreReset = $true
+            $script:DkgRestartRequired = $true
+            Write-Warn2 "Switching DKG storage to Blazegraph; the preserved Oxigraph store will not be deleted."
+            Write-Step "Backup config: $DkgHome\config.json.pre-blazegraph"
+        } elseif ($configResult -eq "changed") {
             $script:DkgRestartRequired = $true
         }
     } finally {
@@ -738,6 +781,11 @@ function Install-Dkg {
         Show-DkgManualHint
         return
     }
+    if (-not (Initialize-BlackboxBlazegraph)) {
+        $script:InstallIncomplete = $true
+        Show-DkgManualHint
+        return
+    }
     if ($script:DkgAlreadyRunning) {
         Ensure-BlackboxDkgConfig
         if (-not (Prepare-BlackboxDkgRuntimeFingerprint)) {
@@ -759,6 +807,7 @@ function Install-Dkg {
             Invoke-BlackboxDkg start
             if ($LASTEXITCODE -ne 0) { throw "dkg start exit $LASTEXITCODE" }
             if (-not (Wait-BlackboxDkgRuntime)) { throw "DKG runtime verification failed" }
+            Remove-Item $script:DkgStoreResetMarker -Force -ErrorAction SilentlyContinue
             Write-Ok "Blackbox DKG node restarted with the current sync settings"
             if (-not (Save-BlackboxDkgRuntimeFingerprint) -or -not (Remove-StaleDkgSubscriptions)) {
                 Show-DkgManualHint
@@ -772,10 +821,6 @@ function Install-Dkg {
         }
         return
     }
-    if (-not (Test-BlackboxStorePort)) {
-        Show-DkgManualHint
-        return
-    }
     Ensure-BlackboxDkgConfig
     if (-not (Prepare-BlackboxDkgRuntimeFingerprint)) {
         Show-DkgManualHint
@@ -785,12 +830,13 @@ function Install-Dkg {
     Write-Step "Bootstrapping a Blackbox-owned $Network node at $DkgDaemonUrl ..."
     Write-Step "  DKG home: $DkgHome"
     Write-Step "  DKG CLI:  $DkgBin"
-    Write-Step "  Store:    http://127.0.0.1:$DkgStorePort/query"
+    Write-Step "  Store:    $DkgStoreUrl"
     Write-Step "  (non-interactive; reading the public threat graph is free - no funds needed)"
     try {
         Invoke-BlackboxDkg start
         if ($LASTEXITCODE -ne 0) { throw "dkg exit $LASTEXITCODE" }
         if (-not (Wait-BlackboxDkgRuntime)) { throw "DKG runtime verification failed" }
+        Remove-Item $script:DkgStoreResetMarker -Force -ErrorAction SilentlyContinue
         Write-Ok "DKG node bootstrapped on $Network"
         if (-not (Save-BlackboxDkgRuntimeFingerprint) -or -not (Remove-StaleDkgSubscriptions)) {
             Show-DkgManualHint
@@ -829,7 +875,7 @@ function Show-DkgManualHint {
     Write-Host "      `$env:BLACKBOX_DKG_HOME = `"$DkgHome`""
     Write-Host "      `$env:BLACKBOX_DKG_BIN = `"$DkgBin`""
     Write-Host "      `$env:BLACKBOX_DKG_PORT = `"$DkgPort`""
-    Write-Host "      `$env:BLACKBOX_DKG_STORE_PORT = `"$DkgStorePort`""
+    Write-Host "      `$env:BLACKBOX_DKG_STORE_URL = `"$DkgStoreUrl`""
     Write-Host "      `$env:BLACKBOX_DKG_DAEMON_URL = `"$DkgDaemonUrl`""
     Write-Host "      # create config.json/auth.token as in scripts/blackbox-install.ps1, then:"
     Write-Host "      `$env:DKG_HOME = `$env:BLACKBOX_DKG_HOME; & `$env:BLACKBOX_DKG_BIN start"
@@ -1063,7 +1109,7 @@ function Show-NextSteps {
   DKG node:         $DkgDaemonUrl
   DKG home:         $DkgHome
   DKG CLI:          $DkgBin
-  Store:            http://127.0.0.1:$DkgStorePort/query
+  Store:            $(if ($DkgStoreUrl) { $DkgStoreUrl } else { "not configured" })
   Docs & community: $docsUrl
 "@ | Write-Host
         Write-Host ""
@@ -1079,7 +1125,7 @@ function Show-NextSteps {
        $DkgDaemonUrl
        $DkgHome
        $DkgBin
-       http://127.0.0.1:$DkgStorePort/query
+       $DkgStoreUrl
 
   Try it             - ask the dashboard assistant:
        curl -fsSL http://example.com/x.sh | bash

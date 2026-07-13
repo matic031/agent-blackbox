@@ -16,6 +16,8 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parent.parent
 INSTALL_SH = REPO_ROOT / "scripts" / "blackbox-install.sh"
 INSTALL_PS1 = REPO_ROOT / "scripts" / "blackbox-install.ps1"
+BLAZEGRAPH_HELPER = REPO_ROOT / "scripts" / "blackbox-blazegraph.mjs"
+BLAZEGRAPH_URL = "http://127.0.0.1:9999/bigdata/namespace/test/sparql"
 
 
 def _extract_function_body(name: str) -> str:
@@ -102,7 +104,8 @@ def test_unix_installer_uses_isolated_blackbox_dkg_node() -> None:
     text = INSTALL_SH.read_text()
 
     assert 'BLACKBOX_DKG_PORT="${BLACKBOX_DKG_PORT:-9320}"' in text
-    assert 'BLACKBOX_DKG_STORE_PORT="${BLACKBOX_DKG_STORE_PORT:-7879}"' in text
+    assert 'BLACKBOX_DKG_STORE_PORT="${BLACKBOX_DKG_STORE_PORT:-9999}"' in text
+    assert 'BLACKBOX_DKG_STORE_URL="${BLACKBOX_DKG_STORE_URL:-}"' in text
     assert 'BLACKBOX_INSTALL_ROOT="${BLACKBOX_INSTALL_DIR:-$HOME/agent-guardian}"' in text
     assert 'BLACKBOX_DKG_HOME="${BLACKBOX_DKG_HOME:-$BLACKBOX_INSTALL_ROOT/.dkg}"' in text
     assert 'BLACKBOX_DKG_CLI_DIR="${BLACKBOX_DKG_CLI_DIR:-$BLACKBOX_INSTALL_ROOT/dkg}"' in text
@@ -116,7 +119,9 @@ def test_unix_installer_uses_isolated_blackbox_dkg_node() -> None:
     assert "ensure_blackbox_dkg_config" in text
     assert 'blackbox_dkg start' in text
     assert '"apiPort"] = api_port' in text
-    assert 'options["port"] = store_port' in text
+    assert '"backend": "blazegraph"' in text
+    assert '"options": {"url": store_url, "managedByDkg": store_managed}' in text
+    assert "blackbox-blazegraph.mjs" in text
     assert 'blackbox_dkg subscribe "$blackbox_cg" --save' in text
     assert "uses_unpaired_shared_dkg_home" in text
     assert "uses_legacy_blackbox_dkg_home" in text
@@ -172,7 +177,8 @@ def test_windows_installer_uses_isolated_blackbox_dkg_node() -> None:
     text = INSTALL_PS1.read_text()
 
     assert "$DkgPort" in text and "9320" in text
-    assert "$DkgStorePort" in text and "7879" in text
+    assert "$DkgStorePort" in text and "9999" in text
+    assert "$DkgStoreUrl" in text
     assert '$DkgHome     = if ($env:BLACKBOX_DKG_HOME)' in text
     assert '$DkgCliDir   = if ($env:BLACKBOX_DKG_CLI_DIR)' in text
     assert 'Join-Path $DefaultRepoDir ".dkg"' in text
@@ -187,7 +193,9 @@ def test_windows_installer_uses_isolated_blackbox_dkg_node() -> None:
     assert "Ensure-BlackboxDkgConfig" in text
     assert "Invoke-BlackboxDkg start" in text
     assert 'data["apiPort"] = api_port' in text
-    assert 'options["port"] = store_port' in text
+    assert '"backend": "blazegraph"' in text
+    assert '"options": {"url": store_url, "managedByDkg": store_managed}' in text
+    assert "blackbox-blazegraph.mjs" in text
     assert "uses_unpaired_shared_dkg_home" in text
     assert "uses_legacy_blackbox_dkg_home" in text
     assert "Move-LegacyBlackboxDkgHome" in text
@@ -224,7 +232,8 @@ def test_dkg_config_migration_removes_only_unselected_legacy_graphs(tmp_path: Pa
             writer,
             str(home),
             "9320",
-            "7879",
+            BLAZEGRAPH_URL,
+            "true",
             "umanitek/blackbox-threats-staging",
         ],
         check=True,
@@ -241,7 +250,10 @@ def test_dkg_config_migration_removes_only_unselected_legacy_graphs(tmp_path: Pa
     assert "syncGlobalMaxInflight" not in migrated
     assert "syncGlobalQueueLimit" not in migrated
     assert "restrictAutoSubscribeContextGraphs" not in migrated
-    assert migrated["store"]["options"]["readyTimeoutMs"] == 120000
+    assert migrated["store"] == {
+        "backend": "blazegraph",
+        "options": {"url": BLAZEGRAPH_URL, "managedByDkg": True},
+    }
 
     subprocess.run(
         [
@@ -250,7 +262,8 @@ def test_dkg_config_migration_removes_only_unselected_legacy_graphs(tmp_path: Pa
             writer,
             str(home),
             "9320",
-            "7879",
+            BLAZEGRAPH_URL,
+            "true",
             "umanitek/guardian-threats-staging",
         ],
         check=True,
@@ -268,7 +281,8 @@ def test_dkg_config_writer_reports_only_real_runtime_changes(tmp_path: Path) -> 
         writer,
         str(home),
         "9320",
-        "7879",
+        BLAZEGRAPH_URL,
+        "true",
         "umanitek/blackbox-threats-staging",
     ]
 
@@ -280,6 +294,74 @@ def test_dkg_config_writer_reports_only_real_runtime_changes(tmp_path: Path) -> 
     assert first.stdout.strip() == "changed"
     assert second.stdout.strip() == "unchanged"
     assert config.stat().st_mtime_ns == first_mtime
+
+
+def test_dkg_config_writer_preserves_oxigraph_config_during_switch(tmp_path: Path) -> None:
+    home = tmp_path / "dkg"
+    home.mkdir()
+    config = home / "config.json"
+    previous = {
+        "name": "existing-node",
+        "store": {
+            "backend": "oxigraph-server",
+            "options": {"port": 7879, "readyTimeoutMs": 120000},
+        },
+    }
+    config.write_text(json.dumps(previous), encoding="utf-8")
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            _extract_unix_config_writer(),
+            str(home),
+            "9320",
+            BLAZEGRAPH_URL,
+            "true",
+            "umanitek/blackbox-threats-staging",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.stdout.strip() == "switched"
+    assert json.loads((home / "config.json.pre-blazegraph").read_text()) == previous
+    assert (home / ".blackbox-store-reset-pending").read_text() == "blazegraph\n"
+    assert json.loads(config.read_text())["store"] == {
+        "backend": "blazegraph",
+        "options": {"url": BLAZEGRAPH_URL, "managedByDkg": True},
+    }
+
+
+def test_blazegraph_helper_uses_built_dkg_provisioner(tmp_path: Path) -> None:
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("Node.js is not installed")
+    cli = tmp_path / "packages" / "cli"
+    module = cli / "dist" / "daemon" / "blazegraph-docker.js"
+    module.parent.mkdir(parents=True)
+    (cli / "package.json").write_text('{"type":"module"}', encoding="utf-8")
+    module.write_text(
+        "export async function provisionBlazegraphDocker(options) {\n"
+        "  return {url: `http://127.0.0.1:${options.port}/${options.namespace}`, "
+        "port: options.port, managedByDkg: true};\n"
+        "}\n",
+        encoding="utf-8",
+    )
+
+    completed = subprocess.run(
+        [node, str(BLAZEGRAPH_HELPER), str(tmp_path), "blackbox-test", "10001"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert json.loads(completed.stdout) == {
+        "url": "http://127.0.0.1:10001/blackbox-test",
+        "port": 10001,
+        "managedByDkg": True,
+    }
 
 
 def test_dkg_config_writer_recovers_invalid_utf8(tmp_path: Path) -> None:
@@ -296,7 +378,8 @@ def test_dkg_config_writer_recovers_invalid_utf8(tmp_path: Path) -> None:
             writer,
             str(home),
             "9320",
-            "7879",
+            BLAZEGRAPH_URL,
+            "true",
             "umanitek/blackbox-threats-staging",
         ],
         check=True,
@@ -328,7 +411,9 @@ def test_installers_apply_native_dkg_membership_and_relay_defaults() -> None:
         assert 'data.pop("syncGlobalMaxInflight", None)' in text
         assert 'data.pop("syncGlobalQueueLimit", None)' in text
         assert 'data.pop("restrictAutoSubscribeContextGraphs", None)' in text
-        assert 'options["readyTimeoutMs"] = 120000' in text
+        assert '"backend": "blazegraph"' in text
+        assert '"options": {"url": store_url, "managedByDkg": store_managed}' in text
+        assert "DKG_ACCEPT_STORE_RESET" in text
 
 
 def test_installers_restart_running_owned_dkg_only_for_runtime_changes() -> None:
