@@ -1,0 +1,4 @@
+batches/
+registry.json
+*.log
+node_modules/
