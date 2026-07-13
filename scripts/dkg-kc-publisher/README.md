@@ -29,14 +29,16 @@ the branch.
 - deduplicates every record globally and writes a SHA-256 manifest for the
   source, mapping, and every collection;
 - validates all 460 files and all mapped RDF before any node write;
-- requires the node to report `@origintrail-official/dkg` **10.0.5** on
+- requires the node to report `@origintrail-official/dkg` **10.0.6** on
   `mainnet-base`;
 - requires the target context graph to already exist and be verifiably
   curated/private;
 - enforces exactly 12 epochs and requires a manifest-bound confirmation token
   before any paid work;
 - uses the DKG's persistent async SWM-share queue and synchronous VM endpoint,
-  recording every DKG job ID and transaction in `registry.json`;
+  then pulls the finalized VM assertion back and re-shares it to encrypted SWM;
+- verifies the restored SWM quads exactly and records every DKG job ID and
+  transaction in `registry.json`;
 - publishes one collection at a time, polls it to a terminal state, and stops
   on the first error instead of stacking retries against Blazegraph;
 - writes live state to `progress.json` and a timestamped durable log.
@@ -56,7 +58,7 @@ node test.mjs
 
 ## Privacy and encryption
 
-Official DKG npm 10.0.5 supports curated/private context graphs with X25519
+Official DKG npm 10.0.6 supports curated/private context graphs with X25519
 workspace keys, HKDF-SHA256 key derivation and AES-256-GCM-encrypted SWM
 distribution to allowed agents. The production preflight therefore refuses a
 graph unless its `accessPolicy` is private/curated (`1`, `ownerOnly`, or
@@ -80,7 +82,7 @@ Important distinctions:
 ## Prerequisites on the curator node
 
 - Linux/macOS shell, Node.js 22 or newer, and npm 10 or newer.
-- Official DKG installed as `@origintrail-official/dkg@10.0.5`, running on
+- Official DKG installed as `@origintrail-official/dkg@10.0.6`, running on
   port 9200 with Blazegraph configured.
 - Node admin token readable at `~/.dkg/auth.token`, or set
   `DKG_AUTH_TOKEN_PATH`.
@@ -221,7 +223,7 @@ prints a paid confirmation token like:
 ```
 
 Do not proceed if the wallet output is unclear, the graph policy is not
-private, or the node is not official npm 10.0.5.
+private, or the node is not official npm 10.0.6.
 
 ## 5. Smoke-test one paid collection
 
@@ -261,9 +263,27 @@ curl -s -X POST http://127.0.0.1:8900/api/query \
   -d '{"contextGraphId":"<full-context-graph-id>","sparql":"SELECT (COUNT(DISTINCT ?s) AS ?n) WHERE { ?s ?p ?o }"}'
 ```
 
-Confirm encryption/private access from a non-member as well as an allowed
-member, then run Agent Guardian sync and verify Source, Contributor and
-references in the product UI. Only continue after this smoke test passes.
+VM publication drains the KA's active SWM data as part of the canonical
+`WM -> SWM -> VM` lifecycle. The publisher therefore performs a second,
+non-paid operation after VM confirmation: it pulls the finalized assertion
+from VM into WM and re-shares it to encrypted SWM. A batch is complete only
+after the restored SWM quads exactly match the prepared batch.
+
+Confirm all three views before continuing:
+
+1. the publisher reports 1,000 promoted SWM root entities;
+2. a separate allowed client syncs and queries the same 1,000 SWM threats;
+3. the same client queries the 1,000 public VM threats.
+
+Also confirm that a non-member cannot read the SWM data. Run Agent Guardian
+sync and verify Source, Contributor and references in the product UI. Only
+continue after this smoke test passes.
+
+The official DKG default SWM TTL is 30 days. This corpus is intended to remain
+available to the community for the full 12-epoch VM lifetime, so configure
+`sharedMemoryTtlMs` to at least `31104000000` (360 days) on the curator and on
+clients that must retain the full SWM corpus. Restart DKG after changing the
+configuration and verify the effective value before the production run.
 
 ## 6. Run all remaining collections unattended
 
@@ -300,7 +320,9 @@ meet a clock: parallel Blazegraph work can make the run slower and less safe.
 
 Re-run the exact same publish command after a clean stop or machine restart.
 The script reconciles persistent share job IDs before starting new work.
-Finalized batches are never paid again.
+Finalized VM batches are never paid again. A finalized VM batch without a
+verified `swmReplicatedAt` entry is resumed only through the free VM-to-SWM
+restore path; it is not sent to the paid endpoint again.
 
 DKG 10.0.5's async VM queue lost the large first-batch job while rewriting its
 claimed state. The default is therefore `KC_VM_PUBLISH_MODE=sync`. A synchronous
@@ -354,17 +376,17 @@ stack expensive graph work and make recovery take much longer.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `DKG_ENDPOINT` / `DKG_PORT` | `http://127.0.0.1` / `9200` | curator node API; use port `8900` on the production node |
-| `DKG_AUTH_TOKEN_PATH` | `~/.dkg-mainnet/auth.token` | token file; production node uses `~/.dkg/auth.token` |
+| `DKG_ENDPOINT` / `DKG_PORT` | `http://127.0.0.1` / `8900` | curator node internal API |
+| `DKG_AUTH_TOKEN_PATH` | `~/.dkg/auth.token` | node admin token file |
 | `KC_NETWORK` | `mainnet-base` | required DKG network |
-| `KC_DKG_VERSION` | `10.0.5` | exact official npm node version |
+| `KC_DKG_VERSION` | `10.0.6` | exact official npm node version |
 | `KC_CG_ID` | none | required full context graph ID |
 | `KC_CG_ONCHAIN_ID` | none | pinned registered CG ID fallback when DKG omits `accessPolicy` from list output |
 | `KC_EPOCHS` | `12` | enforced production lifetime |
 | `KC_EXPECT_RECORDS` | `460000` | enforced corpus size |
 | `KC_POLL_MS` | `30000` | async job polling interval |
 | `KC_REQUEST_TIMEOUT_MS` | `2700000` | 45-minute mutation timeout with heartbeats |
-| `KC_VM_PUBLISH_MODE` | `sync` | VM endpoint; use `async` only after its DKG 10.0.5 queue issue is resolved |
+| `KC_VM_PUBLISH_MODE` | `sync` | VM endpoint; use `async` only after the historical 10.0.5 queue issue is resolved and tested |
 | `KC_PUBLISHER_NODE_IDENTITY_ID` | `0` | no-attribution publisher identity override |
 
 Do not change the version, record count, epochs, mapping or batches during a

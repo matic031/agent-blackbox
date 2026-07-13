@@ -34,7 +34,7 @@ const registryPath = resolve(process.env.KC_REGISTRY_PATH ?? join(here, 'registr
 const progressPath = resolve(process.env.KC_PROGRESS_PATH ?? join(here, 'progress.json'));
 const lockPath = `${registryPath}.lock`;
 const endpoint = process.env.DKG_ENDPOINT ?? 'http://127.0.0.1';
-const port = process.env.DKG_PORT ?? '9200';
+const port = process.env.DKG_PORT ?? '8900';
 const endpointUrl = new URL(endpoint);
 if (!endpointUrl.port) endpointUrl.port = port;
 endpointUrl.pathname = '/';
@@ -42,11 +42,11 @@ endpointUrl.search = '';
 endpointUrl.hash = '';
 const base = endpointUrl.toString().replace(/\/$/, '');
 const network = process.env.KC_NETWORK ?? 'mainnet-base';
-const expectedVersion = process.env.KC_DKG_VERSION ?? '10.0.5';
+const expectedVersion = process.env.KC_DKG_VERSION ?? '10.0.6';
 const contextGraphId = process.env.KC_CG_ID;
 const epochs = Number(process.env.KC_EPOCHS ?? '12');
 const kaPrefix = process.env.KC_KA_PREFIX ?? contextGraphId?.split('/').filter(Boolean).at(-1);
-const tokenPath = resolve((process.env.DKG_AUTH_TOKEN_PATH ?? join(homedir(), '.dkg-mainnet', 'auth.token')).replace(/^~(?=\/)/, homedir()));
+const tokenPath = resolve((process.env.DKG_AUTH_TOKEN_PATH ?? join(homedir(), '.dkg', 'auth.token')).replace(/^~(?=\/)/, homedir()));
 const pollMs = Number(process.env.KC_POLL_MS ?? '30000');
 const requestTimeoutMs = Number(process.env.KC_REQUEST_TIMEOUT_MS ?? '2700000');
 const expectedRecords = Number(process.env.KC_EXPECT_RECORDS ?? '460000');
@@ -377,7 +377,7 @@ function recordFinalized(rec, job) {
   const txHash = finalization.txHash ?? inclusion.txHash ?? broadcast.txHash;
   if (!txHash && finalization.mode !== 'local' && finalization.mode !== 'noop') throw new Error('finalized DKG job has no transaction hash');
   Object.assign(rec, {
-    status: 'finalized',
+    status: 'vm-finalized',
     publishJobState: 'finalized',
     txHash: txHash ?? null,
     ual: finalization.ual ?? null,
@@ -390,7 +390,7 @@ function recordFinalized(rec, job) {
 function recordSynchronousFinalized(rec, result) {
   if (!result?.txHash || !result?.ual) throw new Error(`synchronous DKG publish response is missing txHash or ual: ${JSON.stringify(result).slice(0, 1500)}`);
   Object.assign(rec, {
-    status: 'finalized',
+    status: 'vm-finalized',
     publishMode: 'sync',
     publishJobState: result.status ?? 'confirmed',
     txHash: result.txHash,
@@ -401,8 +401,60 @@ function recordSynchronousFinalized(rec, result) {
   });
 }
 
+function vmStatusIsFinalized(status) {
+  const assertion = status?.currentAssertion;
+  return status?.state === 'published'
+    && status?.status === 'vm-confirmed'
+    && typeof status?.publishedUal === 'string'
+    && status.publishedUal.startsWith('did:dkg:')
+    && typeof assertion === 'string'
+    && assertion.length > 0
+    && status.wmCurrentAssertion === assertion
+    && status.swmCurrentAssertion === assertion
+    && status.vmCurrentAssertion === assertion;
+}
+
+async function reconcileSynchronousPublish(entry, rec, kaName, registry, waitForCompletion) {
+  const deadline = Date.now() + requestTimeoutMs;
+  const query = `contextGraphId=${encodeURIComponent(contextGraphId)}`;
+  for (;;) {
+    let status;
+    try {
+      status = await api('GET', `/api/knowledge-assets/${encodeURIComponent(kaName)}/vm?${query}`);
+    } catch (error) {
+      if (!waitForCompletion || (error.status && error.status < 500)) throw error;
+      log(`[${entry.name}] VM reconciliation read failed; retrying without republishing: ${error.message}`);
+    }
+    if (vmStatusIsFinalized(status)) {
+      Object.assign(rec, {
+        status: 'vm-finalized',
+        publishMode: 'sync-reconciled',
+        publishJobState: 'vm-confirmed',
+        txHash: rec.txHash ?? null,
+        ual: status.publishedUal,
+        blockNumber: rec.blockNumber ?? null,
+        finalizedAt: new Date().toISOString(),
+        dkgFinalizationMode: 'published-vm-reconciled',
+        vmAssertion: status.currentAssertion,
+      });
+      delete rec.lastError;
+      saveRegistry(registry);
+      log(`[${entry.name}] reconciled paid publish from matching WM/SWM/VM state: ${status.publishedUal}`);
+      return true;
+    }
+    if (!waitForCompletion) return false;
+    if (Date.now() >= deadline) {
+      throw new Error(`[${entry.name}] paid publish response was lost and VM did not become confirmed within ${duration(requestTimeoutMs)}; inspect chain and node state before retrying`);
+    }
+    updateProgress({ phase: 'publish-reconcile', currentBatch: entry.name, heartbeat: `GET ${kaName}/vm` });
+    log(`[${entry.name}] paid response unavailable; waiting for VM confirmation without republishing`);
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, Math.min(pollMs, 30_000)));
+  }
+}
+
 async function publishSynchronous(entry, rec, kaName, registry) {
   if (rec.publishStartedAt) {
+    if (await reconcileSynchronousPublish(entry, rec, kaName, registry, false)) return;
     throw new Error(`[${entry.name}] an earlier synchronous paid publish started at ${rec.publishStartedAt} without a recorded terminal result; verify chain and node state, then reconcile registry.json before retrying`);
   }
   rec.publishMode = 'sync';
@@ -410,11 +462,74 @@ async function publishSynchronous(entry, rec, kaName, registry) {
   rec.status = 'publishing';
   saveRegistry(registry);
   log(`[${entry.name}] starting PAID synchronous VM publish for ${epochs} epochs`);
-  const result = await api('POST', `/api/knowledge-assets/${encodeURIComponent(kaName)}/vm/publish`, {
-    contextGraphId,
-    options: { publishEpochs: epochs, publisherNodeIdentityId },
-  }, requestTimeoutMs);
+  let result;
+  try {
+    result = await api('POST', `/api/knowledge-assets/${encodeURIComponent(kaName)}/vm/publish`, {
+      contextGraphId,
+      options: { publishEpochs: epochs, publisherNodeIdentityId },
+    }, requestTimeoutMs);
+  } catch (error) {
+    if (error.code !== 'CLIENT_TIMEOUT' && !/fetch failed/i.test(error.message ?? '')) throw error;
+    log(`[${entry.name}] paid publish response was lost; reconciling VM state without retrying the paid request`);
+    await reconcileSynchronousPublish(entry, rec, kaName, registry, true);
+    return;
+  }
   recordSynchronousFinalized(rec, result);
+}
+
+function hasFinalizedVm(rec) {
+  return Boolean(rec.txHash || rec.ual || rec.dkgFinalizationMode === 'noop');
+}
+
+async function restorePublishedAssetToSwm(entry, rec, kaName, expectedQuads, registry) {
+  if (rec.swmReplicatedAt) return;
+
+  updateProgress({ phase: 'swm-restore', currentBatch: entry.name, currentKa: kaName });
+  log(`[${entry.name}] restoring the finalized VM assertion to encrypted SWM`);
+  try {
+    if (!rec.swmRestoreJobId) {
+      const pulled = await api('POST', `/api/knowledge-assets/${encodeURIComponent(kaName)}/wm/pull-from`, {
+        contextGraphId,
+        layer: 'vm',
+        onConflict: 'replace',
+      }, requestTimeoutMs);
+      if (pulled?.wmDraft !== 'open' || pulled?.seededFrom?.layer !== 'vm') {
+        throw new Error(`unexpected VM pull response: ${JSON.stringify(pulled).slice(0, 1500)}`);
+      }
+      rec.swmRestorePulledAt = new Date().toISOString();
+      rec.status = 'swm-restoring';
+      saveRegistry(registry);
+
+      try {
+        const queued = await api('POST', `/api/knowledge-assets/${encodeURIComponent(kaName)}/swm/share-async`, { contextGraphId });
+        rec.swmRestoreJobId = queued.jobId;
+      } catch (error) {
+        if (error.status === 409 && error.body?.existingJobId) rec.swmRestoreJobId = error.body.existingJobId;
+        else throw error;
+      }
+      saveRegistry(registry);
+    }
+    const job = await pollShareJob(entry.name, rec.swmRestoreJobId);
+    const query = `contextGraphId=${encodeURIComponent(contextGraphId)}`;
+    const stored = await api('GET', `/api/knowledge-assets/${encodeURIComponent(kaName)}/swm/quads?${query}`, undefined, requestTimeoutMs);
+    if (!Array.isArray(stored.quads)
+      || stored.quads.length !== expectedQuads.length
+      || quadSetHash(stored.quads) !== quadSetHash(expectedQuads)) {
+      throw new Error(`restored SWM content differs from ${entry.name}; refusing to mark the batch complete`);
+    }
+    rec.swmRestorePromotedCount = job?.result?.promotedCount ?? job?.promotedCount ?? null;
+    rec.swmRestoreQuadCount = stored.quads.length;
+    rec.swmReplicatedAt = new Date().toISOString();
+    rec.status = 'finalized';
+    delete rec.lastError;
+    saveRegistry(registry);
+    log(`[${entry.name}] encrypted SWM copy restored after VM finalization`);
+  } catch (error) {
+    rec.lastError = { at: new Date().toISOString(), phase: 'swm-restore', message: error.message, code: error.code ?? null };
+    rec.status = 'error';
+    saveRegistry(registry);
+    throw error;
+  }
 }
 
 async function publishAll(validated, preflight) {
@@ -426,7 +541,7 @@ async function publishAll(validated, preflight) {
   const registry = loadRegistry(validated.manifest, validated.manifestSha256);
   saveRegistry(registry);
   const entries = onlyBatch ? validated.selected : validated.manifest.batches;
-  let completed = Object.values(registry.batches).filter((record) => record.status === 'finalized').length;
+  let completed = Object.values(registry.batches).filter((record) => record.status === 'finalized' && record.swmReplicatedAt).length;
   let processedThisRun = 0;
   updateProgress({
     status: 'running', phase: 'starting', startedAt: new Date(startedAt).toISOString(),
@@ -447,7 +562,7 @@ async function publishAll(validated, preflight) {
       saveRegistry(registry);
       log(`[${entry.name}] retrying after definitive HTTP 413 gateway rejection`);
     }
-    if (rec.status === 'finalized' && (rec.txHash || rec.dkgFinalizationMode === 'noop')) {
+    if (rec.status === 'finalized' && hasFinalizedVm(rec) && rec.swmReplicatedAt) {
       log(`[${entry.name}] already finalized: ${rec.txHash ?? rec.dkgFinalizationMode}`);
       continue;
     }
@@ -455,7 +570,7 @@ async function publishAll(validated, preflight) {
     updateProgress({ phase: 'loading', currentBatch: entry.name, currentKa: kaName, completedBatches: completed });
     const { quads } = readBatch(entry);
 
-    if (!rec.sealedAt) {
+    if (!hasFinalizedVm(rec) && !rec.sealedAt) {
       let reconciled = false;
       if (rec.createStartedAt) {
         reconciled = await reconcileCreate(kaName, quads).catch((error) => {
@@ -501,7 +616,7 @@ async function publishAll(validated, preflight) {
       }
     }
 
-    if (!rec.sharedAt) {
+    if (!hasFinalizedVm(rec) && !rec.sharedAt) {
       if (!rec.shareJobId) {
         log(`[${entry.name}] enqueueing persistent SWM share job`);
         try {
@@ -530,10 +645,10 @@ async function publishAll(validated, preflight) {
     }
 
     try {
-      if (vmPublishMode === 'sync') {
+      if (!hasFinalizedVm(rec) && vmPublishMode === 'sync') {
         await publishSynchronous(entry, rec, kaName, registry);
         saveRegistry(registry);
-      } else {
+      } else if (!hasFinalizedVm(rec)) {
         if (!rec.publishJobId) {
           log(`[${entry.name}] enqueueing PAID async VM publish for ${epochs} epochs`);
           try {
@@ -555,6 +670,7 @@ async function publishAll(validated, preflight) {
         const job = await pollPublishJob(entry.name, rec.publishJobId);
         recordFinalized(rec, job);
       }
+      await restorePublishedAssetToSwm(entry, rec, kaName, quads, registry);
       rec.durationSeconds = Math.round((Date.now() - batchStartedAt) / 1000);
       saveRegistry(registry);
       completed += 1;
@@ -570,9 +686,11 @@ async function publishAll(validated, preflight) {
       });
       log(`[${entry.name}] finalized tx=${rec.txHash ?? rec.dkgFinalizationMode} block=${rec.blockNumber ?? 'n/a'}; ${completed}/${validated.manifest.batchCount} complete`);
     } catch (error) {
-      rec.lastError = { at: new Date().toISOString(), phase: 'publish', message: error.message, code: error.code ?? null };
-      rec.status = 'error';
-      saveRegistry(registry);
+      if (rec.lastError?.phase !== 'swm-restore') {
+        rec.lastError = { at: new Date().toISOString(), phase: 'publish', message: error.message, code: error.code ?? null };
+        rec.status = 'error';
+        saveRegistry(registry);
+      }
       throw error;
     }
   }

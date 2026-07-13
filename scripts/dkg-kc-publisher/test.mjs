@@ -8,6 +8,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
+import { recordQuads } from './mapping.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const temp = mkdtempSync(join(tmpdir(), 'blackbox-publisher-test-'));
@@ -21,7 +22,7 @@ let accessPolicy = 1;
 let publishState = 'finalized';
 let rejectCreateStatus;
 let synchronousPublish = false;
-const calls = { create: 0, share: 0, publish: 0 };
+const calls = { create: 0, share: 0, publish: 0, pull: 0 };
 
 function run(script, args, env = {}) {
   return new Promise((resolvePromise) => {
@@ -45,7 +46,7 @@ function json(response, status, body) {
 
 const server = createServer((request, response) => {
   const url = new URL(request.url, 'http://127.0.0.1');
-  if (request.method === 'GET' && url.pathname === '/api/status') return json(response, 200, { name: 'fixture', version: '10.0.5', networkConfig: 'mainnet-base', connectedPeers: 3 });
+  if (request.method === 'GET' && url.pathname === '/api/status') return json(response, 200, { name: 'fixture', version: '10.0.6', networkConfig: 'mainnet-base', connectedPeers: 3 });
   if (request.method === 'GET' && url.pathname === '/api/context-graph/exists') return json(response, 200, { id: cg, exists: true });
   if (request.method === 'GET' && url.pathname === '/api/context-graph/list') return json(response, 200, { contextGraphs: [{ id: cg, accessPolicy, onChainId: '13' }] });
   if (request.method === 'GET' && url.pathname.endsWith('/participants')) return json(response, 200, { contextGraphId: cg, allowedAgents: ['0xtest'] });
@@ -68,9 +69,19 @@ const server = createServer((request, response) => {
   }
   if (request.method === 'POST' && url.pathname.endsWith('/swm/share-async')) {
     calls.share += 1;
-    return json(response, 200, { jobId: 'share-1', state: 'queued' });
+    return json(response, 200, { jobId: `share-${calls.share}`, state: 'queued' });
   }
-  if (request.method === 'GET' && url.pathname === '/api/knowledge-assets/swm/share-jobs/share-1') return json(response, 200, { jobId: 'share-1', state: 'succeeded' });
+  if (request.method === 'GET' && url.pathname.startsWith('/api/knowledge-assets/swm/share-jobs/share-')) {
+    return json(response, 200, { jobId: url.pathname.split('/').at(-1), state: 'succeeded', result: { promotedCount: 2 } });
+  }
+  if (request.method === 'POST' && url.pathname.endsWith('/wm/pull-from')) {
+    calls.pull += 1;
+    return json(response, 200, { wmDraft: 'open', seededFrom: { layer: 'vm' } });
+  }
+  if (request.method === 'GET' && url.pathname.endsWith('/swm/quads')) {
+    const batch = JSON.parse(readFileSync(join(batches, 'batch-001.json')));
+    return json(response, 200, { quads: batch.records.flatMap(recordQuads) });
+  }
   if (request.method === 'POST' && url.pathname.endsWith('/vm/publish-async')) {
     calls.publish += 1;
     return json(response, 202, { jobId: 'publish-1', status: 'accepted' });
@@ -136,7 +147,7 @@ try {
   rejectCreateStatus = 413;
   const rejected = await run('publish.mjs', ['--publish', '--confirm', confirmation], env);
   assert.notEqual(rejected.code, 0, 'HTTP 413 unexpectedly produced success');
-  assert.deepEqual(calls, { create: 1, share: 0, publish: 0 });
+  assert.deepEqual(calls, { create: 1, share: 0, publish: 0, pull: 0 });
   const rejectedRegistry = JSON.parse(readFileSync(registryPath, 'utf8'));
   assert.equal(rejectedRegistry.batches['batch-001'].createStartedAt, undefined);
   assert.equal(rejectedRegistry.batches['batch-001'].lastError.status, 413);
@@ -146,25 +157,28 @@ try {
   rejectCreateStatus = 400;
   const invalidName = await run('publish.mjs', ['--publish', '--confirm', confirmation], env);
   assert.notEqual(invalidName.code, 0, 'invalid assertion name unexpectedly produced success');
-  assert.deepEqual(calls, { create: 2, share: 0, publish: 0 });
+  assert.deepEqual(calls, { create: 2, share: 0, publish: 0, pull: 0 });
   const invalidNameRegistry = JSON.parse(readFileSync(registryPath, 'utf8'));
   assert.equal(invalidNameRegistry.batches['batch-001'].createStartedAt, undefined);
   assert.equal(invalidNameRegistry.batches['batch-001'].lastError.status, 400);
 
   const publish = await run('publish.mjs', ['--publish', '--confirm', confirmation], env);
   assert.equal(publish.code, 0, publish.stderr);
-  assert.deepEqual(calls, { create: 3, share: 1, publish: 1 });
+  assert.deepEqual(calls, { create: 3, share: 2, publish: 1, pull: 1 });
   const registry = JSON.parse(readFileSync(registryPath, 'utf8'));
   assert.equal(registry.batches['batch-001'].txHash, '0xabc');
   assert.equal(registry.batches['batch-001'].epochs, 12);
+  assert.equal(registry.batches['batch-001'].status, 'finalized');
+  assert.equal(registry.batches['batch-001'].swmRestoreQuadCount > 0, true);
+  assert.equal(typeof registry.batches['batch-001'].swmReplicatedAt, 'string');
 
   const resume = await run('publish.mjs', ['--publish', '--confirm', confirmation], env);
   assert.equal(resume.code, 0, resume.stderr);
-  assert.deepEqual(calls, { create: 3, share: 1, publish: 1 }, 'resume replayed a paid/mutating operation');
+  assert.deepEqual(calls, { create: 3, share: 2, publish: 1, pull: 1 }, 'resume replayed a paid/mutating operation');
 
   const wrongConfirmation = await run('publish.mjs', ['--publish', '--confirm', 'wrong-token'], env);
   assert.notEqual(wrongConfirmation.code, 0, 'wrong paid confirmation unexpectedly succeeded');
-  assert.deepEqual(calls, { create: 3, share: 1, publish: 1 }, 'wrong confirmation reached a mutation');
+  assert.deepEqual(calls, { create: 3, share: 2, publish: 1, pull: 1 }, 'wrong confirmation reached a mutation');
 
   publishState = 'failed';
   const failureRegistryPath = join(temp, 'failure-registry.json');
@@ -199,6 +213,7 @@ try {
   assert.equal(syncRegistry.batches['batch-001'].ual, 'did:dkg:sync');
   assert.equal(syncRegistry.batches['batch-001'].publishMode, 'sync');
   assert.equal(syncRegistry.batches['batch-001'].status, 'finalized');
+  assert.equal(typeof syncRegistry.batches['batch-001'].swmReplicatedAt, 'string');
   console.log('publisher integration smoke test: PASS');
 } finally {
   await new Promise((resolvePromise) => server.close(resolvePromise));
