@@ -1,166 +1,545 @@
 #!/usr/bin/env node
 /**
- * Batched Knowledge-Collection publisher for a DKG V10 edge node (Base
- * mainnet). One PAID on-chain mint per batch anchors ALL records in that
- * batch as individually-addressable knowledge assets — this is the cost
- * lever: gas is per-transaction, TRAC is per-byte×epoch.
+ * Safe, resumable DKG V10 knowledge-collection publisher.
  *
- * Flow per batch:  create+seal+share KA (free, off-chain)  →  vm/publish (PAID).
- *
- * Safety rails:
- *  - refuses to run unless the node reports the expected network
- *  - resumable ledger (registry.json): a batch with a txHash is never re-paid;
- *    a sealed-but-unminted batch resumes at the mint step
- *  - transient pre-flight failures (chain policy-read timeouts) retry
- *    bounded; the tx is only signed after pre-flight passes, so those retries
- *    are free — but see README about NOT hammering retries when the store is
- *    the bottleneck
- *
- * Config via env:
- *   DKG_ENDPOINT   default http://127.0.0.1
- *   DKG_PORT       default 9200
- *   DKG_AUTH_TOKEN_PATH  default ~/.dkg-mainnet/auth.token
- *   KC_NETWORK     expected node networkConfig, default mainnet-base
- *   KC_CG_ID       context graph id, default my-collection
- *   KC_CG_NAME     display name, default = KC_CG_ID
- *   KC_EPOCHS      storage epochs (30 days each), default 1
- *   KC_ATTEMPTS    max vm/publish attempts per batch, default 3
- *   KC_KA_PREFIX   KA name prefix, default = KC_CG_ID
- *
- * Usage:
- *   node publish.mjs --dry-run           # build + validate quads, no writes
- *   node publish.mjs                     # all unpublished batches, in order
- *   node publish.mjs --batch batch-001   # one batch
+ * Paid publishing is deliberately explicit. The script validates the complete
+ * manifest before writes, verifies the exact npm node version and a curated /
+ * private context graph, then uses the node's persistent async share and VM
+ * publish queues one collection at a time.
  */
-import { readFileSync, writeFileSync, readdirSync, existsSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import {
+  closeSync, copyFileSync, existsSync, openSync, readFileSync, readdirSync,
+  renameSync, statSync, unlinkSync, writeFileSync,
+} from 'node:fs';
 import { homedir } from 'node:os';
-import { join, dirname } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { recordQuads } from './mapping.mjs';
+import { recordKey, recordQuads } from './mapping.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
-const BASE = `${process.env.DKG_ENDPOINT ?? 'http://127.0.0.1'}:${process.env.DKG_PORT ?? '9200'}`;
-const NETWORK = process.env.KC_NETWORK ?? 'mainnet-base';
-const CG_ID = process.env.KC_CG_ID ?? 'my-collection';
-const CG_NAME = process.env.KC_CG_NAME ?? CG_ID;
-const EPOCHS = Number(process.env.KC_EPOCHS ?? '1');
-const ATTEMPTS = Number(process.env.KC_ATTEMPTS ?? '3');
-const KA_PREFIX = process.env.KC_KA_PREFIX ?? CG_ID;
-const TOKEN_PATH = process.env.DKG_AUTH_TOKEN_PATH ?? join(homedir(), '.dkg-mainnet', 'auth.token');
-const LEDGER = join(here, 'registry.json');
-
 const argv = process.argv.slice(2);
-const DRY = argv.includes('--dry-run');
-const only = argv.includes('--batch') ? argv[argv.indexOf('--batch') + 1] : null;
+const has = (flag) => argv.includes(flag);
+const option = (name, fallback) => {
+  const index = argv.indexOf(`--${name}`);
+  return index === -1 ? fallback : argv[index + 1];
+};
 
-const authToken = readFileSync(TOKEN_PATH, 'utf8').split('\n').map((l) => l.trim()).find((l) => l && !l.startsWith('#'));
+const selectedModes = [
+  ['--publish', 'publish'], ['--preflight', 'preflight'], ['--dry-run', 'dry-run'],
+].filter(([flag]) => has(flag));
+const mode = selectedModes.length === 1 ? selectedModes[0][1] : null;
+const onlyBatch = option('batch', null);
+const batchDir = resolve(process.env.KC_BATCH_DIR ?? join(here, 'batches'));
+const registryPath = resolve(process.env.KC_REGISTRY_PATH ?? join(here, 'registry.json'));
+const progressPath = resolve(process.env.KC_PROGRESS_PATH ?? join(here, 'progress.json'));
+const lockPath = `${registryPath}.lock`;
+const endpoint = process.env.DKG_ENDPOINT ?? 'http://127.0.0.1';
+const port = process.env.DKG_PORT ?? '9200';
+const endpointUrl = new URL(endpoint);
+if (!endpointUrl.port) endpointUrl.port = port;
+endpointUrl.pathname = '/';
+endpointUrl.search = '';
+endpointUrl.hash = '';
+const base = endpointUrl.toString().replace(/\/$/, '');
+const network = process.env.KC_NETWORK ?? 'mainnet-base';
+const expectedVersion = process.env.KC_DKG_VERSION ?? '10.0.5';
+const contextGraphId = process.env.KC_CG_ID;
+const epochs = Number(process.env.KC_EPOCHS ?? '12');
+const kaPrefix = process.env.KC_KA_PREFIX ?? contextGraphId;
+const tokenPath = resolve((process.env.DKG_AUTH_TOKEN_PATH ?? join(homedir(), '.dkg-mainnet', 'auth.token')).replace(/^~(?=\/)/, homedir()));
+const pollMs = Number(process.env.KC_POLL_MS ?? '30000');
+const requestTimeoutMs = Number(process.env.KC_REQUEST_TIMEOUT_MS ?? '2700000');
+const expectedRecords = Number(process.env.KC_EXPECT_RECORDS ?? '460000');
+const startedAt = Date.now();
+let lockFd;
+let authToken;
+let progress = {};
+
+function usage() {
+  console.error(`usage:
+  node publish.mjs --dry-run [--batch batch-001]
+  KC_CG_ID=<id> node publish.mjs --preflight
+  KC_CG_ID=<id> node publish.mjs --publish --confirm <token>
+
+The exact paid confirmation token is printed by --preflight.`);
+}
+
+function assertConfig() {
+  if (!mode) throw new Error('choose exactly one of --dry-run, --preflight, or --publish');
+  if (!Number.isSafeInteger(epochs) || epochs !== 12) throw new Error(`KC_EPOCHS must be exactly 12 for this production corpus; got ${epochs}`);
+  if (!Number.isSafeInteger(pollMs) || pollMs < 1_000) throw new Error(`KC_POLL_MS must be an integer >= 1000; got ${pollMs}`);
+  if (!Number.isSafeInteger(requestTimeoutMs) || requestTimeoutMs < 60_000) throw new Error(`KC_REQUEST_TIMEOUT_MS must be >= 60000; got ${requestTimeoutMs}`);
+  if ((mode === 'preflight' || mode === 'publish') && !contextGraphId) throw new Error('KC_CG_ID is required for node preflight/publish');
+  if (mode === 'publish' && !kaPrefix) throw new Error('KC_KA_PREFIX or KC_CG_ID is required');
+}
+
+function sha256(data) {
+  return createHash('sha256').update(data).digest('hex');
+}
+
+function atomicJson(path, value) {
+  const temp = `${path}.tmp-${process.pid}`;
+  writeFileSync(temp, `${JSON.stringify(value, null, 2)}\n`);
+  renameSync(temp, path);
+}
+
+function updateProgress(fields) {
+  progress = { ...progress, ...fields, pid: process.pid, updatedAt: new Date().toISOString() };
+  atomicJson(progressPath, progress);
+}
+
+function log(message) {
+  console.log(`[${new Date().toISOString()}] ${message}`);
+}
+
+function duration(ms) {
+  const seconds = Math.max(0, Math.round(ms / 1000));
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const rest = seconds % 60;
+  return `${hours ? `${hours}h ` : ''}${minutes ? `${minutes}m ` : ''}${rest}s`;
+}
+
+function readToken() {
+  if (!existsSync(tokenPath)) throw new Error(`auth token not found: ${tokenPath}`);
+  const token = readFileSync(tokenPath, 'utf8').split('\n').map((line) => line.trim()).find((line) => line && !line.startsWith('#'));
+  if (!token) throw new Error(`auth token file is empty: ${tokenPath}`);
+  return token;
+}
 
 async function api(method, path, body, timeoutMs = 60_000) {
-  const res = await fetch(`${BASE}${path}`, {
-    method,
-    headers: { 'content-type': 'application/json', authorization: `Bearer ${authToken}` },
-    body: body === undefined ? undefined : JSON.stringify(body),
-    signal: AbortSignal.timeout(timeoutMs),
-  });
-  const text = await res.text();
-  let json; try { json = JSON.parse(text); } catch { json = { raw: text }; }
-  if (!res.ok) { const e = new Error(`${res.status} ${path}: ${json.error ?? text.slice(0, 400)}`); e.body = json; throw e; }
-  return json;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(new Error(`request exceeded ${timeoutMs}ms`)), timeoutMs);
+  const heartbeat = setInterval(() => {
+    log(`waiting for ${method} ${path} (${duration(Date.now() - requestStarted)})`);
+    updateProgress({ heartbeat: `${method} ${path}`, heartbeatSeconds: Math.round((Date.now() - requestStarted) / 1000) });
+  }, 60_000);
+  const requestStarted = Date.now();
+  try {
+    const response = await fetch(`${base}${path}`, {
+      method,
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${authToken}` },
+      body: body === undefined ? undefined : JSON.stringify(body),
+      signal: controller.signal,
+    });
+    const text = await response.text();
+    let json;
+    try { json = JSON.parse(text); } catch { json = { raw: text }; }
+    if (!response.ok) {
+      const error = new Error(`${response.status} ${path}: ${json.error ?? text.slice(0, 500)}`);
+      error.status = response.status;
+      error.body = json;
+      throw error;
+    }
+    return json;
+  } catch (error) {
+    if (controller.signal.aborted) {
+      const timeoutError = new Error(`timeout waiting for ${method} ${path} after ${duration(timeoutMs)}; remote state may have changed`);
+      timeoutError.code = 'CLIENT_TIMEOUT';
+      throw timeoutError;
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+    clearInterval(heartbeat);
+  }
 }
 
-const ledger = existsSync(LEDGER) ? JSON.parse(readFileSync(LEDGER, 'utf8')) : { cg: null, batches: {} };
-const saveLedger = () => writeFileSync(LEDGER, JSON.stringify(ledger, null, 2));
+function validateQuad(batchName, quad) {
+  if (!quad || typeof quad !== 'object') throw new Error(`${batchName}: mapping returned a non-object quad`);
+  if (!/^[a-z][a-z0-9+.-]*:/i.test(quad.subject) || quad.subject.startsWith('_:')) throw new Error(`${batchName}: invalid subject ${String(quad.subject).slice(0, 100)}`);
+  if (!/^[a-z][a-z0-9+.-]*:/i.test(quad.predicate) || quad.predicate.startsWith('_:')) throw new Error(`${batchName}: invalid predicate ${String(quad.predicate).slice(0, 100)}`);
+  if (typeof quad.object !== 'string') throw new Error(`${batchName}: quad object must be a string`);
+  if (Buffer.byteLength(quad.object) > 60_000) throw new Error(`${batchName}: literal/object exceeds 60KB at ${quad.subject} ${quad.predicate}`);
+  if (quad.object.startsWith('_:')) throw new Error(`${batchName}: blank-node objects are not supported`);
+  if (!quad.object.startsWith('"') && !/^[a-z][a-z0-9+.-]*:/i.test(quad.object)) throw new Error(`${batchName}: object is not an IRI or quoted literal: ${quad.object.slice(0, 100)}`);
+}
 
-async function main() {
+function loadAndValidateBatches() {
+  const manifestPath = join(batchDir, 'manifest.json');
+  if (!existsSync(manifestPath)) throw new Error(`batch manifest not found: ${manifestPath}; run chunk.mjs first`);
+  const manifestBytes = readFileSync(manifestPath);
+  const manifest = JSON.parse(manifestBytes.toString('utf8'));
+  if (manifest.version !== 1) throw new Error(`unsupported manifest version: ${manifest.version}`);
+  if (!manifest.complete) throw new Error('manifest is a partial/max-batches build; production publish requires the complete corpus');
+  if (manifest.includedRecords !== expectedRecords) throw new Error(`expected ${expectedRecords.toLocaleString()} records, manifest has ${Number(manifest.includedRecords).toLocaleString()}`);
+  if (manifest.batchCount !== manifest.batches?.length) throw new Error('manifest batchCount does not match batches list');
+  if (manifest.batchCount !== Math.ceil(expectedRecords / manifest.batchSize)) throw new Error('manifest batch count/size does not cover the expected corpus exactly');
+  const mappingHash = sha256(readFileSync(join(here, 'mapping.mjs')));
+  if (mappingHash !== manifest.mapping?.sha256) throw new Error('mapping.mjs changed since the batches were prepared; rebuild them before publishing');
+
+  const namesOnDisk = readdirSync(batchDir).filter((name) => name.endsWith('.json') && name !== 'manifest.json').sort();
+  const expectedFiles = manifest.batches.map((batch) => batch.file).sort();
+  if (JSON.stringify(namesOnDisk) !== JSON.stringify(expectedFiles)) throw new Error('batch directory contents do not exactly match manifest (stale/missing JSON files)');
+
+  const seenKeys = new Set();
+  const stats = [];
+  const selected = onlyBatch ? manifest.batches.filter((batch) => batch.name === onlyBatch) : manifest.batches;
+  if (onlyBatch && selected.length !== 1) throw new Error(`batch not found in manifest: ${onlyBatch}`);
+
+  for (let index = 0; index < manifest.batches.length; index += 1) {
+    const entry = manifest.batches[index];
+    const path = join(batchDir, entry.file);
+    const bytes = readFileSync(path);
+    if (statSync(path).size !== entry.bytes || sha256(bytes) !== entry.sha256) throw new Error(`${entry.name}: checksum/size differs from manifest`);
+    const parsed = JSON.parse(bytes.toString('utf8'));
+    if (parsed.name !== entry.name || !Array.isArray(parsed.records) || parsed.records.length !== entry.records) throw new Error(`${entry.name}: content does not match manifest metadata`);
+    for (const record of parsed.records) {
+      const key = recordKey(record);
+      if (seenKeys.has(key)) throw new Error(`${entry.name}: duplicate record key across batches: ${key}`);
+      seenKeys.add(key);
+    }
+    const quads = parsed.records.flatMap(recordQuads);
+    for (const quad of quads) validateQuad(entry.name, quad);
+    const payloadBytes = Buffer.byteLength(JSON.stringify(quads));
+    if (payloadBytes > 9_000_000) throw new Error(`${entry.name}: ${payloadBytes} byte payload exceeds the 9MB safety cap`);
+    stats.push({ name: entry.name, records: parsed.records.length, quads: quads.length, payloadBytes });
+    if ((index + 1) % 25 === 0 || index + 1 === manifest.batches.length) {
+      log(`validated ${index + 1}/${manifest.batches.length} batch files`);
+    }
+  }
+  if (!onlyBatch && seenKeys.size !== manifest.includedRecords) throw new Error('validated record-key count differs from manifest');
+  return { manifest, manifestSha256: sha256(manifestBytes), selected, stats };
+}
+
+function privatePolicy(policy) {
+  if (policy === 1) return true;
+  const normalized = String(policy ?? '').toLowerCase().replace(/[^a-z]/g, '');
+  return ['1', 'private', 'curated', 'owneronly', 'allowlist'].includes(normalized);
+}
+
+async function nodePreflight(manifestSha256) {
+  authToken = readToken();
   const status = await api('GET', '/api/status');
-  if (status.networkConfig !== NETWORK) {
-    throw new Error(`refusing: node at ${BASE} is "${status.name}" (${status.networkConfig}), expected ${NETWORK}`);
+  if (status.networkConfig !== network) throw new Error(`node network is ${status.networkConfig}, expected ${network}`);
+  if (status.version !== expectedVersion) throw new Error(`node DKG version is ${status.version ?? 'unknown'}, expected official npm ${expectedVersion}`);
+  const exists = await api('GET', `/api/context-graph/exists?id=${encodeURIComponent(contextGraphId)}`);
+  if (!exists.exists) throw new Error(`context graph does not exist: ${contextGraphId}; create and review it before publishing`);
+  const list = await api('GET', '/api/context-graph/list');
+  const graph = (list.contextGraphs ?? []).find((candidate) => [candidate.id, candidate.contextGraphId, candidate.uri, candidate.did].includes(contextGraphId));
+  if (!graph) throw new Error(`context graph ${contextGraphId} exists but is not visible to this token in /api/context-graph/list`);
+  if (!privatePolicy(graph.accessPolicy) && !graph.private && !graph.isPrivate) {
+    throw new Error(`context graph ${contextGraphId} is not verifiably private/curated (accessPolicy=${String(graph.accessPolicy)}); refusing to write corpus data`);
   }
-  console.log(`node OK: ${status.name} ${status.networkName} peers=${status.connectedPeers}`);
+  const wallets = await api('GET', '/api/wallets/balances');
+  if (wallets.error || !Array.isArray(wallets.balances) || wallets.balances.length === 0) {
+    throw new Error(`wallet balance preflight failed: ${wallets.error ?? 'no operational wallet balances returned'}`);
+  }
+  const publisherStats = await api('GET', '/api/publisher/stats');
+  log(`node OK: ${status.name} v${status.version} ${status.networkConfig}, peers=${status.connectedPeers ?? 'unknown'}`);
+  log(`private context graph OK: ${contextGraphId} (accessPolicy=${String(graph.accessPolicy ?? 'private flag')})`);
+  log(`wallet preflight: ${JSON.stringify(wallets).slice(0, 1000)}`);
+  log(`async publisher queue: ${JSON.stringify(publisherStats).slice(0, 1000)}`);
+  const confirmation = `${contextGraphId}:12:${manifestSha256.slice(0, 12)}`;
+  log(`paid confirmation token: ${confirmation}`);
+  return { status, graph, wallets, publisherStats, confirmation };
+}
 
-  const batchFiles = readdirSync(join(here, 'batches')).filter((f) => f.endsWith('.json')).sort()
-    .filter((f) => !only || f === `${only}.json`);
-  if (!batchFiles.length) throw new Error('no batch files — run chunk.mjs first');
+function loadRegistry(manifest, manifestSha256) {
+  const expectedMeta = {
+    version: 2,
+    contextGraphId,
+    network,
+    dkgVersion: expectedVersion,
+    epochs,
+    sourceSha256: manifest.source.sha256,
+    mappingSha256: manifest.mapping.sha256,
+    manifestSha256,
+    batchCount: manifest.batchCount,
+    recordCount: manifest.includedRecords,
+  };
+  if (!existsSync(registryPath)) return { meta: expectedMeta, createdAt: new Date().toISOString(), batches: {} };
+  const registry = JSON.parse(readFileSync(registryPath, 'utf8'));
+  for (const [key, value] of Object.entries(expectedMeta)) {
+    if (registry.meta?.[key] !== value) throw new Error(`registry belongs to a different run: meta.${key}=${JSON.stringify(registry.meta?.[key])}, expected ${JSON.stringify(value)}`);
+  }
+  registry.batches ??= {};
+  return registry;
+}
 
-  // Build + validate quads up front (cheap, catches mapping bugs before spending).
-  const prepared = [];
-  for (const f of batchFiles) {
-    const { name, records } = JSON.parse(readFileSync(join(here, 'batches', f), 'utf8'));
-    const quads = records.flatMap(recordQuads);
-    for (const q of quads) {
-      if (q.object.length > 60_000) throw new Error(`${name}: oversize literal on ${q.subject} ${q.predicate} (${q.object.length}B)`);
-      if (!q.object.startsWith('"') && !/^[a-z][a-z0-9+.-]*:/i.test(q.object)) throw new Error(`${name}: object not IRI/literal: ${q.object.slice(0, 80)}`);
+function saveRegistry(registry) {
+  registry.updatedAt = new Date().toISOString();
+  if (existsSync(registryPath)) copyFileSync(registryPath, `${registryPath}.bak`);
+  atomicJson(registryPath, registry);
+}
+
+function readBatch(entry) {
+  const parsed = JSON.parse(readFileSync(join(batchDir, entry.file), 'utf8'));
+  return { records: parsed.records, quads: parsed.records.flatMap(recordQuads) };
+}
+
+function quadSetHash(quads) {
+  return sha256([...quads].map((quad) => JSON.stringify(quad)).sort().join('\n'));
+}
+
+async function reconcileCreate(kaName, expectedQuads) {
+  const encoded = encodeURIComponent(kaName);
+  const query = `contextGraphId=${encodeURIComponent(contextGraphId)}`;
+  const [state, stored] = await Promise.all([
+    api('GET', `/api/knowledge-assets/${encoded}/wm?${query}`),
+    api('GET', `/api/knowledge-assets/${encoded}/wm/quads?${query}`, undefined, requestTimeoutMs),
+  ]);
+  if (!state.currentAssertion || !Array.isArray(stored.quads)) return false;
+  if (stored.quads.length !== expectedQuads.length || quadSetHash(stored.quads) !== quadSetHash(expectedQuads)) {
+    throw new Error(`${kaName}: existing WM assertion differs from the prepared batch; refusing to adopt it`);
+  }
+  log(`${kaName}: reconciled an earlier create request from node state (${stored.quads.length.toLocaleString()} matching quads)`);
+  return true;
+}
+
+async function pollShareJob(batchName, jobId) {
+  let readFailures = 0;
+  for (;;) {
+    let job;
+    try {
+      job = await api('GET', `/api/knowledge-assets/swm/share-jobs/${encodeURIComponent(jobId)}`);
+      readFailures = 0;
+    } catch (error) {
+      readFailures += 1;
+      if (readFailures > 20 || (error.status && error.status < 500)) throw error;
+      log(`[${batchName}] share-status read failed ${readFailures}/20; retrying without mutating: ${error.message}`);
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, pollMs));
+      continue;
     }
-    const bytes = JSON.stringify(quads).length;
-    console.log(`${name}: ${records.length} records -> ${quads.length} quads, ~${(bytes / 1e6).toFixed(2)} MB payload`);
-    if (bytes > 9_000_000) throw new Error(`${name}: payload exceeds the node's ~10MB request cap — use a smaller --size`);
-    prepared.push({ name, quads });
+    const state = job.state ?? job.status;
+    updateProgress({ phase: 'sharing', currentBatch: batchName, dkgJobId: jobId, dkgJobState: state });
+    log(`[${batchName}] share job ${jobId}: ${state}`);
+    if (['succeeded', 'success', 'completed', 'finalized'].includes(state)) return job;
+    if (['failed', 'cancelled'].includes(state)) throw new Error(`[${batchName}] share job ${jobId} ${state}: ${job.error ?? job.failure?.message ?? JSON.stringify(job).slice(0, 1000)}`);
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, pollMs));
   }
-  if (DRY) { console.log('dry-run: no writes performed'); return; }
+}
 
-  // Ensure the context graph exists (free, local; on-chain registration —
-  // and its ~100 TRAC deposit — happens automatically on the first mint).
-  const exists = await api('GET', `/api/context-graph/exists?id=${encodeURIComponent(CG_ID)}`).catch(() => null);
-  if (exists?.exists) {
-    ledger.cg = CG_ID;
-  } else if (!ledger.cg) {
-    const created = await api('POST', '/api/context-graph/create', { id: CG_ID, name: CG_NAME, description: `${CG_NAME} — batched knowledge-collection publishing.` });
-    ledger.cg = created.id ?? CG_ID;
-    console.log('created CG:', JSON.stringify(created).slice(0, 200));
-  }
-  saveLedger();
-  console.log('context graph:', ledger.cg);
-
-  for (const { name, quads } of prepared) {
-    const rec = (ledger.batches[name] ??= {});
-    const kaName = `${KA_PREFIX}-${name}`;
-
-    if (rec.txHash) { console.log(`[${name}] already published: ${rec.ual}`); continue; }
-
-    if (!rec.sealed) {
-      console.log(`[${name}] create+seal+share KA "${kaName}" (${quads.length} quads)...`);
-      const r = await api('POST', '/api/knowledge-assets', {
-        contextGraphId: ledger.cg, name: kaName, quads, finalize: true, alsoShareSwm: true,
-      }, 600_000);
-      if (Array.isArray(r.errors) && r.errors.length) throw new Error(`[${name}] phase errors: ${JSON.stringify(r.errors).slice(0, 500)}`);
-      rec.sealed = true;
-      saveLedger();
-      console.log(`[${name}] sealed + shared`);
+async function pollPublishJob(batchName, jobId) {
+  let readFailures = 0;
+  for (;;) {
+    let response;
+    try {
+      response = await api('GET', `/api/publisher/job?id=${encodeURIComponent(jobId)}`);
+      readFailures = 0;
+    } catch (error) {
+      readFailures += 1;
+      if (readFailures > 20 || (error.status && error.status < 500)) throw error;
+      log(`[${batchName}] publish-status read failed ${readFailures}/20; retrying without mutating: ${error.message}`);
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, pollMs));
+      continue;
     }
+    const job = response.job ?? response;
+    const state = job.status ?? job.state;
+    updateProgress({ phase: 'publishing', currentBatch: batchName, dkgJobId: jobId, dkgJobState: state });
+    log(`[${batchName}] publish job ${jobId}: ${state}`);
+    if (state === 'finalized') return job;
+    if (state === 'failed') throw new Error(`[${batchName}] publish job ${jobId} failed: ${job.failure?.message ?? job.error ?? JSON.stringify(job.failure ?? job).slice(0, 1500)}`);
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, pollMs));
+  }
+}
 
-    console.log(`[${name}] PAID vm/publish (epochs=${EPOCHS}) — one on-chain tx...`);
-    let r;
-    for (let attempt = 1; ; attempt++) {
-      try {
-        r = await api('POST', `/api/knowledge-assets/${encodeURIComponent(kaName)}/vm/publish`, {
-          contextGraphId: ledger.cg, options: { publishEpochs: EPOCHS },
-        }, 600_000);
-        break;
-      } catch (e) {
-        // "not a complete full share" after a node restart → discard + reseal.
-        if (/not a complete full share/i.test(e.message)) {
-          console.log(`[${name}] stale SWM share — discarding + resealing...`);
-          await api('POST', `/api/knowledge-assets/${encodeURIComponent(kaName)}/wm/discard`, { contextGraphId: ledger.cg }, 120_000).catch(() => {});
-          rec.sealed = false; saveLedger();
-          const rr = await api('POST', '/api/knowledge-assets', {
-            contextGraphId: ledger.cg, name: kaName, quads, finalize: true, alsoShareSwm: true,
-          }, 600_000);
-          if (Array.isArray(rr.errors) && rr.errors.length) throw new Error(`[${name}] reseal phase errors: ${JSON.stringify(rr.errors).slice(0, 500)}`);
-          rec.sealed = true; saveLedger();
-          continue;
+function recordFinalized(rec, job) {
+  const finalization = job.finalization ?? {};
+  const inclusion = job.inclusion ?? {};
+  const broadcast = job.broadcast ?? {};
+  const txHash = finalization.txHash ?? inclusion.txHash ?? broadcast.txHash;
+  if (!txHash && finalization.mode !== 'local' && finalization.mode !== 'noop') throw new Error('finalized DKG job has no transaction hash');
+  Object.assign(rec, {
+    status: 'finalized',
+    publishJobState: 'finalized',
+    txHash: txHash ?? null,
+    ual: finalization.ual ?? null,
+    blockNumber: inclusion.blockNumber ?? null,
+    finalizedAt: new Date().toISOString(),
+    dkgFinalizationMode: finalization.mode ?? null,
+  });
+}
+
+async function publishAll(validated, preflight) {
+  const suppliedConfirmation = option('confirm', '');
+  if (suppliedConfirmation !== preflight.confirmation) throw new Error(`paid confirmation mismatch; rerun --preflight and pass --confirm ${preflight.confirmation}`);
+  lockFd = openSync(lockPath, 'wx');
+  writeFileSync(lockFd, `${JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString(), contextGraphId })}\n`);
+
+  const registry = loadRegistry(validated.manifest, validated.manifestSha256);
+  saveRegistry(registry);
+  const entries = onlyBatch ? validated.selected : validated.manifest.batches;
+  let completed = Object.values(registry.batches).filter((record) => record.status === 'finalized').length;
+  let processedThisRun = 0;
+  updateProgress({
+    status: 'running', phase: 'starting', startedAt: new Date(startedAt).toISOString(),
+    contextGraphId, epochs, totalBatches: validated.manifest.batchCount,
+    completedBatches: completed, totalRecords: validated.manifest.includedRecords,
+  });
+
+  for (const entry of entries) {
+    const batchStartedAt = Date.now();
+    const rec = (registry.batches[entry.name] ??= { checksum: entry.sha256, records: entry.records, epochs, status: 'pending' });
+    if (rec.checksum !== entry.sha256) throw new Error(`${entry.name}: registry checksum differs from manifest`);
+    if (rec.status === 'finalized' && (rec.txHash || rec.dkgFinalizationMode === 'noop')) {
+      log(`[${entry.name}] already finalized: ${rec.txHash ?? rec.dkgFinalizationMode}`);
+      continue;
+    }
+    const kaName = `${kaPrefix}-${entry.name}`;
+    updateProgress({ phase: 'loading', currentBatch: entry.name, currentKa: kaName, completedBatches: completed });
+    const { quads } = readBatch(entry);
+
+    if (!rec.sealedAt) {
+      let reconciled = false;
+      if (rec.createStartedAt) {
+        reconciled = await reconcileCreate(kaName, quads).catch((error) => {
+          if (error.status === 404) return false;
+          throw error;
+        });
+        if (!reconciled) throw new Error(`[${entry.name}] prior create request is not present as a complete sealed WM assertion; inspect ${kaName} before retrying`);
+      }
+      if (!reconciled) {
+        rec.createStartedAt = new Date().toISOString();
+        rec.status = 'creating';
+        saveRegistry(registry);
+        log(`[${entry.name}] creating and sealing ${kaName} (${quads.length.toLocaleString()} quads)`);
+        try {
+          const created = await api('POST', '/api/knowledge-assets', {
+            contextGraphId, name: kaName, quads, finalize: true, alsoShareSwm: false,
+          }, requestTimeoutMs);
+          if (Array.isArray(created.errors) && created.errors.length > 0) throw new Error(`create phase errors: ${JSON.stringify(created.errors).slice(0, 1500)}`);
+          rec.assertionUri = created.assertionUri ?? null;
+        } catch (error) {
+          const adopt = (error.code === 'CLIENT_TIMEOUT' || error.status === 409)
+            ? await reconcileCreate(kaName, quads).catch(() => false)
+            : false;
+          if (!adopt) {
+            rec.lastError = { at: new Date().toISOString(), phase: 'create', message: error.message, code: error.code ?? null };
+            saveRegistry(registry);
+            throw error;
+          }
         }
-        const transient = /access-policy is unknown|timed out|timeout|fetch failed/i.test(e.message);
-        if (!transient || attempt >= ATTEMPTS) throw e;
-        console.log(`[${name}] transient pre-flight failure (attempt ${attempt}/${ATTEMPTS}), retrying in 15s: ${e.message.slice(0, 120)}`);
-        await new Promise((res) => setTimeout(res, 15_000));
+      }
+      try {
+        rec.sealedAt = new Date().toISOString();
+        rec.status = 'sealed';
+        saveRegistry(registry);
+      } catch (error) {
+        rec.lastError = { at: new Date().toISOString(), phase: 'create', message: error.message, code: error.code ?? null };
+        saveRegistry(registry);
+        throw error;
       }
     }
-    Object.assign(rec, { kaId: r.kaId, ual: r.ual, txHash: r.txHash, blockNumber: r.blockNumber, status: r.status, epochs: EPOCHS });
-    saveLedger();
-    console.log(`[${name}] MINTED ual=${r.ual} tx=${r.txHash} block=${r.blockNumber} status=${r.status}`);
+
+    if (!rec.sharedAt) {
+      if (!rec.shareJobId) {
+        log(`[${entry.name}] enqueueing persistent SWM share job`);
+        try {
+          const queued = await api('POST', `/api/knowledge-assets/${encodeURIComponent(kaName)}/swm/share-async`, { contextGraphId });
+          rec.shareJobId = queued.jobId;
+          rec.status = 'sharing';
+          saveRegistry(registry);
+        } catch (error) {
+          if (error.status === 409 && error.body?.existingJobId) {
+            rec.shareJobId = error.body.existingJobId;
+            saveRegistry(registry);
+          } else throw error;
+        }
+      }
+      try {
+        await pollShareJob(entry.name, rec.shareJobId);
+        rec.sharedAt = new Date().toISOString();
+        rec.status = 'shared';
+        saveRegistry(registry);
+      } catch (error) {
+        rec.lastError = { at: new Date().toISOString(), phase: 'share', message: error.message, code: error.code ?? null };
+        rec.status = 'error';
+        saveRegistry(registry);
+        throw error;
+      }
+    }
+
+    if (!rec.publishJobId) {
+      log(`[${entry.name}] enqueueing PAID VM publish for ${epochs} epochs`);
+      try {
+        const queued = await api('POST', `/api/knowledge-assets/${encodeURIComponent(kaName)}/vm/publish-async`, {
+          contextGraphId, options: { publishEpochs: epochs },
+        });
+        rec.publishJobId = queued.jobId;
+        rec.status = 'publishing';
+        rec.publishEnqueuedAt = new Date().toISOString();
+        saveRegistry(registry);
+      } catch (error) {
+        if (error.status === 409 && error.body?.existingJobId) {
+          rec.publishJobId = error.body.existingJobId;
+          saveRegistry(registry);
+        } else throw error;
+      }
+    }
+
+    try {
+      const job = await pollPublishJob(entry.name, rec.publishJobId);
+      recordFinalized(rec, job);
+      rec.durationSeconds = Math.round((Date.now() - batchStartedAt) / 1000);
+      saveRegistry(registry);
+      completed += 1;
+      processedThisRun += 1;
+      const elapsed = Date.now() - startedAt;
+      const averageMs = elapsed / processedThisRun;
+      const remaining = Math.max(0, validated.manifest.batchCount - completed);
+      updateProgress({
+        phase: 'batch-complete', currentBatch: entry.name, completedBatches: completed,
+        percent: Number(((completed / validated.manifest.batchCount) * 100).toFixed(2)),
+        estimatedRemainingSeconds: Math.round((averageMs * remaining) / 1000),
+        lastTxHash: rec.txHash, lastUal: rec.ual,
+      });
+      log(`[${entry.name}] finalized tx=${rec.txHash ?? rec.dkgFinalizationMode} block=${rec.blockNumber ?? 'n/a'}; ${completed}/${validated.manifest.batchCount} complete`);
+    } catch (error) {
+      rec.lastError = { at: new Date().toISOString(), phase: 'publish', message: error.message, code: error.code ?? null };
+      rec.status = 'error';
+      saveRegistry(registry);
+      throw error;
+    }
   }
 
-  console.log('\nDone. Ledger:', LEDGER);
+  updateProgress({ status: 'complete', phase: 'complete', completedAt: new Date().toISOString(), completedBatches: completed });
+  log(`complete: registry=${registryPath}`);
 }
 
-main().catch((e) => { console.error('FATAL:', e.message); process.exit(1); });
+function releaseLock() {
+  if (lockFd !== undefined) {
+    try { closeSync(lockFd); } catch {}
+    lockFd = undefined;
+    try { unlinkSync(lockPath); } catch {}
+  }
+}
+
+for (const signal of ['SIGINT', 'SIGTERM']) {
+  process.on(signal, () => {
+    try { updateProgress({ status: 'stopped', phase: 'signal', signal }); } catch {}
+    releaseLock();
+    process.exit(128 + (signal === 'SIGINT' ? 2 : 15));
+  });
+}
+
+async function main() {
+  assertConfig();
+  updateProgress({ status: 'validating', phase: 'local-validation', mode });
+  const validated = loadAndValidateBatches();
+  const totalQuads = validated.stats.reduce((sum, batch) => sum + batch.quads, 0);
+  const totalPayloadBytes = validated.stats.reduce((sum, batch) => sum + batch.payloadBytes, 0);
+  log(`local validation OK: ${validated.manifest.includedRecords.toLocaleString()} records, ${validated.manifest.batchCount} batches, ${totalQuads.toLocaleString()} quads, ${(totalPayloadBytes / 1e9).toFixed(2)} GB JSON payload`);
+  if (mode === 'dry-run') {
+    updateProgress({ status: 'validated', phase: 'dry-run-complete', validatedBatches: validated.stats.length });
+    log('dry-run complete: no node calls and no writes');
+    return;
+  }
+  updateProgress({ status: 'preflighting', phase: 'node-preflight' });
+  const preflight = await nodePreflight(validated.manifestSha256);
+  if (mode === 'preflight') {
+    updateProgress({ status: 'ready', phase: 'preflight-complete', confirmationToken: preflight.confirmation });
+    log('preflight complete: no node writes and no paid transactions');
+    return;
+  }
+  await publishAll(validated, preflight);
+}
+
+main().catch((error) => {
+  try { updateProgress({ status: 'error', phase: progress.phase ?? 'unknown', error: error?.message ?? String(error), failedAt: new Date().toISOString() }); } catch {}
+  releaseLock();
+  console.error(`[${new Date().toISOString()}] FATAL: ${error?.stack ?? error}`);
+  usage();
+  process.exit(1);
+}).finally(releaseLock);

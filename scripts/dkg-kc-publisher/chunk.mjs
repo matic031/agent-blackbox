@@ -1,58 +1,147 @@
 #!/usr/bin/env node
 /**
- * Chunker — slice a source file into deterministic N-record batch files under
- * batches/, deduplicated globally by recordKey() so no rootEntity ever repeats
- * across collections (the publish validator rejects that).
- *
- * Usage:
- *   node chunk.mjs <source.json> [--size 1000] [--max-batches 0]
- *
- * Re-running with the same source produces identical batches, so it composes
- * with the publisher's resumable ledger.
+ * Deterministically split a source bundle into globally-deduplicated batches.
+ * Output is built in a staging directory and swapped into place only after the
+ * complete manifest has been written, so a failed rebuild cannot leave a mix
+ * of old and new collections.
  */
-import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
-import { join, dirname } from 'node:path';
+import { createHash } from 'node:crypto';
+import {
+  mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync,
+} from 'node:fs';
+import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { recordKey, extractRecords } from './mapping.mjs';
+import { extractRecords, recordKey } from './mapping.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const argv = process.argv.slice(2);
-const src = argv.find((a) => !a.startsWith('--'));
-const flag = (name, dflt) => {
-  const i = argv.indexOf(`--${name}`);
-  return i >= 0 ? Number(argv[i + 1]) : dflt;
-};
-const SIZE = flag('size', 1000);
-const MAX = flag('max-batches', 0); // 0 = all
+const positional = argv.filter((value, index) => !value.startsWith('--') && (index === 0 || !argv[index - 1].startsWith('--')));
+const sourceArg = positional[0];
 
-if (!src) { console.error('usage: node chunk.mjs <source.json> [--size 1000] [--max-batches 0]'); process.exit(1); }
-
-console.log('reading', src, '...');
-const records = extractRecords(JSON.parse(readFileSync(src, 'utf8')));
-console.log(`source: ${records.length} records`);
-
-const outDir = join(here, 'batches');
-mkdirSync(outDir, { recursive: true });
-
-const seen = new Set();
-let batch = [], n = 0, dupes = 0;
-const flush = () => {
-  if (!batch.length) return false;
-  n += 1;
-  const name = `batch-${String(n).padStart(3, '0')}`;
-  writeFileSync(join(outDir, `${name}.json`), JSON.stringify({ name, records: batch }));
-  console.log(`${name}: ${batch.length} records`);
-  batch = [];
-  return MAX > 0 && n >= MAX;
-};
-
-for (const r of records) {
-  const k = recordKey(r);
-  if (seen.has(k)) { dupes += 1; continue; }
-  seen.add(k);
-  batch.push(r);
-  if (batch.length === SIZE && flush()) break;
+function option(name, fallback) {
+  const index = argv.indexOf(`--${name}`);
+  return index === -1 ? fallback : argv[index + 1];
 }
-if (!(MAX > 0 && n >= MAX)) flush(); // trailing partial batch
 
-console.log(`done: ${n} batches, ${seen.size} unique records, ${dupes} duplicates skipped`);
+function positiveInteger(name, value, { allowZero = false } = {}) {
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < (allowZero ? 0 : 1)) {
+    throw new Error(`--${name} must be ${allowZero ? 'a non-negative' : 'a positive'} integer; got ${value}`);
+  }
+  return parsed;
+}
+
+function sha256(data) {
+  return createHash('sha256').update(data).digest('hex');
+}
+
+if (!sourceArg) {
+  console.error('usage: node chunk.mjs <source.json> [--size 1000] [--max-batches 0] [--expect-records 460000] [--out-dir batches]');
+  process.exit(1);
+}
+
+const source = resolve(sourceArg);
+const size = positiveInteger('size', option('size', '1000'));
+const maxBatches = positiveInteger('max-batches', option('max-batches', '0'), { allowZero: true });
+const expectedRecordsRaw = option('expect-records', undefined);
+const expectedRecords = expectedRecordsRaw === undefined ? undefined : positiveInteger('expect-records', expectedRecordsRaw);
+const outDir = resolve(option('out-dir', join(here, 'batches')));
+const stagingDir = `${outDir}.staging-${process.pid}`;
+const backupDir = `${outDir}.backup-${process.pid}`;
+
+rmSync(stagingDir, { recursive: true, force: true });
+rmSync(backupDir, { recursive: true, force: true });
+mkdirSync(stagingDir, { recursive: true });
+
+try {
+  console.log(`[prepare] reading ${source}`);
+  const sourceBytes = readFileSync(source);
+  const records = extractRecords(JSON.parse(sourceBytes.toString('utf8')));
+  if (!Array.isArray(records)) throw new Error('mapping.extractRecords() must return an array');
+  console.log(`[prepare] source records: ${records.length.toLocaleString()}`);
+
+  const seen = new Set();
+  const batches = [];
+  let batchRecords = [];
+  let duplicateRecords = 0;
+
+  const flush = () => {
+    if (batchRecords.length === 0) return false;
+    const number = batches.length + 1;
+    const name = `batch-${String(number).padStart(3, '0')}`;
+    const file = `${name}.json`;
+    const body = JSON.stringify({ name, records: batchRecords });
+    writeFileSync(join(stagingDir, file), body);
+    batches.push({ name, file, records: batchRecords.length, bytes: Buffer.byteLength(body), sha256: sha256(body) });
+    console.log(`[prepare] ${name}: ${batchRecords.length.toLocaleString()} records`);
+    batchRecords = [];
+    return maxBatches > 0 && batches.length >= maxBatches;
+  };
+
+  for (const record of records) {
+    const key = recordKey(record);
+    if (typeof key !== 'string' || key.length === 0) throw new Error('mapping.recordKey() returned an empty/non-string key');
+    if (seen.has(key)) {
+      duplicateRecords += 1;
+      continue;
+    }
+    seen.add(key);
+    batchRecords.push(record);
+    if (batchRecords.length === size && flush()) break;
+  }
+  if (!(maxBatches > 0 && batches.length >= maxBatches)) flush();
+
+  const includedRecords = batches.reduce((sum, batch) => sum + batch.records, 0);
+  const complete = maxBatches === 0 || includedRecords === seen.size;
+  if (expectedRecords !== undefined && includedRecords !== expectedRecords) {
+    throw new Error(`record-count contract failed: expected ${expectedRecords.toLocaleString()}, prepared ${includedRecords.toLocaleString()}`);
+  }
+
+  const mappingPath = join(here, 'mapping.mjs');
+  const manifest = {
+    version: 1,
+    createdAt: new Date().toISOString(),
+    source: {
+      file: basename(source),
+      bytes: statSync(source).size,
+      sha256: sha256(sourceBytes),
+      records: records.length,
+    },
+    mapping: { file: 'mapping.mjs', sha256: sha256(readFileSync(mappingPath)) },
+    batchSize: size,
+    maxBatches,
+    complete,
+    uniqueRecords: seen.size,
+    includedRecords,
+    duplicateRecords,
+    batchCount: batches.length,
+    batches,
+  };
+  writeFileSync(join(stagingDir, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`);
+
+  let movedOld = false;
+  try {
+    try {
+      renameSync(outDir, backupDir);
+      movedOld = true;
+    } catch (error) {
+      if (error?.code !== 'ENOENT') throw error;
+    }
+    renameSync(stagingDir, outDir);
+    if (movedOld) rmSync(backupDir, { recursive: true, force: true });
+  } catch (error) {
+    if (movedOld) {
+      rmSync(outDir, { recursive: true, force: true });
+      renameSync(backupDir, outDir);
+    }
+    throw error;
+  }
+
+  console.log(`[prepare] done: ${batches.length} batches, ${includedRecords.toLocaleString()} records, ${duplicateRecords.toLocaleString()} duplicates`);
+  console.log(`[prepare] manifest: ${join(outDir, 'manifest.json')}`);
+} catch (error) {
+  rmSync(stagingDir, { recursive: true, force: true });
+  rmSync(backupDir, { recursive: true, force: true });
+  console.error(`[prepare] FATAL: ${error?.stack ?? error}`);
+  process.exit(1);
+}

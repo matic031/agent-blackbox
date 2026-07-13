@@ -1,134 +1,327 @@
-# DKG Knowledge-Collection Publisher
+# Blackbox DKG publishing runbook
 
-Publish large datasets to the OriginTrail DKG (V10, Base mainnet) as **batched
-knowledge collections** — one on-chain transaction per ~1,000 records instead
-of one per record. Every record still becomes an individually-addressable,
-SPARQL-queryable knowledge asset inside its collection.
+This directory prepares and publishes the Blackbox threat corpus as batched
+DKG V10 knowledge collections. It is designed for a long, restartable Base
+mainnet run on the curator node: one paid VM transaction per approximately
+1,000 signals, always for **12 epochs**.
 
-**Why batch:** on-chain gas is per *transaction*; TRAC is per *byte × epoch*.
-Batching collapses the gas side ~1,000× while leaving the TRAC side unchanged.
-Measured on Base mainnet (July 2026), per 1,000-record collection (~2 MB
-payload, ~12k triples):
+The production corpus currently expected by the scripts is:
 
-| Cost | Amount |
-|---|---|
-| Gas (mint tx) | ~0.25–1M gas ≈ **$0.00001–0.0001** |
-| TRAC (1 epoch = 30 days) | **~1.1 TRAC** (0.0008 TRAC/KB/epoch network price) |
-| One-time CG registration | **~100 TRAC** deposit (RFC-53), charged at first mint |
+| Item | Contract |
+|---|---:|
+| Source file | `prod-threats-400k.json` |
+| Source SHA-256 | `8d46bd868166de5f09d5952e71c350217326750ff1bce4f93d97c90862e07a8c` |
+| Signals | **460,000** |
+| Batch size | **1,000** |
+| Collections / paid transactions | **460** |
+| Lifetime | **12 epochs** |
 
-A 460k-record dataset ≈ 460 transactions ≈ **<$1 of ETH + ~510 TRAC per epoch**.
-Per-record minting of the same dataset would be ~$5,000–14,000 of gas.
+The local source file and generated `batches/` are intentionally ignored by
+Git. They contain the corpus and must be copied to the node separately from
+the branch.
 
-## Prerequisites
+## Safety model
 
-- A **DKG V10 edge node** on Base mainnet (`dkg start`, API on :9200), with
-  its auth token readable (default `~/.dkg-mainnet/auth.token`).
-- Node ≥ 20 (scripts use built-in `fetch`; no npm dependencies).
-- **Funding — two wallets, and this will bite you if you skip it:**
-  - The node's *operational wallet 0* pays the one-time ~100 TRAC CG
-    registration deposit.
-  - The mint itself is signed by the CG's **on-chain authorized publisher
-    wallet** — often a *different* operational wallet of the node (check
-    `wallets.json`, and the daemon log line `Signing on-chain publish
-    (… signer=0x…)`). That wallet needs a small ETH float (~0.001) and enough
-    TRAC for the publish costs. "insufficient funds … have 0" on mint = this.
+`run.mjs` is the only entrypoint needed for the production workflow. It:
 
-## Quick start
+- builds batches in a staging directory and replaces the old set only after a
+  complete build succeeds;
+- deduplicates every record globally and writes a SHA-256 manifest for the
+  source, mapping, and every collection;
+- validates all 460 files and all mapped RDF before any node write;
+- requires the node to report `@origintrail-official/dkg` **10.0.5** on
+  `mainnet-base`;
+- requires the target context graph to already exist and be verifiably
+  curated/private;
+- enforces exactly 12 epochs and requires a manifest-bound confirmation token
+  before any paid work;
+- uses the DKG's persistent async SWM-share and VM-publish queues, recording
+  every DKG job ID and transaction in `registry.json`;
+- publishes one collection at a time, polls it to a terminal state, and stops
+  on the first error instead of stacking retries against Blazegraph;
+- writes live state to `progress.json` and a timestamped durable log.
+
+The script never creates or registers a context graph. That is intentional: CG
+creation sets access, publishing and PCA policy and can charge the one-time
+registration deposit. We will make that CG together after curator access is
+available.
+
+Run the self-contained integration smoke test after transferring/updating the
+scripts. It uses a temporary corpus and local mock node; it performs no network
+or paid operation:
 
 ```bash
-# 1. Adapt mapping.mjs to your data (recordKey / recordQuads / extractRecords).
-
-# 2. Slice the source into deduplicated batches (default 1000 records each):
-node chunk.mjs path/to/your-data.json --size 1000
-
-# 3. Validate everything without spending:
-KC_CG_ID=my-dataset node publish.mjs --dry-run
-
-# 4. Publish (creates the CG if needed, then one PAID tx per batch):
-KC_CG_ID=my-dataset KC_CG_NAME="My Dataset" KC_EPOCHS=12 node publish.mjs
-
-# Or one batch at a time:
-KC_CG_ID=my-dataset node publish.mjs --batch batch-001
+node test.mjs
 ```
 
-`registry.json` is the resumable ledger — a batch with a `txHash` is never
-re-paid; kill/re-run is always safe. Verify content afterwards:
+## Privacy and encryption
+
+Official DKG npm 10.0.5 supports curated/private context graphs with X25519
+workspace keys and AEAD-encrypted SWM distribution to allowed agents. The
+production preflight therefore refuses a graph unless its `accessPolicy` is
+private/curated (`1`, `ownerOnly`, or `allowList`). See the official package's
+[`dkg-node` guide](https://www.npmjs.com/package/@origintrail-official/dkg?activeTab=readme)
+for private context graphs, encryption-key rotation, and async publishing.
+
+Important distinctions:
+
+- use `accessPolicy: 1` for an on-chain curated/private graph;
+- do **not** use CLI `--private` for this job: that creates a local-only graph
+  which cannot be published to VM;
+- all allowed agents must have valid workspace encryption keys;
+- private access is not a substitute for reviewing the source. Never publish
+  secrets, credentials, personal data, or other sensitive plaintext merely
+  because the graph is private;
+- the script sends normal `quads` through the named-KA lifecycle. The DKG node,
+  not this script, performs the private-CG encryption and member fan-out. Do not
+  add ad-hoc client-side encryption to RDF literals.
+
+## Prerequisites on the curator node
+
+- Linux/macOS shell and Node.js 20 or newer.
+- Official DKG installed as `@origintrail-official/dkg@10.0.5`, running on
+  port 9200 with Blazegraph configured.
+- Node admin token readable at `~/.dkg-mainnet/auth.token`, or set
+  `DKG_AUTH_TOKEN_PATH`.
+- The final curated/private CG already created and visible to this token.
+- Wallet funding:
+  - the registration wallet needs the one-time approximately 100 TRAC deposit;
+  - the async publisher wallet needs native ETH gas and either direct-spend
+    TRAC or valid PCA agent registration/funding;
+  - budget approximately **6,100 TRAC** for 460,000 signals at 12 epochs, plus
+    margin. The observed estimate is 1.1 TRAC per 1,000-signal collection per
+    epoch. Confirm live pricing and balances before the paid run.
+- At least 2 GB free disk for source, batches, Blazegraph growth, logs and
+  temporary preparation files. More headroom is strongly recommended.
+
+Check the node itself before starting:
 
 ```bash
+dkg --version
+dkg doctor
+dkg publisher wallets
+dkg publisher stats
+```
+
+## 1. Transfer the corpus
+
+Either copy `catalogs/prod-threats-400k.json` to the curator node and prepare
+there, or prepare locally and copy the generated `batches/` directory. The
+first approach is easiest to audit:
+
+```bash
+rsync -avP catalogs/prod-threats-400k.json \
+  curator:/absolute/private/path/prod-threats-400k.json
+```
+
+The already-prepared local collection set is about 169 MB and can instead be
+copied directly into the same checkout on the curator node:
+
+```bash
+rsync -avP scripts/dkg-kc-publisher/batches/ \
+  curator:/absolute/path/agent-guardian/scripts/dkg-kc-publisher/batches/
+```
+
+Do not place the auth token, wallet files, or corpus in Git.
+
+## 2. Prepare all 460 collections (no node calls, no cost)
+
+From this directory on the curator node:
+
+```bash
+node run.mjs prepare --source /absolute/private/path/prod-threats-400k.json
+```
+
+This rebuilds `batches/`, writes `batches/manifest.json`, then maps and
+validates the complete corpus. It uses a 4 GB Node heap by default. Expected
+result:
+
+```text
+done: 460 batches, 460,000 records, 0 duplicates
+local validation OK: 460,000 records, 460 batches, ... quads
+dry-run complete: no node calls and no writes
+```
+
+Verify the source fingerprint:
+
+```bash
+sha256sum /absolute/private/path/prod-threats-400k.json
+# macOS: shasum -a 256 /absolute/private/path/prod-threats-400k.json
+```
+
+It must equal the SHA-256 at the top of this runbook.
+
+## 3. Create the private CG together
+
+Do not guess these values. Once curator access is available, decide and record:
+
+1. immutable CG slug/ID;
+2. human-readable name;
+3. description;
+4. creator and every allowed agent address;
+5. `accessPolicy: 1` (curated/private);
+6. publish policy (normally curated);
+7. PCA account ID, if PCA will fund the 12-epoch publishes;
+8. publisher node identity attribution (`0` means no attribution);
+9. which operational/async publisher wallets will be funded.
+
+The basic two-phase CLI shape is:
+
+```bash
+dkg context-graph create <slug> \
+  --name "<name>" \
+  --description "<description>" \
+  --access-policy 1 \
+  --allowed-agent <0x-agent-address>
+
+dkg context-graph register <full-context-graph-id> \
+  --access-policy 1 \
+  --publish-policy 0 \
+  --pca-account-id <pca-id>
+```
+
+The bare slug may be expanded to `<creator-agent-address>/<slug>`; copy the
+exact full ID printed by the create command. Registration is paid. Review the
+command and wallet balances before running it.
+
+## 4. Read-only production preflight
+
+Set the exact full CG ID and run:
+
+```bash
+export KC_CG_ID='<full-context-graph-id>'
+export KC_EPOCHS=12
+
+node run.mjs preflight
+```
+
+Preflight repeats the complete local validation, checks node version/network,
+verifies that this token can see a private CG, prints wallet balances, and
+prints a paid confirmation token like:
+
+```text
+<full-context-graph-id>:12:<manifest-hash-prefix>
+```
+
+Do not proceed if the wallet output is unclear, the graph policy is not
+private, or the node is not official npm 10.0.5.
+
+## 5. Smoke-test one paid collection
+
+First publish only the first collection:
+
+```bash
+node run.mjs publish \
+  --batch batch-001 \
+  --confirm '<exact-token-from-preflight>'
+```
+
+Then verify it before continuing:
+
+```bash
+node run.mjs status
+dkg publisher jobs
+
 curl -s -X POST http://127.0.0.1:9200/api/query \
-  -H "authorization: Bearer $(head -1 ~/.dkg-mainnet/auth.token)" \
+  -H "authorization: Bearer $(grep -v '^#' ~/.dkg-mainnet/auth.token | head -1)" \
   -H 'content-type: application/json' \
-  -d '{"contextGraphId":"my-dataset","sparql":"SELECT (COUNT(DISTINCT ?s) AS ?n) WHERE { ?s ?p ?o }"}'
+  -d '{"contextGraphId":"<full-context-graph-id>","sparql":"SELECT (COUNT(DISTINCT ?s) AS ?n) WHERE { ?s ?p ?o }"}'
 ```
 
-## Configuration
+Confirm encryption/private access from a non-member as well as an allowed
+member, then run Agent Guardian sync and verify Source, Contributor and
+references in the product UI. Only continue after this smoke test passes.
 
-| Env | Default | Meaning |
-|---|---|---|
-| `DKG_ENDPOINT` / `DKG_PORT` | `http://127.0.0.1` / `9200` | node API |
-| `DKG_AUTH_TOKEN_PATH` | `~/.dkg-mainnet/auth.token` | Bearer token file |
-| `KC_NETWORK` | `mainnet-base` | expected `networkConfig`; publisher refuses any other node |
-| `KC_CG_ID` / `KC_CG_NAME` | `my-collection` | context graph id / display name |
-| `KC_EPOCHS` | `1` | storage epochs (30 days each) — TRAC scales linearly; extend later via `extendKnowledgeAssetLifetime` |
-| `KC_ATTEMPTS` | `3` | max mint attempts per batch (see "store overload" below) |
+## 6. Run all remaining collections unattended
 
-## Sizing
+Use `nohup` or a terminal multiplexer. The script automatically skips the
+finalized first batch and continues from `registry.json`:
 
-~1,000 records ≈ 12k triples ≈ 2 MB request payload. The node caps request
-bodies around 10 MB, and the publisher refuses payloads >9 MB — if your
-records are fat, lower `--size`. TRAC cost = `0.0008 × payloadKB × epochs`
-(read the live price from AskStorage via the Hub if you want it exact).
+```bash
+nohup node run.mjs publish \
+  --confirm '<exact-token-from-preflight>' \
+  > blackbox-publish-console.log 2>&1 &
 
-## Operational gotchas (each of these cost us real debugging time)
+echo $! > blackbox-publish.pid
+tail -f blackbox-publish-console.log
+```
 
-1. **Public Base RPCs throttle the node.** The node's chain reads race a
-   hard-coded 2.5 s timeout; `mainnet.base.org` can take 60 s under burst,
-   drpc 429s. Symptom: mint refused with `LU-5/LU-11: publish access-policy
-   is unknown`. Fix: run the bundled caching proxy and point the node at it —
-   ```bash
-   node rpc-proxy.mjs &          # listens on 127.0.0.1:8547
-   # ~/.dkg-mainnet/config.json → "chain": {"rpcUrl": "http://127.0.0.1:8547", "rpcUrls": ["http://127.0.0.1:8547"]}
-   dkg stop && dkg start
-   ```
-   The proxy caches read-only calls (15 s TTL), dedupes concurrent identical
-   reads, rotates upstreams on 429, and never caches nonces/tx submission.
+In another shell:
 
-2. **Do not hammer mint retries when the node's store is busy.** The mint
-   internally runs a large CONSTRUCT ("lift") against the node's Oxigraph
-   store with a 30 s client timeout — but an aborted query keeps running
-   server-side. Rapid retries stack queries until Oxigraph pegs every core
-   for half an hour. If mints keep timing out: **restart the daemon (fresh
-   store queue) and mint immediately**, one attempt at a time
-   (`KC_ATTEMPTS=1`). On a node without other heavy content this rarely
-   triggers at all.
+```bash
+node run.mjs status
+dkg publisher stats
+```
 
-3. **Duplicate records.** A rootEntity URI can exist only once per context
-   graph ("Rule 4" validation error). `chunk.mjs` dedupes globally by
-   `recordKey()` before batching — make sure your key really is stable and
-   unique per logical entity.
+`progress.json` includes the current batch, DKG job ID/state, completed count,
+percentage, last transaction, heartbeat, and ETA. Every invocation also writes
+`publish-<timestamp>.log` in this directory.
 
-4. **No typed dateTimes.** `^^xsd:dateTime` literals hit a canonicalization
-   skew between publisher and peers on mainnet and the mint fails. Publish
-   timestamps as plain string literals (the example mapping does).
+At the observed rate of about 30 minutes for two collections, a strictly
+sequential 460-collection run is approximately **115 hours (4.8 days)**, not a
+few hours. The preparation and smoke test can be completed in hours; the full
+paid seed cannot at that measured rate. Do not increase concurrency merely to
+meet a clock: parallel Blazegraph work can make the run slower and less safe.
 
-5. **No blank nodes; literals < ~100 KB.** The node rejects blank-node
-   objects and tombstones oversized literals. The publisher pre-validates
-   both before spending anything.
+## Resume and error handling
 
-6. **Stale share after a daemon restart.** If a mint 409s with *"not a
-   complete full share resident in Shared Memory"*, the publisher
-   automatically discards the draft, reseals, and retries — no action needed,
-   just noted so the log line doesn't surprise you.
+Re-run the exact same publish command after a clean stop or machine restart.
+The script reconciles persistent share/publish job IDs before enqueueing new
+work. Finalized batches are never paid again.
 
-7. **CG registration is automatic but not free.** The first mint on a new CG
-   registers it on-chain and charges the ~100 TRAC RFC-53 deposit from the
-   node's operational wallet. Budget for it; it happens once per CG.
+- `registry.json` is the authoritative local ledger. Every update preserves the
+  preceding version as `registry.json.bak`; back both up during the run.
+- `progress.json` is a human/machine-readable live status snapshot.
+- `registry.json.lock` prevents two paid publisher processes using the same
+  ledger. If the process was killed uncleanly, verify no publisher is running
+  before removing a stale lock.
+- A failed DKG job stops the script and records the phase/error. Inspect it with
+  `dkg publisher job <job-id>` and node logs. Do not blindly delete job IDs or
+  registry entries.
+- A client timeout during KA creation is reconciled against the node's sealed
+  WM quads and adopted only when the entire quad set matches.
+- There are no automatic paid retries. The persistent DKG queue owns chain
+  recovery; ambiguous or failed jobs must be inspected before retrying.
+
+Useful diagnostics:
+
+```bash
+dkg logs --follow
+dkg publisher stats
+dkg publisher jobs
+node run.mjs status
+```
+
+If Blazegraph is overloaded, stop this client cleanly, let the active DKG job
+settle, inspect the queue and node logs, and only then resume. Rapid retries can
+stack expensive graph work and make recovery take much longer.
 
 ## Files
 
 | File | Purpose |
 |---|---|
-| `mapping.mjs` | **your adaptation point** — record → key + quads |
-| `chunk.mjs` | source file → deduplicated `batches/batch-NNN.json` |
-| `publish.mjs` | CG ensure → seal/share → one paid mint per batch, resumable ledger |
-| `rpc-proxy.mjs` | local caching Base-RPC proxy (gotcha #1) |
+| `run.mjs` | production entrypoint and durable log tee |
+| `chunk.mjs` | atomic deduplicated batching + checksummed manifest |
+| `mapping.mjs` | Blackbox record-to-RDF mapping |
+| `publish.mjs` | validation, private-CG preflight, async share/publish, resume |
+| `rpc-proxy.mjs` | optional Base RPC caching/failover helper |
+| `batches/manifest.json` | corpus and per-collection integrity contract |
+| `registry.json` | paid-run ledger; never delete during a run |
+| `progress.json` | current live status and error information |
+
+## Supported overrides
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `DKG_ENDPOINT` / `DKG_PORT` | `http://127.0.0.1` / `9200` | curator node API |
+| `DKG_AUTH_TOKEN_PATH` | `~/.dkg-mainnet/auth.token` | token file |
+| `KC_NETWORK` | `mainnet-base` | required DKG network |
+| `KC_DKG_VERSION` | `10.0.5` | exact official npm node version |
+| `KC_CG_ID` | none | required full context graph ID |
+| `KC_EPOCHS` | `12` | enforced production lifetime |
+| `KC_EXPECT_RECORDS` | `460000` | enforced corpus size |
+| `KC_POLL_MS` | `30000` | async job polling interval |
+| `KC_REQUEST_TIMEOUT_MS` | `2700000` | 45-minute mutation timeout with heartbeats |
+
+Do not change the version, record count, epochs, mapping or batches during a
+run. The manifest/registry checks intentionally refuse such drift.

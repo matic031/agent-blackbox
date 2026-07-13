@@ -1,4 +1,8 @@
 batches/
 registry.json
+registry.json.bak
+registry.json.lock
+progress.json
+*.pid
 *.log
 node_modules/
