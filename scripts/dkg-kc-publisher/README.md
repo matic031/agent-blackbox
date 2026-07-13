@@ -57,9 +57,10 @@ node test.mjs
 ## Privacy and encryption
 
 Official DKG npm 10.0.5 supports curated/private context graphs with X25519
-workspace keys and AEAD-encrypted SWM distribution to allowed agents. The
-production preflight therefore refuses a graph unless its `accessPolicy` is
-private/curated (`1`, `ownerOnly`, or `allowList`). See the official package's
+workspace keys, HKDF-SHA256 key derivation and AES-256-GCM-encrypted SWM
+distribution to allowed agents. The production preflight therefore refuses a
+graph unless its `accessPolicy` is private/curated (`1`, `ownerOnly`, or
+`allowList`). See the official package's
 [`dkg-node` guide](https://www.npmjs.com/package/@origintrail-official/dkg?activeTab=readme)
 for private context graphs, encryption-key rotation, and async publishing.
 
@@ -78,7 +79,7 @@ Important distinctions:
 
 ## Prerequisites on the curator node
 
-- Linux/macOS shell and Node.js 20 or newer.
+- Linux/macOS shell, Node.js 22 or newer, and npm 10 or newer.
 - Official DKG installed as `@origintrail-official/dkg@10.0.5`, running on
   port 9200 with Blazegraph configured.
 - Node admin token readable at `~/.dkg-mainnet/auth.token`, or set
