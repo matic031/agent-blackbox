@@ -35,8 +35,8 @@ the branch.
   curated/private;
 - enforces exactly 12 epochs and requires a manifest-bound confirmation token
   before any paid work;
-- uses the DKG's persistent async SWM-share and VM-publish queues, recording
-  every DKG job ID and transaction in `registry.json`;
+- uses the DKG's persistent async SWM-share queue and synchronous VM endpoint,
+  recording every DKG job ID and transaction in `registry.json`;
 - publishes one collection at a time, polls it to a terminal state, and stops
   on the first error instead of stacking retries against Blazegraph;
 - writes live state to `progress.json` and a timestamped durable log.
@@ -82,16 +82,19 @@ Important distinctions:
 - Linux/macOS shell, Node.js 22 or newer, and npm 10 or newer.
 - Official DKG installed as `@origintrail-official/dkg@10.0.5`, running on
   port 9200 with Blazegraph configured.
-- Node admin token readable at `~/.dkg-mainnet/auth.token`, or set
+- Node admin token readable at `~/.dkg/auth.token`, or set
   `DKG_AUTH_TOKEN_PATH`.
 - The final curated/private CG already created and visible to this token.
 - Wallet funding:
   - the registration wallet needs the one-time approximately 100 TRAC deposit;
-  - the async publisher wallet needs native ETH gas and either direct-spend
+  - the publisher wallet needs native ETH gas and either direct-spend
     TRAC or valid PCA agent registration/funding;
-  - budget approximately **6,100 TRAC** for 460,000 signals at 12 epochs, plus
-    margin. The observed estimate is 1.1 TRAC per 1,000-signal collection per
-    epoch. Confirm live pricing and balances before the paid run.
+  - the earlier public-style estimate was approximately **6,100 TRAC** for
+    460,000 signals at 12 epochs. The first curated/private batch instead
+    quoted 0.007096875 TRAC because the on-chain storage payload was the small
+    encrypted-catalog commitment. Do not extrapolate either figure blindly;
+    record the live quote and balance delta for several batches before funding
+    the full run.
 - At least 2 GB free disk for source, batches, Blazegraph growth, logs and
   temporary preparation files. More headroom is strongly recommended.
 
@@ -100,7 +103,7 @@ Check the node itself before starting:
 ```bash
 dkg --version
 dkg doctor
-dkg publisher wallets
+dkg publisher wallet list
 dkg publisher stats
 ```
 
@@ -164,7 +167,7 @@ Do not guess these values. Once curator access is available, decide and record:
 6. publish policy (normally curated);
 7. PCA account ID, if PCA will fund the 12-epoch publishes;
 8. publisher node identity attribution (`0` means no attribution);
-9. which operational/async publisher wallets will be funded.
+9. which operational publisher wallet will be funded.
 
 The basic two-phase CLI shape is:
 
@@ -187,11 +190,24 @@ command and wallet balances before running it.
 
 ## 4. Read-only production preflight
 
+The production graph is registered on Base mainnet as on-chain CG **13**:
+
+```text
+0x37b1Fdfd134e2b17583bCBdD3034F91504cD9C70/agent-blackbox
+```
+
+On `blackbox-publisher-node`, use the node's internal API on port 8900. The
+public nginx endpoint on port 9200 has a 1 MB body limit and rejects these
+approximately 2.2 MB batch requests.
+
 Set the exact full CG ID and run:
 
 ```bash
 export KC_CG_ID='<full-context-graph-id>'
+export KC_CG_ONCHAIN_ID=13
 export KC_EPOCHS=12
+export DKG_PORT=8900
+export DKG_AUTH_TOKEN_PATH="$HOME/.dkg/auth.token"
 
 node run.mjs preflight
 ```
@@ -217,14 +233,30 @@ node run.mjs publish \
   --confirm '<exact-token-from-preflight>'
 ```
 
+The first production smoke batch was confirmed on 2026-07-13:
+
+```text
+batch:       batch-001
+members:     1,000
+VM triples:  13,194
+epochs:      12
+transaction: 0x922fd626fedd9dec2a016200132e5211e3a851d529d99a452062036d3f0eefe6
+block:       48589150
+UAL:         did:dkg:base:8453/0x80738050893c3e769560331c8fd63a421b340d46/25191691567270760314062235701068010715288728691171855589300500455534398275743
+```
+
+The verified VM breakdown is 865 dependency signals, 103 injection signals,
+and 32 skill signals. DKG logged the curated-CG encrypted inline path and only
+the catalog commitment was priced for on-chain storage.
+
 Then verify it before continuing:
 
 ```bash
 node run.mjs status
 dkg publisher jobs
 
-curl -s -X POST http://127.0.0.1:9200/api/query \
-  -H "authorization: Bearer $(grep -v '^#' ~/.dkg-mainnet/auth.token | head -1)" \
+curl -s -X POST http://127.0.0.1:8900/api/query \
+  -H "authorization: Bearer $(grep -v '^#' ~/.dkg/auth.token | head -1)" \
   -H 'content-type: application/json' \
   -d '{"contextGraphId":"<full-context-graph-id>","sparql":"SELECT (COUNT(DISTINCT ?s) AS ?n) WHERE { ?s ?p ?o }"}'
 ```
@@ -267,8 +299,16 @@ meet a clock: parallel Blazegraph work can make the run slower and less safe.
 ## Resume and error handling
 
 Re-run the exact same publish command after a clean stop or machine restart.
-The script reconciles persistent share/publish job IDs before enqueueing new
-work. Finalized batches are never paid again.
+The script reconciles persistent share job IDs before starting new work.
+Finalized batches are never paid again.
+
+DKG 10.0.5's async VM queue lost the large first-batch job while rewriting its
+claimed state. The default is therefore `KC_VM_PUBLISH_MODE=sync`. A synchronous
+request writes `publishStartedAt` before entering the paid endpoint. If the
+request times out or disconnects without a complete response, the script stops
+and refuses to retry that batch until its chain state is manually reconciled.
+This is deliberate duplicate-spend protection. Do not remove
+`publishStartedAt` merely to make a retry proceed.
 
 - `registry.json` is the authoritative local ledger. Every update preserves the
   preceding version as `registry.json.bak`; back both up during the run.
@@ -276,13 +316,13 @@ work. Finalized batches are never paid again.
 - `registry.json.lock` prevents two paid publisher processes using the same
   ledger. If the process was killed uncleanly, verify no publisher is running
   before removing a stale lock.
-- A failed DKG job stops the script and records the phase/error. Inspect it with
+- A failed async DKG job stops the script and records the phase/error. Inspect it with
   `dkg publisher job <job-id>` and node logs. Do not blindly delete job IDs or
   registry entries.
 - A client timeout during KA creation is reconciled against the node's sealed
   WM quads and adopted only when the entire quad set matches.
-- There are no automatic paid retries. The persistent DKG queue owns chain
-  recovery; ambiguous or failed jobs must be inspected before retrying.
+- There are no automatic paid retries. Ambiguous or failed publishes must be
+  inspected against chain state before retrying.
 
 Useful diagnostics:
 
@@ -304,7 +344,7 @@ stack expensive graph work and make recovery take much longer.
 | `run.mjs` | production entrypoint and durable log tee |
 | `chunk.mjs` | atomic deduplicated batching + checksummed manifest |
 | `mapping.mjs` | Blackbox record-to-RDF mapping |
-| `publish.mjs` | validation, private-CG preflight, async share/publish, resume |
+| `publish.mjs` | validation, private-CG preflight, async share, synchronous publish, resume |
 | `rpc-proxy.mjs` | optional Base RPC caching/failover helper |
 | `batches/manifest.json` | corpus and per-collection integrity contract |
 | `registry.json` | paid-run ledger; never delete during a run |
@@ -314,15 +354,18 @@ stack expensive graph work and make recovery take much longer.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `DKG_ENDPOINT` / `DKG_PORT` | `http://127.0.0.1` / `9200` | curator node API |
-| `DKG_AUTH_TOKEN_PATH` | `~/.dkg-mainnet/auth.token` | token file |
+| `DKG_ENDPOINT` / `DKG_PORT` | `http://127.0.0.1` / `9200` | curator node API; use port `8900` on the production node |
+| `DKG_AUTH_TOKEN_PATH` | `~/.dkg-mainnet/auth.token` | token file; production node uses `~/.dkg/auth.token` |
 | `KC_NETWORK` | `mainnet-base` | required DKG network |
 | `KC_DKG_VERSION` | `10.0.5` | exact official npm node version |
 | `KC_CG_ID` | none | required full context graph ID |
+| `KC_CG_ONCHAIN_ID` | none | pinned registered CG ID fallback when DKG omits `accessPolicy` from list output |
 | `KC_EPOCHS` | `12` | enforced production lifetime |
 | `KC_EXPECT_RECORDS` | `460000` | enforced corpus size |
 | `KC_POLL_MS` | `30000` | async job polling interval |
 | `KC_REQUEST_TIMEOUT_MS` | `2700000` | 45-minute mutation timeout with heartbeats |
+| `KC_VM_PUBLISH_MODE` | `sync` | VM endpoint; use `async` only after its DKG 10.0.5 queue issue is resolved |
+| `KC_PUBLISHER_NODE_IDENTITY_ID` | `0` | no-attribution publisher identity override |
 
 Do not change the version, record count, epochs, mapping or batches during a
 run. The manifest/registry checks intentionally refuse such drift.

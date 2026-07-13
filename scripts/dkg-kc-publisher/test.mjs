@@ -19,6 +19,8 @@ const sourcePath = join(temp, 'source.json');
 const cg = '0xtest/private-blackbox';
 let accessPolicy = 1;
 let publishState = 'finalized';
+let rejectCreateStatus;
+let synchronousPublish = false;
 const calls = { create: 0, share: 0, publish: 0 };
 
 function run(script, args, env = {}) {
@@ -45,11 +47,23 @@ const server = createServer((request, response) => {
   const url = new URL(request.url, 'http://127.0.0.1');
   if (request.method === 'GET' && url.pathname === '/api/status') return json(response, 200, { name: 'fixture', version: '10.0.5', networkConfig: 'mainnet-base', connectedPeers: 3 });
   if (request.method === 'GET' && url.pathname === '/api/context-graph/exists') return json(response, 200, { id: cg, exists: true });
-  if (request.method === 'GET' && url.pathname === '/api/context-graph/list') return json(response, 200, { contextGraphs: [{ id: cg, accessPolicy }] });
-  if (request.method === 'GET' && url.pathname === '/api/wallets/balances') return json(response, 200, { wallets: ['0xtest'], balances: [{ address: '0xtest', eth: '1', trac: '10000' }] });
+  if (request.method === 'GET' && url.pathname === '/api/context-graph/list') return json(response, 200, { contextGraphs: [{ id: cg, accessPolicy, onChainId: '13' }] });
+  if (request.method === 'GET' && url.pathname.endsWith('/participants')) return json(response, 200, { contextGraphId: cg, allowedAgents: ['0xtest'] });
+  if (request.method === 'GET' && url.pathname === '/api/wallets/balances') return json(response, 200, {
+    chainId: 'base:8453',
+    rpcUrl: 'https://rpc.example/private-provider-secret',
+    wallets: ['0xtest'],
+    balances: [{ address: '0xtest', eth: '1', trac: '10000' }],
+  });
   if (request.method === 'GET' && url.pathname === '/api/publisher/stats') return json(response, 200, { accepted: 0, finalized: 0, failed: 0 });
   if (request.method === 'POST' && url.pathname === '/api/knowledge-assets') {
     calls.create += 1;
+    if (rejectCreateStatus) {
+      const status = rejectCreateStatus;
+      rejectCreateStatus = undefined;
+      const error = status === 400 ? 'Invalid "name": Assertion name cannot contain "/"' : 'fixture gateway limit';
+      return json(response, status, { error });
+    }
     return json(response, 201, { status: 'wm-sealed', assertionUri: 'urn:test:assertion' });
   }
   if (request.method === 'POST' && url.pathname.endsWith('/swm/share-async')) {
@@ -60,6 +74,11 @@ const server = createServer((request, response) => {
   if (request.method === 'POST' && url.pathname.endsWith('/vm/publish-async')) {
     calls.publish += 1;
     return json(response, 202, { jobId: 'publish-1', status: 'accepted' });
+  }
+  if (request.method === 'POST' && url.pathname.endsWith('/vm/publish')) {
+    calls.publish += 1;
+    synchronousPublish = true;
+    return json(response, 200, { status: 'confirmed', txHash: '0xsync', ual: 'did:dkg:sync', blockNumber: 456 });
   }
   if (request.method === 'GET' && url.pathname === '/api/publisher/job') {
     if (publishState === 'failed') return json(response, 200, { job: { jobId: 'publish-1', status: 'failed', failure: { message: 'fixture chain failure' } } });
@@ -93,6 +112,7 @@ try {
     KC_REGISTRY_PATH: registryPath,
     KC_PROGRESS_PATH: progressPath,
     KC_POLL_MS: '1000',
+    KC_VM_PUBLISH_MODE: 'async',
   };
 
   accessPolicy = 0;
@@ -100,27 +120,51 @@ try {
   assert.notEqual(publicGraph.code, 0, 'public CG preflight unexpectedly succeeded');
   assert.match(publicGraph.stderr, /not verifiably private\/curated/);
 
+  accessPolicy = undefined;
+  const pinnedPrivateGraph = await run('publish.mjs', ['--preflight'], { ...env, KC_CG_ONCHAIN_ID: '13' });
+  assert.equal(pinnedPrivateGraph.code, 0, pinnedPrivateGraph.stderr);
+  assert.match(pinnedPrivateGraph.stdout, /pinned onChainId=13, curated owner allowlist/);
+
   accessPolicy = 1;
   const preflight = await run('publish.mjs', ['--preflight'], env);
   assert.equal(preflight.code, 0, preflight.stderr);
+  assert.doesNotMatch(preflight.stdout, /private-provider-secret/);
   const manifestHash = createHash('sha256').update(readFileSync(join(batches, 'manifest.json'))).digest('hex');
   const confirmation = `${cg}:12:${manifestHash.slice(0, 12)}`;
   assert.match(preflight.stdout, new RegExp(confirmation.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
 
+  rejectCreateStatus = 413;
+  const rejected = await run('publish.mjs', ['--publish', '--confirm', confirmation], env);
+  assert.notEqual(rejected.code, 0, 'HTTP 413 unexpectedly produced success');
+  assert.deepEqual(calls, { create: 1, share: 0, publish: 0 });
+  const rejectedRegistry = JSON.parse(readFileSync(registryPath, 'utf8'));
+  assert.equal(rejectedRegistry.batches['batch-001'].createStartedAt, undefined);
+  assert.equal(rejectedRegistry.batches['batch-001'].lastError.status, 413);
+  rejectedRegistry.batches['batch-001'].createStartedAt = '2026-01-01T00:00:00.000Z';
+  writeFileSync(registryPath, `${JSON.stringify(rejectedRegistry, null, 2)}\n`);
+
+  rejectCreateStatus = 400;
+  const invalidName = await run('publish.mjs', ['--publish', '--confirm', confirmation], env);
+  assert.notEqual(invalidName.code, 0, 'invalid assertion name unexpectedly produced success');
+  assert.deepEqual(calls, { create: 2, share: 0, publish: 0 });
+  const invalidNameRegistry = JSON.parse(readFileSync(registryPath, 'utf8'));
+  assert.equal(invalidNameRegistry.batches['batch-001'].createStartedAt, undefined);
+  assert.equal(invalidNameRegistry.batches['batch-001'].lastError.status, 400);
+
   const publish = await run('publish.mjs', ['--publish', '--confirm', confirmation], env);
   assert.equal(publish.code, 0, publish.stderr);
-  assert.deepEqual(calls, { create: 1, share: 1, publish: 1 });
+  assert.deepEqual(calls, { create: 3, share: 1, publish: 1 });
   const registry = JSON.parse(readFileSync(registryPath, 'utf8'));
   assert.equal(registry.batches['batch-001'].txHash, '0xabc');
   assert.equal(registry.batches['batch-001'].epochs, 12);
 
   const resume = await run('publish.mjs', ['--publish', '--confirm', confirmation], env);
   assert.equal(resume.code, 0, resume.stderr);
-  assert.deepEqual(calls, { create: 1, share: 1, publish: 1 }, 'resume replayed a paid/mutating operation');
+  assert.deepEqual(calls, { create: 3, share: 1, publish: 1 }, 'resume replayed a paid/mutating operation');
 
   const wrongConfirmation = await run('publish.mjs', ['--publish', '--confirm', 'wrong-token'], env);
   assert.notEqual(wrongConfirmation.code, 0, 'wrong paid confirmation unexpectedly succeeded');
-  assert.deepEqual(calls, { create: 1, share: 1, publish: 1 }, 'wrong confirmation reached a mutation');
+  assert.deepEqual(calls, { create: 3, share: 1, publish: 1 }, 'wrong confirmation reached a mutation');
 
   publishState = 'failed';
   const failureRegistryPath = join(temp, 'failure-registry.json');
@@ -137,6 +181,24 @@ try {
   assert.equal(failureRegistry.batches['batch-001'].lastError.phase, 'publish');
   const failureProgress = JSON.parse(readFileSync(failureProgressPath, 'utf8'));
   assert.equal(failureProgress.status, 'error');
+
+  const syncRegistryPath = join(temp, 'sync-registry.json');
+  const syncProgressPath = join(temp, 'sync-progress.json');
+  publishState = 'finalized';
+  synchronousPublish = false;
+  const syncPublish = await run('publish.mjs', ['--publish', '--confirm', confirmation], {
+    ...env,
+    KC_VM_PUBLISH_MODE: 'sync',
+    KC_REGISTRY_PATH: syncRegistryPath,
+    KC_PROGRESS_PATH: syncProgressPath,
+  });
+  assert.equal(syncPublish.code, 0, syncPublish.stderr);
+  assert.equal(synchronousPublish, true);
+  const syncRegistry = JSON.parse(readFileSync(syncRegistryPath, 'utf8'));
+  assert.equal(syncRegistry.batches['batch-001'].txHash, '0xsync');
+  assert.equal(syncRegistry.batches['batch-001'].ual, 'did:dkg:sync');
+  assert.equal(syncRegistry.batches['batch-001'].publishMode, 'sync');
+  assert.equal(syncRegistry.batches['batch-001'].status, 'finalized');
   console.log('publisher integration smoke test: PASS');
 } finally {
   await new Promise((resolvePromise) => server.close(resolvePromise));

@@ -4,8 +4,7 @@
  *
  * Paid publishing is deliberately explicit. The script validates the complete
  * manifest before writes, verifies the exact npm node version and a curated /
- * private context graph, then uses the node's persistent async share and VM
- * publish queues one collection at a time.
+ * private context graph, then shares and publishes one collection at a time.
  */
 import { createHash } from 'node:crypto';
 import {
@@ -46,11 +45,14 @@ const network = process.env.KC_NETWORK ?? 'mainnet-base';
 const expectedVersion = process.env.KC_DKG_VERSION ?? '10.0.5';
 const contextGraphId = process.env.KC_CG_ID;
 const epochs = Number(process.env.KC_EPOCHS ?? '12');
-const kaPrefix = process.env.KC_KA_PREFIX ?? contextGraphId;
+const kaPrefix = process.env.KC_KA_PREFIX ?? contextGraphId?.split('/').filter(Boolean).at(-1);
 const tokenPath = resolve((process.env.DKG_AUTH_TOKEN_PATH ?? join(homedir(), '.dkg-mainnet', 'auth.token')).replace(/^~(?=\/)/, homedir()));
 const pollMs = Number(process.env.KC_POLL_MS ?? '30000');
 const requestTimeoutMs = Number(process.env.KC_REQUEST_TIMEOUT_MS ?? '2700000');
 const expectedRecords = Number(process.env.KC_EXPECT_RECORDS ?? '460000');
+const vmPublishMode = process.env.KC_VM_PUBLISH_MODE ?? 'sync';
+const publisherNodeIdentityId = Number(process.env.KC_PUBLISHER_NODE_IDENTITY_ID ?? '0');
+const expectedOnChainCgId = process.env.KC_CG_ONCHAIN_ID ?? '';
 const startedAt = Date.now();
 let lockFd;
 let authToken;
@@ -70,6 +72,8 @@ function assertConfig() {
   if (!Number.isSafeInteger(epochs) || epochs !== 12) throw new Error(`KC_EPOCHS must be exactly 12 for this production corpus; got ${epochs}`);
   if (!Number.isSafeInteger(pollMs) || pollMs < 1_000) throw new Error(`KC_POLL_MS must be an integer >= 1000; got ${pollMs}`);
   if (!Number.isSafeInteger(requestTimeoutMs) || requestTimeoutMs < 60_000) throw new Error(`KC_REQUEST_TIMEOUT_MS must be >= 60000; got ${requestTimeoutMs}`);
+  if (!['sync', 'async'].includes(vmPublishMode)) throw new Error(`KC_VM_PUBLISH_MODE must be sync or async; got ${vmPublishMode}`);
+  if (!Number.isSafeInteger(publisherNodeIdentityId) || publisherNodeIdentityId < 0) throw new Error(`KC_PUBLISHER_NODE_IDENTITY_ID must be a non-negative integer; got ${publisherNodeIdentityId}`);
   if ((mode === 'preflight' || mode === 'publish') && !contextGraphId) throw new Error('KC_CG_ID is required for node preflight/publish');
   if (mode === 'publish' && !kaPrefix) throw new Error('KC_KA_PREFIX or KC_CG_ID is required');
 }
@@ -209,6 +213,21 @@ function privatePolicy(policy) {
   return ['1', 'private', 'curated', 'owneronly', 'allowlist'].includes(normalized);
 }
 
+function walletBalanceSummary(wallets) {
+  return {
+    chainId: wallets.chainId,
+    symbol: wallets.symbol,
+    balances: wallets.balances.map(({ address, eth, trac, symbol }) => ({
+      address, eth, trac, ...(symbol ? { symbol } : {}),
+    })),
+  };
+}
+
+function definitiveCreateRejection(error) {
+  return error?.status === 413
+    || (error?.status === 400 && /Assertion name cannot contain "\/"/.test(error.message ?? ''));
+}
+
 async function nodePreflight(manifestSha256) {
   authToken = readToken();
   const status = await api('GET', '/api/status');
@@ -216,11 +235,26 @@ async function nodePreflight(manifestSha256) {
   if (status.version !== expectedVersion) throw new Error(`node DKG version is ${status.version ?? 'unknown'}, expected official npm ${expectedVersion}`);
   const exists = await api('GET', `/api/context-graph/exists?id=${encodeURIComponent(contextGraphId)}`);
   if (!exists.exists) throw new Error(`context graph does not exist: ${contextGraphId}; create and review it before publishing`);
-  const list = await api('GET', '/api/context-graph/list');
-  const graph = (list.contextGraphs ?? []).find((candidate) => [candidate.id, candidate.contextGraphId, candidate.uri, candidate.did].includes(contextGraphId));
+  let graph;
+  for (let attempt = 1; attempt <= 3 && !graph; attempt += 1) {
+    const list = await api('GET', '/api/context-graph/list', undefined, requestTimeoutMs);
+    graph = (list.contextGraphs ?? []).find((candidate) => [candidate.id, candidate.contextGraphId, candidate.uri, candidate.did].includes(contextGraphId));
+    if (!graph && attempt < 3) await new Promise((resolvePromise) => setTimeout(resolvePromise, 2_000));
+  }
   if (!graph) throw new Error(`context graph ${contextGraphId} exists but is not visible to this token in /api/context-graph/list`);
+  let privacyEvidence = `accessPolicy=${String(graph.accessPolicy ?? 'private flag')}`;
   if (!privatePolicy(graph.accessPolicy) && !graph.private && !graph.isPrivate) {
-    throw new Error(`context graph ${contextGraphId} is not verifiably private/curated (accessPolicy=${String(graph.accessPolicy)}); refusing to write corpus data`);
+    const onChainId = String(graph.onChainId ?? '');
+    if (!expectedOnChainCgId || onChainId !== expectedOnChainCgId) {
+      throw new Error(`context graph ${contextGraphId} is not verifiably private/curated (accessPolicy=${String(graph.accessPolicy)}, onChainId=${onChainId || 'missing'}); refusing to write corpus data`);
+    }
+    const participants = await api('GET', `/api/context-graph/${encodeURIComponent(contextGraphId)}/participants`);
+    const ownerAddress = contextGraphId.split('/')[0]?.toLowerCase();
+    const allowedAgents = (participants.allowedAgents ?? []).map((address) => String(address).toLowerCase());
+    if (!ownerAddress || !allowedAgents.includes(ownerAddress)) {
+      throw new Error(`context graph ${contextGraphId} has pinned on-chain id ${onChainId}, but its owner is not in the curated allowlist`);
+    }
+    privacyEvidence = `pinned onChainId=${onChainId}, curated owner allowlist`;
   }
   const wallets = await api('GET', '/api/wallets/balances');
   if (wallets.error || !Array.isArray(wallets.balances) || wallets.balances.length === 0) {
@@ -228,9 +262,10 @@ async function nodePreflight(manifestSha256) {
   }
   const publisherStats = await api('GET', '/api/publisher/stats');
   log(`node OK: ${status.name} v${status.version} ${status.networkConfig}, peers=${status.connectedPeers ?? 'unknown'}`);
-  log(`private context graph OK: ${contextGraphId} (accessPolicy=${String(graph.accessPolicy ?? 'private flag')})`);
-  log(`wallet preflight: ${JSON.stringify(wallets).slice(0, 1000)}`);
+  log(`private context graph OK: ${contextGraphId} (${privacyEvidence})`);
+  log(`wallet preflight: ${JSON.stringify(walletBalanceSummary(wallets))}`);
   log(`async publisher queue: ${JSON.stringify(publisherStats).slice(0, 1000)}`);
+  log(`VM publish mode: ${vmPublishMode}; publisher node identity id: ${publisherNodeIdentityId}`);
   const confirmation = `${contextGraphId}:12:${manifestSha256.slice(0, 12)}`;
   log(`paid confirmation token: ${confirmation}`);
   return { status, graph, wallets, publisherStats, confirmation };
@@ -352,6 +387,36 @@ function recordFinalized(rec, job) {
   });
 }
 
+function recordSynchronousFinalized(rec, result) {
+  if (!result?.txHash || !result?.ual) throw new Error(`synchronous DKG publish response is missing txHash or ual: ${JSON.stringify(result).slice(0, 1500)}`);
+  Object.assign(rec, {
+    status: 'finalized',
+    publishMode: 'sync',
+    publishJobState: result.status ?? 'confirmed',
+    txHash: result.txHash,
+    ual: result.ual,
+    blockNumber: result.blockNumber ?? null,
+    finalizedAt: new Date().toISOString(),
+    dkgFinalizationMode: 'published',
+  });
+}
+
+async function publishSynchronous(entry, rec, kaName, registry) {
+  if (rec.publishStartedAt) {
+    throw new Error(`[${entry.name}] an earlier synchronous paid publish started at ${rec.publishStartedAt} without a recorded terminal result; verify chain and node state, then reconcile registry.json before retrying`);
+  }
+  rec.publishMode = 'sync';
+  rec.publishStartedAt = new Date().toISOString();
+  rec.status = 'publishing';
+  saveRegistry(registry);
+  log(`[${entry.name}] starting PAID synchronous VM publish for ${epochs} epochs`);
+  const result = await api('POST', `/api/knowledge-assets/${encodeURIComponent(kaName)}/vm/publish`, {
+    contextGraphId,
+    options: { publishEpochs: epochs, publisherNodeIdentityId },
+  }, requestTimeoutMs);
+  recordSynchronousFinalized(rec, result);
+}
+
 async function publishAll(validated, preflight) {
   const suppliedConfirmation = option('confirm', '');
   if (suppliedConfirmation !== preflight.confirmation) throw new Error(`paid confirmation mismatch; rerun --preflight and pass --confirm ${preflight.confirmation}`);
@@ -373,6 +438,15 @@ async function publishAll(validated, preflight) {
     const batchStartedAt = Date.now();
     const rec = (registry.batches[entry.name] ??= { checksum: entry.sha256, records: entry.records, epochs, status: 'pending' });
     if (rec.checksum !== entry.sha256) throw new Error(`${entry.name}: registry checksum differs from manifest`);
+    const priorCreateRejected = rec.createStartedAt
+      && rec.lastError?.phase === 'create'
+      && definitiveCreateRejection(rec.lastError);
+    if (priorCreateRejected) {
+      delete rec.createStartedAt;
+      rec.status = 'pending';
+      saveRegistry(registry);
+      log(`[${entry.name}] retrying after definitive HTTP 413 gateway rejection`);
+    }
     if (rec.status === 'finalized' && (rec.txHash || rec.dkgFinalizationMode === 'noop')) {
       log(`[${entry.name}] already finalized: ${rec.txHash ?? rec.dkgFinalizationMode}`);
       continue;
@@ -406,7 +480,11 @@ async function publishAll(validated, preflight) {
             ? await reconcileCreate(kaName, quads).catch(() => false)
             : false;
           if (!adopt) {
-            rec.lastError = { at: new Date().toISOString(), phase: 'create', message: error.message, code: error.code ?? null };
+            if (definitiveCreateRejection(error)) {
+              delete rec.createStartedAt;
+              rec.status = 'pending';
+            }
+            rec.lastError = { at: new Date().toISOString(), phase: 'create', message: error.message, code: error.code ?? null, status: error.status ?? null };
             saveRegistry(registry);
             throw error;
           }
@@ -451,27 +529,32 @@ async function publishAll(validated, preflight) {
       }
     }
 
-    if (!rec.publishJobId) {
-      log(`[${entry.name}] enqueueing PAID VM publish for ${epochs} epochs`);
-      try {
-        const queued = await api('POST', `/api/knowledge-assets/${encodeURIComponent(kaName)}/vm/publish-async`, {
-          contextGraphId, options: { publishEpochs: epochs },
-        });
-        rec.publishJobId = queued.jobId;
-        rec.status = 'publishing';
-        rec.publishEnqueuedAt = new Date().toISOString();
-        saveRegistry(registry);
-      } catch (error) {
-        if (error.status === 409 && error.body?.existingJobId) {
-          rec.publishJobId = error.body.existingJobId;
-          saveRegistry(registry);
-        } else throw error;
-      }
-    }
-
     try {
-      const job = await pollPublishJob(entry.name, rec.publishJobId);
-      recordFinalized(rec, job);
+      if (vmPublishMode === 'sync') {
+        await publishSynchronous(entry, rec, kaName, registry);
+        saveRegistry(registry);
+      } else {
+        if (!rec.publishJobId) {
+          log(`[${entry.name}] enqueueing PAID async VM publish for ${epochs} epochs`);
+          try {
+            const queued = await api('POST', `/api/knowledge-assets/${encodeURIComponent(kaName)}/vm/publish-async`, {
+              contextGraphId, options: { publishEpochs: epochs, publisherNodeIdentityId },
+            });
+            rec.publishMode = 'async';
+            rec.publishJobId = queued.jobId;
+            rec.status = 'publishing';
+            rec.publishEnqueuedAt = new Date().toISOString();
+            saveRegistry(registry);
+          } catch (error) {
+            if (error.status === 409 && error.body?.existingJobId) {
+              rec.publishJobId = error.body.existingJobId;
+              saveRegistry(registry);
+            } else throw error;
+          }
+        }
+        const job = await pollPublishJob(entry.name, rec.publishJobId);
+        recordFinalized(rec, job);
+      }
       rec.durationSeconds = Math.round((Date.now() - batchStartedAt) / 1000);
       saveRegistry(registry);
       completed += 1;
