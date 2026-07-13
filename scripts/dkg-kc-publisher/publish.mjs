@@ -53,6 +53,7 @@ const pollMs = Number(process.env.KC_POLL_MS ?? '30000');
 const requestTimeoutMs = Number(process.env.KC_REQUEST_TIMEOUT_MS ?? '2700000');
 const expectedRecords = Number(process.env.KC_EXPECT_RECORDS ?? '460000');
 const vmPublishMode = process.env.KC_VM_PUBLISH_MODE ?? 'sync';
+const pipelineWidth = Number(process.env.KC_PIPELINE_WIDTH ?? '1');
 const publisherNodeIdentityId = Number(process.env.KC_PUBLISHER_NODE_IDENTITY_ID ?? '0');
 const expectedOnChainCgId = process.env.KC_CG_ONCHAIN_ID ?? '';
 const startedAt = Date.now();
@@ -75,6 +76,7 @@ function assertConfig() {
   if (!Number.isSafeInteger(pollMs) || pollMs < 1_000) throw new Error(`KC_POLL_MS must be an integer >= 1000; got ${pollMs}`);
   if (!Number.isSafeInteger(requestTimeoutMs) || requestTimeoutMs < 60_000) throw new Error(`KC_REQUEST_TIMEOUT_MS must be >= 60000; got ${requestTimeoutMs}`);
   if (!['sync', 'async'].includes(vmPublishMode)) throw new Error(`KC_VM_PUBLISH_MODE must be sync or async; got ${vmPublishMode}`);
+  if (!Number.isSafeInteger(pipelineWidth) || ![1, 2].includes(pipelineWidth)) throw new Error(`KC_PIPELINE_WIDTH must be 1 or 2; got ${pipelineWidth}`);
   if (!Number.isSafeInteger(publisherNodeIdentityId) || publisherNodeIdentityId < 0) throw new Error(`KC_PUBLISHER_NODE_IDENTITY_ID must be a non-negative integer; got ${publisherNodeIdentityId}`);
   if ((mode === 'preflight' || mode === 'publish') && !contextGraphId) throw new Error('KC_CG_ID is required for node preflight/publish');
   if (mode === 'publish' && !kaPrefix) throw new Error('KC_KA_PREFIX or KC_CG_ID is required');
@@ -295,6 +297,7 @@ async function nodePreflight(manifestSha256) {
   log(`wallet preflight: ${JSON.stringify(walletBalanceSummary(wallets))}`);
   log(`async publisher queue: ${JSON.stringify(publisherStats).slice(0, 1000)}`);
   log(`VM publish mode: ${vmPublishMode}; publisher node identity id: ${publisherNodeIdentityId}`);
+  log(`SWM pipeline width: ${pipelineWidth}; paid VM concurrency: 1`);
   const confirmation = `${contextGraphId}:12:${manifestSha256.slice(0, 12)}`;
   log(`paid confirmation token: ${confirmation}`);
   return { status, graph, membership, wallets, publisherStats, confirmation };
@@ -422,7 +425,7 @@ async function reconcileCreate(kaName, expectedQuads) {
   return true;
 }
 
-async function pollShareJob(batchName, jobId) {
+async function pollShareJob(batchName, jobId, pipelined = false) {
   let readFailures = 0;
   for (;;) {
     let job;
@@ -437,7 +440,11 @@ async function pollShareJob(batchName, jobId) {
       continue;
     }
     const state = job.state ?? job.status;
-    updateProgress({ phase: 'sharing', currentBatch: batchName, dkgJobId: jobId, dkgJobState: state });
+    if (pipelined) {
+      updateProgress({ pipelinePhase: 'sharing', pipelineBatch: batchName, pipelineJobId: jobId, pipelineJobState: state });
+    } else {
+      updateProgress({ phase: 'sharing', currentBatch: batchName, dkgJobId: jobId, dkgJobState: state });
+    }
     log(`[${batchName}] share job ${jobId}: ${state}`);
     if (['succeeded', 'success', 'completed', 'finalized'].includes(state)) return job;
     if (['failed', 'cancelled'].includes(state)) throw new Error(`[${batchName}] share job ${jobId} ${state}: ${job.error ?? job.failure?.message ?? JSON.stringify(job).slice(0, 1000)}`);
@@ -705,6 +712,105 @@ async function restorePublishedAssetToSwm(entry, rec, kaName, expectedQuads, reg
   }
 }
 
+async function stageSharedEntry(entry, registry, membership, completed, pipelined = false) {
+  const batchStartedAt = Date.now();
+  const rec = (registry.batches[entry.name] ??= { checksum: entry.sha256, records: entry.records, epochs, status: 'pending' });
+  if (rec.checksum !== entry.sha256) throw new Error(`${entry.name}: registry checksum differs from manifest`);
+  const priorCreateRejected = rec.createStartedAt
+    && rec.lastError?.phase === 'create'
+    && definitiveCreateRejection(rec.lastError);
+  if (priorCreateRejected) {
+    delete rec.createStartedAt;
+    rec.status = 'pending';
+    saveRegistry(registry);
+    log(`[${entry.name}] retrying after definitive HTTP 413 gateway rejection`);
+  }
+  if (rec.status === 'finalized' && hasFinalizedVm(rec) && rec.swmReplicatedAt) {
+    log(`[${entry.name}] already finalized: ${rec.txHash ?? rec.dkgFinalizationMode}`);
+    return { skip: true, entry, rec, batchStartedAt };
+  }
+
+  const kaName = `${kaPrefix}-${entry.name}`;
+  if (pipelined) {
+    updateProgress({ pipelinePhase: 'loading', pipelineBatch: entry.name, pipelineKa: kaName });
+  } else {
+    updateProgress({ phase: 'loading', currentBatch: entry.name, currentKa: kaName, completedBatches: completed });
+  }
+  const { quads } = readBatch(entry);
+
+  if (!hasFinalizedVm(rec) && !rec.sealedAt) {
+    let reconciled = false;
+    if (rec.createStartedAt) {
+      reconciled = await reconcileCreate(kaName, quads).catch((error) => {
+        if (error.status === 404) return false;
+        throw error;
+      });
+      if (!reconciled) throw new Error(`[${entry.name}] prior create request is not present as a complete sealed WM assertion; inspect ${kaName} before retrying`);
+    }
+    if (!reconciled) {
+      rec.createStartedAt = new Date().toISOString();
+      rec.status = 'creating';
+      saveRegistry(registry);
+      log(`[${entry.name}] creating and sealing ${kaName} (${quads.length.toLocaleString()} quads)${pipelined ? ' in pipeline' : ''}`);
+      try {
+        const created = await api('POST', '/api/knowledge-assets', {
+          contextGraphId, name: kaName, quads, finalize: true, alsoShareSwm: false,
+        }, requestTimeoutMs);
+        if (Array.isArray(created.errors) && created.errors.length > 0) throw new Error(`create phase errors: ${JSON.stringify(created.errors).slice(0, 1500)}`);
+        rec.assertionUri = created.assertionUri ?? null;
+      } catch (error) {
+        const adopt = (error.code === 'CLIENT_TIMEOUT' || error.status === 409)
+          ? await reconcileCreate(kaName, quads).catch(() => false)
+          : false;
+        if (!adopt) {
+          if (definitiveCreateRejection(error)) {
+            delete rec.createStartedAt;
+            rec.status = 'pending';
+          }
+          rec.lastError = { at: new Date().toISOString(), phase: 'create', message: error.message, code: error.code ?? null, status: error.status ?? null };
+          saveRegistry(registry);
+          throw error;
+        }
+      }
+    }
+    rec.sealedAt = new Date().toISOString();
+    rec.status = 'sealed';
+    saveRegistry(registry);
+  }
+
+  if (!hasFinalizedVm(rec) && !rec.sharedAt) {
+    if (!rec.shareJobId) {
+      await assertGraphMembershipUnchanged(membership);
+      log(`[${entry.name}] enqueueing persistent SWM share job${pipelined ? ' in pipeline' : ''}`);
+      try {
+        const queued = await api('POST', `/api/knowledge-assets/${encodeURIComponent(kaName)}/swm/share-async`, { contextGraphId });
+        rec.shareJobId = queued.jobId;
+        rec.status = 'sharing';
+        saveRegistry(registry);
+      } catch (error) {
+        if (error.status === 409 && error.body?.existingJobId) {
+          rec.shareJobId = error.body.existingJobId;
+          saveRegistry(registry);
+        } else throw error;
+      }
+    }
+    try {
+      await pollShareJob(entry.name, rec.shareJobId, pipelined);
+      rec.sharedAt = new Date().toISOString();
+      rec.status = 'shared';
+      saveRegistry(registry);
+      if (pipelined) updateProgress({ pipelinePhase: 'shared', pipelineBatch: entry.name });
+    } catch (error) {
+      rec.lastError = { at: new Date().toISOString(), phase: 'share', message: error.message, code: error.code ?? null };
+      rec.status = 'error';
+      saveRegistry(registry);
+      throw error;
+    }
+  }
+
+  return { skip: false, entry, rec, kaName, quads, batchStartedAt };
+}
+
 async function publishAll(validated, preflight) {
   const suppliedConfirmation = option('confirm', '');
   if (suppliedConfirmation !== preflight.confirmation) throw new Error(`paid confirmation mismatch; rerun --preflight and pass --confirm ${preflight.confirmation}`);
@@ -722,100 +828,27 @@ async function publishAll(validated, preflight) {
     completedBatches: completed, totalRecords: validated.manifest.includedRecords,
   });
 
-  for (const entry of entries) {
-    const batchStartedAt = Date.now();
-    const rec = (registry.batches[entry.name] ??= { checksum: entry.sha256, records: entry.records, epochs, status: 'pending' });
-    if (rec.checksum !== entry.sha256) throw new Error(`${entry.name}: registry checksum differs from manifest`);
-    const priorCreateRejected = rec.createStartedAt
-      && rec.lastError?.phase === 'create'
-      && definitiveCreateRejection(rec.lastError);
-    if (priorCreateRejected) {
-      delete rec.createStartedAt;
-      rec.status = 'pending';
-      saveRegistry(registry);
-      log(`[${entry.name}] retrying after definitive HTTP 413 gateway rejection`);
+  const staged = new Map();
+  const ensureStaged = (entry, pipelined = false) => {
+    if (!staged.has(entry.name)) {
+      const promise = stageSharedEntry(entry, registry, preflight.membership, completed, pipelined);
+      promise.catch(() => {});
+      staged.set(entry.name, promise);
     }
-    if (rec.status === 'finalized' && hasFinalizedVm(rec) && rec.swmReplicatedAt) {
-      log(`[${entry.name}] already finalized: ${rec.txHash ?? rec.dkgFinalizationMode}`);
-      continue;
-    }
-    const kaName = `${kaPrefix}-${entry.name}`;
-    updateProgress({ phase: 'loading', currentBatch: entry.name, currentKa: kaName, completedBatches: completed });
-    const { quads } = readBatch(entry);
+    return staged.get(entry.name);
+  };
 
-    if (!hasFinalizedVm(rec) && !rec.sealedAt) {
-      let reconciled = false;
-      if (rec.createStartedAt) {
-        reconciled = await reconcileCreate(kaName, quads).catch((error) => {
-          if (error.status === 404) return false;
-          throw error;
-        });
-        if (!reconciled) throw new Error(`[${entry.name}] prior create request is not present as a complete sealed WM assertion; inspect ${kaName} before retrying`);
-      }
-      if (!reconciled) {
-        rec.createStartedAt = new Date().toISOString();
-        rec.status = 'creating';
-        saveRegistry(registry);
-        log(`[${entry.name}] creating and sealing ${kaName} (${quads.length.toLocaleString()} quads)`);
-        try {
-          const created = await api('POST', '/api/knowledge-assets', {
-            contextGraphId, name: kaName, quads, finalize: true, alsoShareSwm: false,
-          }, requestTimeoutMs);
-          if (Array.isArray(created.errors) && created.errors.length > 0) throw new Error(`create phase errors: ${JSON.stringify(created.errors).slice(0, 1500)}`);
-          rec.assertionUri = created.assertionUri ?? null;
-        } catch (error) {
-          const adopt = (error.code === 'CLIENT_TIMEOUT' || error.status === 409)
-            ? await reconcileCreate(kaName, quads).catch(() => false)
-            : false;
-          if (!adopt) {
-            if (definitiveCreateRejection(error)) {
-              delete rec.createStartedAt;
-              rec.status = 'pending';
-            }
-            rec.lastError = { at: new Date().toISOString(), phase: 'create', message: error.message, code: error.code ?? null, status: error.status ?? null };
-            saveRegistry(registry);
-            throw error;
-          }
-        }
-      }
-      try {
-        rec.sealedAt = new Date().toISOString();
-        rec.status = 'sealed';
-        saveRegistry(registry);
-      } catch (error) {
-        rec.lastError = { at: new Date().toISOString(), phase: 'create', message: error.message, code: error.code ?? null };
-        saveRegistry(registry);
-        throw error;
-      }
-    }
-
-    if (!hasFinalizedVm(rec) && !rec.sharedAt) {
-      if (!rec.shareJobId) {
-        await assertGraphMembershipUnchanged(preflight.membership);
-        log(`[${entry.name}] enqueueing persistent SWM share job`);
-        try {
-          const queued = await api('POST', `/api/knowledge-assets/${encodeURIComponent(kaName)}/swm/share-async`, { contextGraphId });
-          rec.shareJobId = queued.jobId;
-          rec.status = 'sharing';
-          saveRegistry(registry);
-        } catch (error) {
-          if (error.status === 409 && error.body?.existingJobId) {
-            rec.shareJobId = error.body.existingJobId;
-            saveRegistry(registry);
-          } else throw error;
-        }
-      }
-      try {
-        await pollShareJob(entry.name, rec.shareJobId);
-        rec.sharedAt = new Date().toISOString();
-        rec.status = 'shared';
-        saveRegistry(registry);
-      } catch (error) {
-        rec.lastError = { at: new Date().toISOString(), phase: 'share', message: error.message, code: error.code ?? null };
-        rec.status = 'error';
-        saveRegistry(registry);
-        throw error;
-      }
+  for (let index = 0; index < entries.length; index += 1) {
+    const entry = entries[index];
+    if (staged.has(entry.name)) updateProgress({ phase: 'awaiting-shared', currentBatch: entry.name });
+    const stage = await ensureStaged(entry);
+    staged.delete(entry.name);
+    if (stage.skip) continue;
+    const { rec, kaName, quads, batchStartedAt } = stage;
+    const nextEntry = entries[index + 1];
+    if (pipelineWidth === 2 && nextEntry) {
+      log(`[${entry.name}] starting bounded SWM pipeline for ${nextEntry.name}`);
+      ensureStaged(nextEntry, true);
     }
 
     try {

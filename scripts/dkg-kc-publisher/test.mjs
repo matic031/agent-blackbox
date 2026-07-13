@@ -34,6 +34,12 @@ let membershipChanges = false;
 let participantReads = 0;
 let queryBatchDir = batches;
 let queryBatchName = 'batch-001';
+let publishDelayMs = 0;
+let pipelineFixture = false;
+let activePaidPublishes = 0;
+let maxActivePaidPublishes = 0;
+let swmOverlappedPaidPublish = false;
+const pipelineEvents = [];
 const calls = { create: 0, share: 0, publish: 0, pull: 0 };
 
 function run(script, args, env = {}) {
@@ -56,7 +62,7 @@ function json(response, status, body) {
   response.end(JSON.stringify(body));
 }
 
-const server = createServer((request, response) => {
+const server = createServer(async (request, response) => {
   const url = new URL(request.url, 'http://127.0.0.1');
   if (request.method === 'GET' && url.pathname === '/api/status') return json(response, 200, { name: 'fixture', version: '10.0.6', networkConfig: 'mainnet-base', connectedPeers: 3 });
   if (request.method === 'GET' && url.pathname === '/api/context-graph/exists') return json(response, 200, { id: cg, exists: true });
@@ -102,6 +108,12 @@ const server = createServer((request, response) => {
   }
   if (request.method === 'POST' && url.pathname.endsWith('/swm/share-async')) {
     calls.share += 1;
+    const kaName = decodeURIComponent(url.pathname.split('/').at(-3));
+    pipelineEvents.push({ type: 'share', kaName, at: Date.now() });
+    if (pipelineFixture && kaName.endsWith('batch-002')) {
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 100));
+      if (activePaidPublishes > 0) swmOverlappedPaidPublish = true;
+    }
     return json(response, 200, { jobId: `share-${calls.share}`, state: 'queued' });
   }
   if (request.method === 'GET' && url.pathname.startsWith('/api/knowledge-assets/swm/share-jobs/share-')) {
@@ -109,6 +121,8 @@ const server = createServer((request, response) => {
   }
   if (request.method === 'POST' && url.pathname.endsWith('/wm/pull-from')) {
     calls.pull += 1;
+    const kaName = decodeURIComponent(url.pathname.split('/').at(-3));
+    queryBatchName = kaName.endsWith('batch-002') ? 'batch-002' : 'batch-001';
     return json(response, 200, { wmDraft: 'open', seededFrom: { layer: 'vm' } });
   }
   if (request.method === 'POST' && url.pathname.endsWith('/vm/publish-async')) {
@@ -118,6 +132,13 @@ const server = createServer((request, response) => {
   if (request.method === 'POST' && url.pathname.endsWith('/vm/publish')) {
     calls.publish += 1;
     synchronousPublish = true;
+    const kaName = decodeURIComponent(url.pathname.split('/').at(-3));
+    activePaidPublishes += 1;
+    maxActivePaidPublishes = Math.max(maxActivePaidPublishes, activePaidPublishes);
+    pipelineEvents.push({ type: 'publish-start', kaName, at: Date.now() });
+    if (publishDelayMs) await new Promise((resolvePromise) => setTimeout(resolvePromise, publishDelayMs));
+    pipelineEvents.push({ type: 'publish-end', kaName, at: Date.now() });
+    activePaidPublishes -= 1;
     return json(response, 200, { status: 'confirmed', txHash: '0xsync', ual: 'did:dkg:sync', blockNumber: 456 });
   }
   if (request.method === 'GET' && url.pathname.endsWith('/vm')) {
@@ -158,6 +179,9 @@ try {
   const conflictingSelection = await run('publish.mjs', ['--dry-run', '--batch', 'batch-001', '--from-batch', 'batch-001'], { KC_BATCH_DIR: batches, KC_EXPECT_RECORDS: '2', KC_PROGRESS_PATH: progressPath });
   assert.notEqual(conflictingSelection.code, 0, 'conflicting batch selectors unexpectedly succeeded');
   assert.match(conflictingSelection.stderr, /--batch cannot be combined/);
+  const invalidPipeline = await run('publish.mjs', ['--dry-run'], { KC_BATCH_DIR: batches, KC_EXPECT_RECORDS: '2', KC_PROGRESS_PATH: progressPath, KC_PIPELINE_WIDTH: '3' });
+  assert.notEqual(invalidPipeline.code, 0, 'unsafe pipeline width unexpectedly succeeded');
+  assert.match(invalidPipeline.stderr, /KC_PIPELINE_WIDTH must be 1 or 2/);
 
   await new Promise((resolvePromise) => server.listen(0, '127.0.0.1', resolvePromise));
   const port = server.address().port;
@@ -219,6 +243,55 @@ try {
   assert.equal(rangeRegistry.batches['batch-002'].status, 'finalized');
   queryBatchDir = batches;
   queryBatchName = 'batch-001';
+  synchronousPublish = false;
+  Object.assign(calls, { create: 0, share: 0, publish: 0, pull: 0 });
+
+  const pipelineRegistryPath = join(temp, 'pipeline-registry.json');
+  const pipelineProgressPath = join(temp, 'pipeline-progress.json');
+  queryBatchDir = rangeBatches;
+  queryBatchName = 'batch-001';
+  publishDelayMs = 500;
+  pipelineFixture = true;
+  maxActivePaidPublishes = 0;
+  swmOverlappedPaidPublish = false;
+  pipelineEvents.length = 0;
+  const pipelinePublish = await run('publish.mjs', [
+    '--publish', '--from-batch', 'batch-001', '--to-batch', 'batch-002', '--confirm', rangeConfirmation,
+  ], {
+    ...env,
+    KC_BATCH_DIR: rangeBatches,
+    KC_VM_PUBLISH_MODE: 'sync',
+    KC_PIPELINE_WIDTH: '2',
+    KC_REGISTRY_PATH: pipelineRegistryPath,
+    KC_PROGRESS_PATH: pipelineProgressPath,
+  });
+  assert.equal(pipelinePublish.code, 0, pipelinePublish.stderr);
+  assert.equal(maxActivePaidPublishes, 1, 'pipeline ran concurrent paid publishes');
+  assert.equal(swmOverlappedPaidPublish, true, 'next SWM stage did not overlap the current paid publish');
+  assert.deepEqual(calls, { create: 2, share: 4, publish: 2, pull: 2 });
+  const firstPublishEnd = pipelineEvents.find((event) => event.type === 'publish-end' && event.kaName.endsWith('batch-001'));
+  const nextShare = pipelineEvents.find((event) => event.type === 'share' && event.kaName.endsWith('batch-002'));
+  assert.equal(Boolean(firstPublishEnd && nextShare && nextShare.at < firstPublishEnd.at), true, 'next batch was not staged before the current paid publish completed');
+  const pipelineRegistry = JSON.parse(readFileSync(pipelineRegistryPath, 'utf8'));
+  assert.equal(pipelineRegistry.batches['batch-001'].status, 'finalized');
+  assert.equal(pipelineRegistry.batches['batch-002'].status, 'finalized');
+  const callsAfterPipeline = { ...calls };
+  const pipelineResume = await run('publish.mjs', [
+    '--publish', '--from-batch', 'batch-001', '--to-batch', 'batch-002', '--confirm', rangeConfirmation,
+  ], {
+    ...env,
+    KC_BATCH_DIR: rangeBatches,
+    KC_VM_PUBLISH_MODE: 'sync',
+    KC_PIPELINE_WIDTH: '2',
+    KC_REGISTRY_PATH: pipelineRegistryPath,
+    KC_PROGRESS_PATH: pipelineProgressPath,
+  });
+  assert.equal(pipelineResume.code, 0, pipelineResume.stderr);
+  assert.deepEqual(calls, callsAfterPipeline, 'pipeline resume replayed a paid or mutating operation');
+  queryBatchDir = batches;
+  queryBatchName = 'batch-001';
+  publishDelayMs = 0;
+  pipelineFixture = false;
   synchronousPublish = false;
   Object.assign(calls, { create: 0, share: 0, publish: 0, pull: 0 });
 

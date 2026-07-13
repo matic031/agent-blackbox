@@ -336,11 +336,19 @@ selected batch sequentially, and stops on the first error or insufficient-funds
 response. Do not run a shell loop of one process per batch when a contiguous
 range is intended.
 
+`KC_PIPELINE_WIDTH=2` overlaps the free WM creation and encrypted SWM share for
+the next batch with the current batch's paid VM wait. Paid VM publishing remains
+strictly serialized at one transaction request at a time. The next batch keeps
+its persistent `shareJobId` in `registry.json`, so a stop or rollback resumes it
+without creating another share job. Set `KC_PIPELINE_WIDTH=1` to return to the
+fully sequential path without changing or deleting the registry.
+
 At the observed rate of about 30 minutes for two collections, a strictly
 sequential 460-collection run is approximately **115 hours (4.8 days)**, not a
-few hours. The preparation and smoke test can be completed in hours; the full
-paid seed cannot at that measured rate. Do not increase concurrency merely to
-meet a clock: parallel Blazegraph work can make the run slower and less safe.
+few hours. The bounded width-two pipeline can reduce idle time when SWM sharing
+and paid VM confirmation have similar durations, but actual throughput remains
+dependent on encrypted gossip, Blazegraph, peers, and chain confirmation. Do
+not run concurrent paid publishers or increase the pipeline beyond two.
 
 ## Resume and error handling
 
@@ -434,6 +442,7 @@ ss -ltnp | grep ':8900'
 | `KC_POLL_MS` | `30000` | async job polling interval |
 | `KC_REQUEST_TIMEOUT_MS` | `2700000` | 45-minute mutation timeout with heartbeats |
 | `KC_VM_PUBLISH_MODE` | `sync` | VM endpoint; use `async` only after the historical 10.0.5 queue issue is resolved and tested |
+| `KC_PIPELINE_WIDTH` | `1` | `2` overlaps the next free SWM stage while keeping paid VM publishing serialized; `1` is the rollback path |
 | `KC_PUBLISHER_NODE_IDENTITY_ID` | `0` | no-attribution publisher identity override |
 
 Do not change the version, record count, epochs, mapping or batches during a
