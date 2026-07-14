@@ -69,6 +69,30 @@ if (!source.includes(rejectionMarker)) {
   changed = true;
 }
 
+const drainMarker = 'deferred during publish';
+const drainBefore = `        for (const [recipientAgentAddress, peerId] of peerByAgent.entries()) {
+            drained += await this.drainPendingSenderKeyQueueForPeer({ peerId, recipientAgentAddress, ctx });
+        }
+`;
+const drainAfter = `        for (const [recipientAgentAddress, peerId] of peerByAgent.entries()) {
+            try {
+                drained += await this.drainPendingSenderKeyQueueForPeer({ peerId, recipientAgentAddress, ctx });
+            }
+            catch (err) {
+                const message = err instanceof Error ? err.message : String(err);
+                this.log.warn(ctx ?? SWM_SENDER_KEY_PENDING_DRAIN_LOG_CTX,
+                    \`SWM sender-key pending retry for \${recipientAgentAddress} deferred during publish: \${message}\`);
+            }
+        }
+`;
+
+if (!source.includes(drainMarker)) {
+  const occurrences = source.split(drainBefore).length - 1;
+  if (occurrences !== 1) throw new Error(`expected one sender-key publish drain loop in ${file}, found ${occurrences}`);
+  source = source.replace(drainBefore, drainAfter);
+  changed = true;
+}
+
 if (changed) {
   writeFileSync(file, source);
   process.stdout.write(`patched retryable sender-key transport and ACK handling: ${file}\n`);

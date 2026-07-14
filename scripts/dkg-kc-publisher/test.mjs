@@ -438,6 +438,26 @@ try {
   assert.deepEqual(calls, { create: 1, share: 1, publish: 2, pull: 0 });
 
   Object.assign(calls, { create: 0, share: 0, publish: 0, pull: 0 });
+  const transportRegistryPath = join(temp, 'sender-key-transport-registry.json');
+  const transportProgressPath = join(temp, 'sender-key-transport-progress.json');
+  const transportEnv = {
+    ...vmOnlyEnv,
+    KC_REGISTRY_PATH: transportRegistryPath,
+    KC_PROGRESS_PATH: transportProgressPath,
+  };
+  rejectPublishStatus = 500;
+  rejectPublishError = 'Network identity probe failed for 12D3KooWFixture: retryable probe backed off for 29632ms after send timeout elapsed';
+  const transportRejected = await run('publish.mjs', ['--publish', '--confirm', confirmation], transportEnv);
+  assert.notEqual(transportRejected.code, 0, 'sender-key transport rejection unexpectedly succeeded');
+  assert.deepEqual(calls, { create: 1, share: 1, publish: 1, pull: 0 });
+  const transportRegistry = JSON.parse(readFileSync(transportRegistryPath, 'utf8'));
+  assert.equal(transportRegistry.batches['batch-001'].status, 'shared');
+  assert.equal(transportRegistry.batches['batch-001'].publishStartedAt, undefined);
+  const transportRetry = await run('publish.mjs', ['--publish', '--confirm', confirmation], transportEnv);
+  assert.equal(transportRetry.code, 0, transportRetry.stderr);
+  assert.deepEqual(calls, { create: 1, share: 1, publish: 2, pull: 0 });
+
+  Object.assign(calls, { create: 0, share: 0, publish: 0, pull: 0 });
 
   rejectCreateStatus = 413;
   const rejected = await run('publish.mjs', ['--publish', '--confirm', confirmation], env);

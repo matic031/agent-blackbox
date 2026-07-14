@@ -266,9 +266,16 @@ function definitiveSenderKeySetupRejection(error) {
     && /SWM Sender Key setup rejected by \d+ agent\(s\):/.test(error.message ?? '');
 }
 
+function definitiveSenderKeyTransportRejection(error) {
+  const status = error?.status ?? (/^500\s/.test(error?.message ?? '') ? 500 : null);
+  return status === 500
+    && /Network identity probe failed for .*?(?:retryable probe backed off|send timeout elapsed)/.test(error.message ?? '');
+}
+
 function definitivePrePublishRejection(error) {
   return definitiveContextGraphValidationRejection(error)
-    || definitiveSenderKeySetupRejection(error);
+    || definitiveSenderKeySetupRejection(error)
+    || definitiveSenderKeyTransportRejection(error);
 }
 
 async function readGraphMembership() {
