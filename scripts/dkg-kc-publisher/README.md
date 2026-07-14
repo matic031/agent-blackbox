@@ -283,6 +283,12 @@ subjects and the restored quads match the prepared batch. DKG 10.0.6 does not
 expose a named-KA `/swm/quads` endpoint; do not use that nonexistent endpoint
 as a completion check.
 
+For a VM-only run, set `KC_SWM_RESTORE_MODE=skip`. The initial encrypted SWM
+stage is still required by the DKG's canonical `WM -> SWM -> VM` lifecycle,
+but the publisher will not restore the asset to community SWM after verified
+VM finalization. The registry records `swmRestoreSkippedAt`, and resuming with
+the default `restore` mode performs the omitted restoration.
+
 Assets first written by DKG 10.0.5 may contain Blazegraph's legacy replacement
 characters for non-ASCII RDF text. The publisher recognizes and records this
 specific historical normalization as `legacy-blazegraph-unicode`; newly
@@ -447,6 +453,7 @@ ss -ltnp | grep ':8900'
 | `KC_POLL_MS` | `30000` | async job polling interval |
 | `KC_REQUEST_TIMEOUT_MS` | `2700000` | 45-minute mutation timeout with heartbeats |
 | `KC_VM_PUBLISH_MODE` | `sync` | VM endpoint; use `async` only after the historical 10.0.5 queue issue is resolved and tested |
+| `KC_SWM_RESTORE_MODE` | `restore` | `skip` leaves finalized assets in VM only and omits the post-publish SWM restoration |
 | `KC_PIPELINE_WIDTH` | `1` | `2` overlaps the next free SWM stage while keeping paid VM publishing serialized; `1` is the rollback path |
 | `KC_PUBLISHER_NODE_IDENTITY_ID` | `0` | no-attribution publisher identity override |
 

@@ -36,6 +36,7 @@ let queryBatchDir = batches;
 let queryBatchName = 'batch-001';
 let publishDelayMs = 0;
 let pipelineFixture = false;
+let shareState = 'succeeded';
 let activePaidPublishes = 0;
 let maxActivePaidPublishes = 0;
 let swmOverlappedPaidPublish = false;
@@ -122,6 +123,7 @@ const server = createServer(async (request, response) => {
     return json(response, 200, { jobId: `share-${calls.share}`, state: 'queued' });
   }
   if (request.method === 'GET' && url.pathname.startsWith('/api/knowledge-assets/swm/share-jobs/share-')) {
+    if (shareState === 'failed') return json(response, 200, { jobId: url.pathname.split('/').at(-1), state: 'failed', error: 'fixture lease expired' });
     return json(response, 200, { jobId: url.pathname.split('/').at(-1), state: 'succeeded', result: { promotedCount: 2 } });
   }
   if (request.method === 'POST' && url.pathname.endsWith('/wm/pull-from')) {
@@ -188,6 +190,9 @@ try {
   const invalidPipeline = await run('publish.mjs', ['--dry-run'], { KC_BATCH_DIR: batches, KC_EXPECT_RECORDS: '2', KC_PROGRESS_PATH: progressPath, KC_PIPELINE_WIDTH: '3' });
   assert.notEqual(invalidPipeline.code, 0, 'unsafe pipeline width unexpectedly succeeded');
   assert.match(invalidPipeline.stderr, /KC_PIPELINE_WIDTH must be 1 or 2/);
+  const invalidRestoreMode = await run('publish.mjs', ['--dry-run'], { KC_BATCH_DIR: batches, KC_EXPECT_RECORDS: '2', KC_PROGRESS_PATH: progressPath, KC_SWM_RESTORE_MODE: 'invalid' });
+  assert.notEqual(invalidRestoreMode.code, 0, 'invalid SWM restore mode unexpectedly succeeded');
+  assert.match(invalidRestoreMode.stderr, /KC_SWM_RESTORE_MODE must be restore or skip/);
 
   await new Promise((resolvePromise) => server.listen(0, '127.0.0.1', resolvePromise));
   const port = server.address().port;
@@ -299,6 +304,50 @@ try {
   publishDelayMs = 0;
   pipelineFixture = false;
   synchronousPublish = false;
+  Object.assign(calls, { create: 0, share: 0, publish: 0, pull: 0 });
+
+  const vmOnlyRegistryPath = join(temp, 'vm-only-registry.json');
+  const vmOnlyProgressPath = join(temp, 'vm-only-progress.json');
+  const vmOnlyEnv = {
+    ...env,
+    KC_VM_PUBLISH_MODE: 'sync',
+    KC_SWM_RESTORE_MODE: 'skip',
+    KC_REGISTRY_PATH: vmOnlyRegistryPath,
+    KC_PROGRESS_PATH: vmOnlyProgressPath,
+  };
+  const vmOnlyPublish = await run('publish.mjs', ['--publish', '--confirm', confirmation], vmOnlyEnv);
+  assert.equal(vmOnlyPublish.code, 0, vmOnlyPublish.stderr);
+  assert.deepEqual(calls, { create: 1, share: 1, publish: 1, pull: 0 });
+  const vmOnlyRegistry = JSON.parse(readFileSync(vmOnlyRegistryPath, 'utf8'));
+  assert.equal(vmOnlyRegistry.batches['batch-001'].status, 'finalized');
+  assert.equal(vmOnlyRegistry.batches['batch-001'].swmRestoreMode, 'skipped-vm-only');
+  assert.equal(typeof vmOnlyRegistry.batches['batch-001'].swmRestoreSkippedAt, 'string');
+  assert.equal(vmOnlyRegistry.batches['batch-001'].swmReplicatedAt, undefined);
+  const callsAfterVmOnly = { ...calls };
+  const vmOnlyResume = await run('publish.mjs', ['--publish', '--confirm', confirmation], vmOnlyEnv);
+  assert.equal(vmOnlyResume.code, 0, vmOnlyResume.stderr);
+  assert.deepEqual(calls, callsAfterVmOnly, 'VM-only resume replayed a paid or mutating operation');
+
+  Object.assign(calls, { create: 0, share: 0, publish: 0, pull: 0 });
+  const shareRecoveryRegistryPath = join(temp, 'share-recovery-registry.json');
+  const shareRecoveryProgressPath = join(temp, 'share-recovery-progress.json');
+  const shareRecoveryEnv = {
+    ...vmOnlyEnv,
+    KC_REGISTRY_PATH: shareRecoveryRegistryPath,
+    KC_PROGRESS_PATH: shareRecoveryProgressPath,
+  };
+  shareState = 'failed';
+  const failedShare = await run('publish.mjs', ['--publish', '--confirm', confirmation], shareRecoveryEnv);
+  assert.notEqual(failedShare.code, 0, 'failed share job unexpectedly produced success');
+  assert.deepEqual(calls, { create: 1, share: 1, publish: 0, pull: 0 });
+  const recoveredShare = await run('publish.mjs', ['--publish', '--confirm', confirmation], shareRecoveryEnv);
+  assert.equal(recoveredShare.code, 0, recoveredShare.stderr);
+  assert.deepEqual(calls, { create: 1, share: 1, publish: 1, pull: 0 });
+  const recoveredRegistry = JSON.parse(readFileSync(shareRecoveryRegistryPath, 'utf8'));
+  assert.equal(recoveredRegistry.batches['batch-001'].shareVerificationMode, 'exact');
+  assert.equal(typeof recoveredRegistry.batches['batch-001'].shareReconciledAt, 'string');
+  assert.equal(recoveredRegistry.batches['batch-001'].status, 'finalized');
+  shareState = 'succeeded';
   Object.assign(calls, { create: 0, share: 0, publish: 0, pull: 0 });
 
   rejectCreateStatus = 413;

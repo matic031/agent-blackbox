@@ -53,6 +53,7 @@ const pollMs = Number(process.env.KC_POLL_MS ?? '30000');
 const requestTimeoutMs = Number(process.env.KC_REQUEST_TIMEOUT_MS ?? '2700000');
 const expectedRecords = Number(process.env.KC_EXPECT_RECORDS ?? '460000');
 const vmPublishMode = process.env.KC_VM_PUBLISH_MODE ?? 'sync';
+const swmRestoreMode = process.env.KC_SWM_RESTORE_MODE ?? 'restore';
 const pipelineWidth = Number(process.env.KC_PIPELINE_WIDTH ?? '1');
 const publisherNodeIdentityId = Number(process.env.KC_PUBLISHER_NODE_IDENTITY_ID ?? '0');
 const expectedOnChainCgId = process.env.KC_CG_ONCHAIN_ID ?? '';
@@ -76,6 +77,7 @@ function assertConfig() {
   if (!Number.isSafeInteger(pollMs) || pollMs < 1_000) throw new Error(`KC_POLL_MS must be an integer >= 1000; got ${pollMs}`);
   if (!Number.isSafeInteger(requestTimeoutMs) || requestTimeoutMs < 60_000) throw new Error(`KC_REQUEST_TIMEOUT_MS must be >= 60000; got ${requestTimeoutMs}`);
   if (!['sync', 'async'].includes(vmPublishMode)) throw new Error(`KC_VM_PUBLISH_MODE must be sync or async; got ${vmPublishMode}`);
+  if (!['restore', 'skip'].includes(swmRestoreMode)) throw new Error(`KC_SWM_RESTORE_MODE must be restore or skip; got ${swmRestoreMode}`);
   if (!Number.isSafeInteger(pipelineWidth) || ![1, 2].includes(pipelineWidth)) throw new Error(`KC_PIPELINE_WIDTH must be 1 or 2; got ${pipelineWidth}`);
   if (!Number.isSafeInteger(publisherNodeIdentityId) || publisherNodeIdentityId < 0) throw new Error(`KC_PUBLISHER_NODE_IDENTITY_ID must be a non-negative integer; got ${publisherNodeIdentityId}`);
   if ((mode === 'preflight' || mode === 'publish') && !contextGraphId) throw new Error('KC_CG_ID is required for node preflight/publish');
@@ -297,7 +299,7 @@ async function nodePreflight(manifestSha256) {
   log(`wallet preflight: ${JSON.stringify(walletBalanceSummary(wallets))}`);
   log(`async publisher queue: ${JSON.stringify(publisherStats).slice(0, 1000)}`);
   log(`VM publish mode: ${vmPublishMode}; publisher node identity id: ${publisherNodeIdentityId}`);
-  log(`SWM pipeline width: ${pipelineWidth}; paid VM concurrency: 1`);
+  log(`SWM pipeline width: ${pipelineWidth}; post-publish SWM restore: ${swmRestoreMode}; paid VM concurrency: 1`);
   const confirmation = `${contextGraphId}:12:${manifestSha256.slice(0, 12)}`;
   log(`paid confirmation token: ${confirmation}`);
   return { status, graph, membership, wallets, publisherStats, confirmation };
@@ -396,6 +398,11 @@ function memoryVerificationMode(stored, expectedQuads) {
     return 'legacy-blazegraph-unicode';
   }
   return null;
+}
+
+function exactMemoryVerificationMode(stored, expectedQuads) {
+  if (stored.quads.length !== expectedQuads.length) return null;
+  return memoryVerificationMode(stored, expectedQuads);
 }
 
 function reservedKaIdentity(reservedUal) {
@@ -655,6 +662,19 @@ function hasFinalizedVm(rec) {
   return Boolean(rec.txHash || rec.ual || ['noop', 'published-chain-reconciled'].includes(rec.dkgFinalizationMode));
 }
 
+function batchComplete(rec) {
+  return hasFinalizedVm(rec) && Boolean(rec.swmReplicatedAt || (swmRestoreMode === 'skip' && rec.swmRestoreSkippedAt));
+}
+
+function skipPublishedAssetSwmRestore(entry, rec, registry) {
+  rec.swmRestoreMode = 'skipped-vm-only';
+  rec.swmRestoreSkippedAt = new Date().toISOString();
+  rec.status = 'finalized';
+  delete rec.lastError;
+  saveRegistry(registry);
+  log(`[${entry.name}] VM finalized; skipped post-publish SWM restoration by explicit configuration`);
+}
+
 async function restorePublishedAssetToSwm(entry, rec, kaName, expectedQuads, registry) {
   if (rec.swmReplicatedAt) return;
 
@@ -740,7 +760,7 @@ async function stageSharedEntry(entry, registry, membership, completed, pipeline
     saveRegistry(registry);
     log(`[${entry.name}] retrying after definitive HTTP 413 gateway rejection`);
   }
-  if (rec.status === 'finalized' && hasFinalizedVm(rec) && rec.swmReplicatedAt) {
+  if (rec.status === 'finalized' && batchComplete(rec)) {
     log(`[${entry.name}] already finalized: ${rec.txHash ?? rec.dkgFinalizationMode}`);
     return { skip: true, entry, rec, batchStartedAt };
   }
@@ -794,6 +814,19 @@ async function stageSharedEntry(entry, registry, membership, completed, pipeline
   }
 
   if (!hasFinalizedVm(rec) && !rec.sharedAt) {
+    if (rec.shareJobId) {
+      const stored = await querySwmQuads(quads);
+      const verificationMode = exactMemoryVerificationMode(stored, quads);
+      if (verificationMode) {
+        rec.sharedAt = new Date().toISOString();
+        rec.shareVerificationMode = verificationMode;
+        rec.shareReconciledAt = rec.sharedAt;
+        rec.status = 'shared';
+        delete rec.lastError;
+        saveRegistry(registry);
+        log(`[${entry.name}] reconciled prior share job from exact SWM state (${stored.subjectCount.toLocaleString()} subjects, ${stored.quads.length.toLocaleString()} quads)`);
+      }
+    }
     if (!rec.shareJobId) {
       await assertGraphMembershipUnchanged(membership);
       log(`[${entry.name}] enqueueing persistent SWM share job${pipelined ? ' in pipeline' : ''}`);
@@ -809,17 +842,19 @@ async function stageSharedEntry(entry, registry, membership, completed, pipeline
         } else throw error;
       }
     }
-    try {
-      await pollShareJob(entry.name, rec.shareJobId, pipelined);
-      rec.sharedAt = new Date().toISOString();
-      rec.status = 'shared';
-      saveRegistry(registry);
-      if (pipelined) updateProgress({ pipelinePhase: 'shared', pipelineBatch: entry.name });
-    } catch (error) {
-      rec.lastError = { at: new Date().toISOString(), phase: 'share', message: error.message, code: error.code ?? null };
-      rec.status = 'error';
-      saveRegistry(registry);
-      throw error;
+    if (!rec.sharedAt) {
+      try {
+        await pollShareJob(entry.name, rec.shareJobId, pipelined);
+        rec.sharedAt = new Date().toISOString();
+        rec.status = 'shared';
+        saveRegistry(registry);
+        if (pipelined) updateProgress({ pipelinePhase: 'shared', pipelineBatch: entry.name });
+      } catch (error) {
+        rec.lastError = { at: new Date().toISOString(), phase: 'share', message: error.message, code: error.code ?? null };
+        rec.status = 'error';
+        saveRegistry(registry);
+        throw error;
+      }
     }
   }
 
@@ -835,7 +870,7 @@ async function publishAll(validated, preflight) {
   const registry = loadRegistry(validated.manifest, validated.manifestSha256);
   saveRegistry(registry);
   const entries = validated.selected;
-  let completed = Object.values(registry.batches).filter((record) => record.status === 'finalized' && record.swmReplicatedAt).length;
+  let completed = Object.values(registry.batches).filter((record) => record.status === 'finalized' && batchComplete(record)).length;
   let processedThisRun = 0;
   updateProgress({
     status: 'running', phase: 'starting', startedAt: new Date(startedAt).toISOString(),
@@ -893,7 +928,8 @@ async function publishAll(validated, preflight) {
         const job = await pollPublishJob(entry.name, rec.publishJobId);
         recordFinalized(rec, job);
       }
-      await restorePublishedAssetToSwm(entry, rec, kaName, quads, registry);
+      if (swmRestoreMode === 'restore') await restorePublishedAssetToSwm(entry, rec, kaName, quads, registry);
+      else skipPublishedAssetSwmRestore(entry, rec, registry);
       rec.durationSeconds = Math.round((Date.now() - batchStartedAt) / 1000);
       saveRegistry(registry);
       completed += 1;
