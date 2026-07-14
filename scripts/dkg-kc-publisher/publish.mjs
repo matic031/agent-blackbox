@@ -260,6 +260,17 @@ function definitiveContextGraphValidationRejection(error) {
     && /Failed to validate contextGraphId against known context graphs:/.test(error.message ?? '');
 }
 
+function definitiveSenderKeySetupRejection(error) {
+  const status = error?.status ?? (/^500\s/.test(error?.message ?? '') ? 500 : null);
+  return status === 500
+    && /SWM Sender Key setup rejected by \d+ agent\(s\):/.test(error.message ?? '');
+}
+
+function definitivePrePublishRejection(error) {
+  return definitiveContextGraphValidationRejection(error)
+    || definitiveSenderKeySetupRejection(error);
+}
+
 async function readGraphMembership() {
   const participants = await api('GET', `/api/context-graph/${encodeURIComponent(contextGraphId)}/participants`);
   const allowedAgents = [...new Set((participants.allowedAgents ?? []).map((address) => String(address).toLowerCase()))].sort();
@@ -716,11 +727,12 @@ async function publishSynchronous(entry, rec, kaName, expectedQuads, registry, m
   if (await reconcileSynchronousPublish(entry, rec, kaName, expectedQuads, registry, false)) return;
   if (rec.publishStartedAt
       && rec.lastError?.phase === 'publish'
-      && definitiveContextGraphValidationRejection(rec.lastError)) {
+      && definitivePrePublishRejection(rec.lastError)) {
     delete rec.publishStartedAt;
+    delete rec.lastError;
     rec.status = 'shared';
     saveRegistry(registry);
-    log(`[${entry.name}] retrying after definitive pre-publish context graph validation rejection`);
+    log(`[${entry.name}] retrying after definitive pre-publish rejection`);
   }
   if (rec.publishStartedAt) {
     throw new Error(`[${entry.name}] an earlier synchronous paid publish started at ${rec.publishStartedAt} without a recorded terminal result; verify chain and node state, then reconcile registry.json before retrying`);
@@ -739,7 +751,7 @@ async function publishSynchronous(entry, rec, kaName, expectedQuads, registry, m
       options: { publishEpochs: epochs, publisherNodeIdentityId },
     }, requestTimeoutMs);
   } catch (error) {
-    if (definitiveContextGraphValidationRejection(error)) {
+    if (definitivePrePublishRejection(error)) {
       delete rec.publishStartedAt;
       rec.status = 'shared';
       rec.lastError = { at: new Date().toISOString(), phase: 'publish', message: error.message, code: error.code ?? null, status: error.status };
@@ -1054,10 +1066,10 @@ async function publishAll(validated, preflight) {
       });
       log(`[${entry.name}] finalized tx=${rec.txHash ?? rec.dkgFinalizationMode} block=${rec.blockNumber ?? 'n/a'}; ${completed}/${validated.manifest.batchCount} complete`);
     } catch (error) {
-      if (definitiveContextGraphValidationRejection(error) || definitiveContextGraphValidationRejection(rec.lastError)) {
+      if (definitivePrePublishRejection(error)) {
         delete rec.publishStartedAt;
         rec.status = 'shared';
-        rec.lastError = { at: new Date().toISOString(), phase: 'publish', message: error.message, code: error.code ?? null, status: error.status ?? 503 };
+        rec.lastError = { at: new Date().toISOString(), phase: 'publish', message: error.message, code: error.code ?? null, status: error.status ?? null };
         saveRegistry(registry);
       } else if (rec.lastError?.phase !== 'swm-restore') {
         rec.lastError = { at: new Date().toISOString(), phase: 'publish', message: error.message, code: error.code ?? null };

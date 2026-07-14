@@ -28,6 +28,7 @@ let accessPolicy = 1;
 let publishState = 'finalized';
 let rejectCreateStatus;
 let rejectPublishStatus;
+let rejectPublishError;
 let synchronousPublish = false;
 let staleVmStatus = false;
 let missingLifecycleStamp = false;
@@ -159,7 +160,10 @@ const server = createServer(async (request, response) => {
     if (rejectPublishStatus) {
       const status = rejectPublishStatus;
       rejectPublishStatus = undefined;
-      return json(response, status, { error: 'Failed to validate contextGraphId against known context graphs: Store scheduler queue wait timeout (normal: blazegraph.query)' });
+      const error = rejectPublishError
+        ?? 'Failed to validate contextGraphId against known context graphs: Store scheduler queue wait timeout (normal: blazegraph.query)';
+      rejectPublishError = undefined;
+      return json(response, status, { error });
     }
     synchronousPublish = true;
     const kaName = decodeURIComponent(url.pathname.split('/').at(-3));
@@ -408,6 +412,29 @@ try {
   writeFileSync(publishRejectionRegistryPath, `${JSON.stringify(rejectedPublishRegistry, null, 2)}\n`);
   const publishRejectionRetry = await run('publish.mjs', ['--publish', '--confirm', confirmation], publishRejectionEnv);
   assert.equal(publishRejectionRetry.code, 0, publishRejectionRetry.stderr);
+  assert.deepEqual(calls, { create: 1, share: 1, publish: 2, pull: 0 });
+
+  Object.assign(calls, { create: 0, share: 0, publish: 0, pull: 0 });
+  const senderKeyRegistryPath = join(temp, 'sender-key-rejection-registry.json');
+  const senderKeyProgressPath = join(temp, 'sender-key-rejection-progress.json');
+  const senderKeyEnv = {
+    ...vmOnlyEnv,
+    KC_REGISTRY_PATH: senderKeyRegistryPath,
+    KC_PROGRESS_PATH: senderKeyProgressPath,
+  };
+  rejectPublishStatus = 500;
+  rejectPublishError = 'SWM Sender Key setup rejected by 1 agent(s): 0x2222222222222222222222222222222222222222: did:dkg:agent:test#x25519: not-agent-gated: Context graph is not DKG-agent gated';
+  const senderKeyRejected = await run('publish.mjs', ['--publish', '--confirm', confirmation], senderKeyEnv);
+  assert.notEqual(senderKeyRejected.code, 0, 'sender-key pre-publish rejection unexpectedly succeeded');
+  assert.deepEqual(calls, { create: 1, share: 1, publish: 1, pull: 0 });
+  const senderKeyRegistry = JSON.parse(readFileSync(senderKeyRegistryPath, 'utf8'));
+  assert.equal(senderKeyRegistry.batches['batch-001'].status, 'shared');
+  assert.equal(senderKeyRegistry.batches['batch-001'].publishStartedAt, undefined);
+  senderKeyRegistry.batches['batch-001'].publishStartedAt = '2026-01-01T00:00:00.000Z';
+  senderKeyRegistry.batches['batch-001'].status = 'error';
+  writeFileSync(senderKeyRegistryPath, `${JSON.stringify(senderKeyRegistry, null, 2)}\n`);
+  const senderKeyRetry = await run('publish.mjs', ['--publish', '--confirm', confirmation], senderKeyEnv);
+  assert.equal(senderKeyRetry.code, 0, senderKeyRetry.stderr);
   assert.deepEqual(calls, { create: 1, share: 1, publish: 2, pull: 0 });
 
   Object.assign(calls, { create: 0, share: 0, publish: 0, pull: 0 });
