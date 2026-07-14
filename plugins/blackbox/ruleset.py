@@ -769,7 +769,7 @@ def _background_refresh(config: BlackboxConfig) -> None:
 
         home = constants.blackbox_home()
         home.mkdir(parents=True, exist_ok=True)
-        lock_fh = open(_lock_path(), "w")
+        lock_fh = open(_lock_path(), "w", encoding="utf-8")
         try:
             fcntl.flock(lock_fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except (OSError, BlockingIOError):

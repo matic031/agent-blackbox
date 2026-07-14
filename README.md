@@ -34,6 +34,12 @@ before damage is done.
 curl -fsSL https://raw.githubusercontent.com/umanitek/agent-blackbox/main/scripts/blackbox-install.sh | bash
 ```
 
+Windows PowerShell:
+
+```powershell
+iwr -useb https://raw.githubusercontent.com/umanitek/agent-blackbox/main/scripts/blackbox-install.ps1 | iex
+```
+
 <details>
 <summary><b>Manual install</b> - prefer not to pipe a script into bash?</summary>
 <br>

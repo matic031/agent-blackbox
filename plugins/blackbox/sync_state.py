@@ -8,6 +8,8 @@ import time
 from pathlib import Path
 from typing import Any, Dict
 
+import psutil
+
 from . import constants
 
 _STALE_RUNNING_SECONDS = 3_600
@@ -18,11 +20,8 @@ def _pid_is_alive(pid: Any) -> bool:
         value = int(pid)
         if value <= 0:
             return False
-        os.kill(value, 0)
-        return True
-    except PermissionError:
-        return True
-    except (OSError, TypeError, ValueError):
+        return psutil.pid_exists(value)
+    except (TypeError, ValueError):
         return False
 
 
