@@ -634,6 +634,7 @@ async function publishSynchronous(entry, rec, kaName, expectedQuads, registry, m
   rec.publishStartedAt = new Date().toISOString();
   rec.status = 'publishing';
   saveRegistry(registry);
+  updateProgress({ phase: 'publishing', currentBatch: entry.name, currentKa: kaName });
   log(`[${entry.name}] starting PAID synchronous VM publish for ${epochs} epochs`);
   let result;
   try {
