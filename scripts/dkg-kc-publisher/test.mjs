@@ -39,6 +39,7 @@ let pipelineFixture = false;
 let activePaidPublishes = 0;
 let maxActivePaidPublishes = 0;
 let swmOverlappedPaidPublish = false;
+let swmMismatchReads = 0;
 const pipelineEvents = [];
 const calls = { create: 0, share: 0, publish: 0, pull: 0 };
 
@@ -88,6 +89,10 @@ const server = createServer(async (request, response) => {
     return json(response, 200, { kaId: freshKaId, merkleRoot: `0x${'0'.repeat(64)}`, author: null });
   }
   if (request.method === 'POST' && url.pathname === '/api/query') {
+    if (swmMismatchReads > 0) {
+      swmMismatchReads -= 1;
+      return json(response, 200, { result: { bindings: [] } });
+    }
     const batch = JSON.parse(readFileSync(join(queryBatchDir, `${queryBatchName}.json`)));
     const bindings = batch.records.flatMap(recordQuads).map((quad) => ({
       s: quad.subject,
@@ -133,6 +138,7 @@ const server = createServer(async (request, response) => {
     calls.publish += 1;
     synchronousPublish = true;
     const kaName = decodeURIComponent(url.pathname.split('/').at(-3));
+    queryBatchName = kaName.endsWith('batch-002') ? 'batch-002' : 'batch-001';
     activePaidPublishes += 1;
     maxActivePaidPublishes = Math.max(maxActivePaidPublishes, activePaidPublishes);
     pipelineEvents.push({ type: 'publish-start', kaName, at: Date.now() });
@@ -237,7 +243,7 @@ try {
   });
   assert.equal(rangedPublish.code, 0, rangedPublish.stderr);
   assert.equal(synchronousPublish, true);
-  assert.deepEqual(calls, { create: 1, share: 2, publish: 1, pull: 1 });
+  assert.deepEqual(calls, { create: 1, share: 1, publish: 1, pull: 0 });
   const rangeRegistry = JSON.parse(readFileSync(rangeRegistryPath, 'utf8'));
   assert.equal(rangeRegistry.batches['batch-001'], undefined, 'range publish processed a batch before --from-batch');
   assert.equal(rangeRegistry.batches['batch-002'].status, 'finalized');
@@ -268,7 +274,7 @@ try {
   assert.equal(pipelinePublish.code, 0, pipelinePublish.stderr);
   assert.equal(maxActivePaidPublishes, 1, 'pipeline ran concurrent paid publishes');
   assert.equal(swmOverlappedPaidPublish, true, 'next SWM stage did not overlap the current paid publish');
-  assert.deepEqual(calls, { create: 2, share: 4, publish: 2, pull: 2 });
+  assert.deepEqual(calls, { create: 2, share: 2, publish: 2, pull: 0 });
   const firstPublishEnd = pipelineEvents.find((event) => event.type === 'publish-end' && event.kaName.endsWith('batch-001'));
   const nextShare = pipelineEvents.find((event) => event.type === 'share' && event.kaName.endsWith('batch-002'));
   assert.equal(Boolean(firstPublishEnd && nextShare && nextShare.at < firstPublishEnd.at), true, 'next batch was not staged before the current paid publish completed');
@@ -313,6 +319,7 @@ try {
   assert.equal(invalidNameRegistry.batches['batch-001'].createStartedAt, undefined);
   assert.equal(invalidNameRegistry.batches['batch-001'].lastError.status, 400);
 
+  swmMismatchReads = 1;
   const publish = await run('publish.mjs', ['--publish', '--confirm', confirmation], env);
   assert.equal(publish.code, 0, publish.stderr);
   assert.deepEqual(calls, { create: 3, share: 2, publish: 1, pull: 1 });

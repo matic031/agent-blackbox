@@ -659,6 +659,20 @@ async function restorePublishedAssetToSwm(entry, rec, kaName, expectedQuads, reg
   if (rec.swmReplicatedAt) return;
 
   updateProgress({ phase: 'swm-restore', currentBatch: entry.name, currentKa: kaName });
+  const existing = await querySwmQuads(expectedQuads);
+  const existingVerificationMode = memoryVerificationMode(existing, expectedQuads);
+  if (existingVerificationMode) {
+    rec.swmRestoreQuadCount = existing.quads.length;
+    rec.swmRestoreSubjectCount = existing.subjectCount;
+    rec.swmVerificationMode = existingVerificationMode;
+    rec.swmReplicatedAt = new Date().toISOString();
+    rec.status = 'finalized';
+    delete rec.lastError;
+    saveRegistry(registry);
+    log(`[${entry.name}] existing encrypted SWM copy verified; restore not required`);
+    return;
+  }
+
   log(`[${entry.name}] restoring the finalized VM assertion to encrypted SWM`);
   try {
     if (!rec.swmRestoreJobId) {

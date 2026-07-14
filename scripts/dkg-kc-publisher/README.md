@@ -343,6 +343,11 @@ its persistent `shareJobId` in `registry.json`, so a stop or rollback resumes it
 without creating another share job. Set `KC_PIPELINE_WIDTH=1` to return to the
 fully sequential path without changing or deleting the registry.
 
+After VM finalization, the publisher queries and verifies the existing encrypted
+SWM copy by exact subject count and quad-set hash. It skips the VM-to-WM pull and
+second SWM share only when that verification succeeds; otherwise the full restore
+and post-restore verification still run.
+
 At the observed rate of about 30 minutes for two collections, a strictly
 sequential 460-collection run is approximately **115 hours (4.8 days)**, not a
 few hours. The bounded width-two pipeline can reduce idle time when SWM sharing
