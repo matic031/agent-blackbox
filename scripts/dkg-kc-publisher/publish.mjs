@@ -250,7 +250,14 @@ function walletBalanceSummary(wallets) {
 
 function definitiveCreateRejection(error) {
   return error?.status === 413
-    || (error?.status === 400 && /Assertion name cannot contain "\/"/.test(error.message ?? ''));
+    || (error?.status === 400 && /Assertion name cannot contain "\/"/.test(error.message ?? ''))
+    || definitiveContextGraphValidationRejection(error);
+}
+
+function definitiveContextGraphValidationRejection(error) {
+  const status = error?.status ?? (/^503\s/.test(error?.message ?? '') ? 503 : null);
+  return status === 503
+    && /Failed to validate contextGraphId against known context graphs:/.test(error.message ?? '');
 }
 
 async function readGraphMembership() {
@@ -707,6 +714,14 @@ async function reconcileSynchronousPublish(entry, rec, kaName, expectedQuads, re
 
 async function publishSynchronous(entry, rec, kaName, expectedQuads, registry, membership) {
   if (await reconcileSynchronousPublish(entry, rec, kaName, expectedQuads, registry, false)) return;
+  if (rec.publishStartedAt
+      && rec.lastError?.phase === 'publish'
+      && definitiveContextGraphValidationRejection(rec.lastError)) {
+    delete rec.publishStartedAt;
+    rec.status = 'shared';
+    saveRegistry(registry);
+    log(`[${entry.name}] retrying after definitive pre-publish context graph validation rejection`);
+  }
   if (rec.publishStartedAt) {
     throw new Error(`[${entry.name}] an earlier synchronous paid publish started at ${rec.publishStartedAt} without a recorded terminal result; verify chain and node state, then reconcile registry.json before retrying`);
   }
@@ -724,6 +739,13 @@ async function publishSynchronous(entry, rec, kaName, expectedQuads, registry, m
       options: { publishEpochs: epochs, publisherNodeIdentityId },
     }, requestTimeoutMs);
   } catch (error) {
+    if (definitiveContextGraphValidationRejection(error)) {
+      delete rec.publishStartedAt;
+      rec.status = 'shared';
+      rec.lastError = { at: new Date().toISOString(), phase: 'publish', message: error.message, code: error.code ?? null, status: error.status };
+      saveRegistry(registry);
+      throw error;
+    }
     if (error.code !== 'CLIENT_TIMEOUT' && !/fetch failed/i.test(error.message ?? '')) throw error;
     log(`[${entry.name}] paid publish response was lost; reconciling VM state without retrying the paid request`);
     await reconcileSynchronousPublish(entry, rec, kaName, expectedQuads, registry, true);
@@ -1032,7 +1054,12 @@ async function publishAll(validated, preflight) {
       });
       log(`[${entry.name}] finalized tx=${rec.txHash ?? rec.dkgFinalizationMode} block=${rec.blockNumber ?? 'n/a'}; ${completed}/${validated.manifest.batchCount} complete`);
     } catch (error) {
-      if (rec.lastError?.phase !== 'swm-restore') {
+      if (definitiveContextGraphValidationRejection(error) || definitiveContextGraphValidationRejection(rec.lastError)) {
+        delete rec.publishStartedAt;
+        rec.status = 'shared';
+        rec.lastError = { at: new Date().toISOString(), phase: 'publish', message: error.message, code: error.code ?? null, status: error.status ?? 503 };
+        saveRegistry(registry);
+      } else if (rec.lastError?.phase !== 'swm-restore') {
         rec.lastError = { at: new Date().toISOString(), phase: 'publish', message: error.message, code: error.code ?? null };
         rec.status = 'error';
         saveRegistry(registry);

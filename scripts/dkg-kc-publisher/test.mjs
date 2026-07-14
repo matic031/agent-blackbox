@@ -27,6 +27,7 @@ const freshKaId = ((BigInt(owner) << 96n) | freshOrdinal).toString();
 let accessPolicy = 1;
 let publishState = 'finalized';
 let rejectCreateStatus;
+let rejectPublishStatus;
 let synchronousPublish = false;
 let staleVmStatus = false;
 let missingLifecycleStamp = false;
@@ -120,7 +121,11 @@ const server = createServer(async (request, response) => {
     if (rejectCreateStatus) {
       const status = rejectCreateStatus;
       rejectCreateStatus = undefined;
-      const error = status === 400 ? 'Invalid "name": Assertion name cannot contain "/"' : 'fixture gateway limit';
+      const error = status === 400
+        ? 'Invalid "name": Assertion name cannot contain "/"'
+        : status === 503
+          ? 'Failed to validate contextGraphId against known context graphs: Store scheduler queue wait timeout (normal: blazegraph.query)'
+          : 'fixture gateway limit';
       return json(response, status, { error });
     }
     return json(response, 201, { status: 'wm-sealed', assertionUri: 'urn:test:assertion' });
@@ -151,6 +156,11 @@ const server = createServer(async (request, response) => {
   }
   if (request.method === 'POST' && url.pathname.endsWith('/vm/publish')) {
     calls.publish += 1;
+    if (rejectPublishStatus) {
+      const status = rejectPublishStatus;
+      rejectPublishStatus = undefined;
+      return json(response, status, { error: 'Failed to validate contextGraphId against known context graphs: Store scheduler queue wait timeout (normal: blazegraph.query)' });
+    }
     synchronousPublish = true;
     const kaName = decodeURIComponent(url.pathname.split('/').at(-3));
     queryBatchName = kaName.endsWith('batch-002') ? 'batch-002' : 'batch-001';
@@ -377,6 +387,29 @@ try {
   assert.equal(typeof inlineShareRegistry.batches['batch-001'].shareReconciledAt, 'string');
   assert.equal(inlineShareRegistry.batches['batch-001'].status, 'finalized');
   shareState = 'succeeded';
+
+  Object.assign(calls, { create: 0, share: 0, publish: 0, pull: 0 });
+  const publishRejectionRegistryPath = join(temp, 'publish-rejection-registry.json');
+  const publishRejectionProgressPath = join(temp, 'publish-rejection-progress.json');
+  const publishRejectionEnv = {
+    ...vmOnlyEnv,
+    KC_REGISTRY_PATH: publishRejectionRegistryPath,
+    KC_PROGRESS_PATH: publishRejectionProgressPath,
+  };
+  rejectPublishStatus = 503;
+  const publishRejected = await run('publish.mjs', ['--publish', '--confirm', confirmation], publishRejectionEnv);
+  assert.notEqual(publishRejected.code, 0, 'pre-publish context graph rejection unexpectedly succeeded');
+  assert.deepEqual(calls, { create: 1, share: 1, publish: 1, pull: 0 });
+  const rejectedPublishRegistry = JSON.parse(readFileSync(publishRejectionRegistryPath, 'utf8'));
+  assert.equal(rejectedPublishRegistry.batches['batch-001'].status, 'shared');
+  assert.equal(rejectedPublishRegistry.batches['batch-001'].publishStartedAt, undefined);
+  rejectedPublishRegistry.batches['batch-001'].publishStartedAt = '2026-01-01T00:00:00.000Z';
+  rejectedPublishRegistry.batches['batch-001'].status = 'error';
+  writeFileSync(publishRejectionRegistryPath, `${JSON.stringify(rejectedPublishRegistry, null, 2)}\n`);
+  const publishRejectionRetry = await run('publish.mjs', ['--publish', '--confirm', confirmation], publishRejectionEnv);
+  assert.equal(publishRejectionRetry.code, 0, publishRejectionRetry.stderr);
+  assert.deepEqual(calls, { create: 1, share: 1, publish: 2, pull: 0 });
+
   Object.assign(calls, { create: 0, share: 0, publish: 0, pull: 0 });
 
   rejectCreateStatus = 413;
