@@ -924,10 +924,23 @@ async function stageSharedEntry(entry, registry, membership, completed, pipeline
         saveRegistry(registry);
         if (pipelined) updateProgress({ pipelinePhase: 'shared', pipelineBatch: entry.name });
       } catch (error) {
-        rec.lastError = { at: new Date().toISOString(), phase: 'share', message: error.message, code: error.code ?? null };
-        rec.status = 'error';
-        saveRegistry(registry);
-        throw error;
+        const stored = await querySwmQuads(quads).catch(() => null);
+        const verificationMode = stored ? exactMemoryVerificationMode(stored, quads) : null;
+        if (verificationMode) {
+          rec.sharedAt = new Date().toISOString();
+          rec.shareVerificationMode = verificationMode;
+          rec.shareReconciledAt = rec.sharedAt;
+          rec.status = 'shared';
+          delete rec.lastError;
+          saveRegistry(registry);
+          log(`[${entry.name}] reconciled failed share job from exact SWM state (${stored.subjectCount.toLocaleString()} subjects, ${stored.quads.length.toLocaleString()} quads)`);
+          if (pipelined) updateProgress({ pipelinePhase: 'shared', pipelineBatch: entry.name });
+        } else {
+          rec.lastError = { at: new Date().toISOString(), phase: 'share', message: error.message, code: error.code ?? null };
+          rec.status = 'error';
+          saveRegistry(registry);
+          throw error;
+        }
       }
     }
   }

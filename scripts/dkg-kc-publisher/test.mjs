@@ -350,6 +350,7 @@ try {
     KC_PROGRESS_PATH: shareRecoveryProgressPath,
   };
   shareState = 'failed';
+  swmMismatchReads = 1;
   const failedShare = await run('publish.mjs', ['--publish', '--confirm', confirmation], shareRecoveryEnv);
   assert.notEqual(failedShare.code, 0, 'failed share job unexpectedly produced success');
   assert.deepEqual(calls, { create: 1, share: 1, publish: 0, pull: 0 });
@@ -360,6 +361,21 @@ try {
   assert.equal(recoveredRegistry.batches['batch-001'].shareVerificationMode, 'exact');
   assert.equal(typeof recoveredRegistry.batches['batch-001'].shareReconciledAt, 'string');
   assert.equal(recoveredRegistry.batches['batch-001'].status, 'finalized');
+
+  Object.assign(calls, { create: 0, share: 0, publish: 0, pull: 0 });
+  const inlineShareRegistryPath = join(temp, 'inline-share-registry.json');
+  const inlineShareProgressPath = join(temp, 'inline-share-progress.json');
+  const inlineShare = await run('publish.mjs', ['--publish', '--confirm', confirmation], {
+    ...vmOnlyEnv,
+    KC_REGISTRY_PATH: inlineShareRegistryPath,
+    KC_PROGRESS_PATH: inlineShareProgressPath,
+  });
+  assert.equal(inlineShare.code, 0, inlineShare.stderr);
+  assert.deepEqual(calls, { create: 1, share: 1, publish: 1, pull: 0 });
+  const inlineShareRegistry = JSON.parse(readFileSync(inlineShareRegistryPath, 'utf8'));
+  assert.equal(inlineShareRegistry.batches['batch-001'].shareVerificationMode, 'exact');
+  assert.equal(typeof inlineShareRegistry.batches['batch-001'].shareReconciledAt, 'string');
+  assert.equal(inlineShareRegistry.batches['batch-001'].status, 'finalized');
   shareState = 'succeeded';
   Object.assign(calls, { create: 0, share: 0, publish: 0, pull: 0 });
 
