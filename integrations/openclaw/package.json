@@ -1,0 +1,33 @@
+{
+  "name": "@umanitek/blackbox-openclaw",
+  "version": "0.1.0",
+  "description": "Agent Blackbox plugin for OpenClaw — mirrors hermes blackbox detection and reports sightings to the local DKG threat graph.",
+  "type": "module",
+  "license": "MIT",
+  "files": [
+    "src",
+    "openclaw.plugin.json",
+    "README.md"
+  ],
+  "openclaw": {
+    "extensions": [
+      "./src/index.ts"
+    ],
+    "install": {
+      "minHostVersion": ">=2026.6.11"
+    },
+    "compat": {
+      "pluginApi": ">=2026.6.11",
+      "minGatewayVersion": "2026.6.11"
+    },
+    "build": {
+      "openclawVersion": "2026.6.11"
+    }
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.0"
+  }
+}

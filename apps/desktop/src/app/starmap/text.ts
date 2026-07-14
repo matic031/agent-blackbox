@@ -23,7 +23,9 @@ export function metaBadges(n: StarmapNode): string[] {
   } else {
     out.push(n.category)
 
-    if (n.createdBy === 'agent') {
+    if (n.context || (n.source === 'base' && !n.learned)) {
+      out.push('related')
+    } else if (n.learned || n.createdBy === 'agent') {
       out.push('learned')
     }
 

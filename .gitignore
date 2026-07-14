@@ -147,3 +147,16 @@ apps/desktop/demo/
 # PR body is the archive. See the hermes-agent-dev skill's
 # pr-infographic-workflow reference (storage rule + lapse #8 / #COMMIT-1).
 infographic/
+
+# Blackbox / DKG credentials — never commit (public repo)
+auth.token
+wallets.json
+*.pem
+*.p12
+dkg.json
+# DKG node home / config — holds chain.rpcUrl with the paid RPC provider key
+.dkg/
+# Installer-managed OriginTrail DKG npm package.
+/dkg/
+# Backup directory for installer migrations from custom DKG checkouts.
+/dkg.custom-backup-*/

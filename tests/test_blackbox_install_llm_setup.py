@@ -1,0 +1,1426 @@
+"""Regression coverage for the Blackbox installer's LLM reviewer setup."""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import shlex
+import shutil
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+import pytest
+
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+INSTALL_SH = REPO_ROOT / "scripts" / "blackbox-install.sh"
+INSTALL_PS1 = REPO_ROOT / "scripts" / "blackbox-install.ps1"
+BLAZEGRAPH_HELPER = REPO_ROOT / "scripts" / "blackbox-blazegraph.mjs"
+BLAZEGRAPH_URL = "http://127.0.0.1:9999/bigdata/namespace/test/sparql"
+
+
+def _extract_function_body(name: str) -> str:
+    text = INSTALL_SH.read_text()
+    match = re.search(
+        rf"^{re.escape(name)}\(\)\s*\{{\s*\n(?P<body>.*?)^\}}",
+        text,
+        re.MULTILINE | re.DOTALL,
+    )
+    assert match is not None, f"{name}() not found in scripts/blackbox-install.sh"
+    return match["body"]
+
+
+def _extract_unix_config_writer() -> str:
+    text = INSTALL_SH.read_text(encoding="utf-8")
+    match = re.search(
+        r"^ensure_blackbox_dkg_config\(\)\s*\{.*?<<'PYEOF'\n"
+        r"(?P<code>.*?)^PYEOF\n\s*\)\"",
+        text,
+        re.MULTILINE | re.DOTALL,
+    )
+    assert match is not None
+    return match["code"]
+
+
+def _extract_unix_blackbox_config_writer() -> str:
+    text = INSTALL_SH.read_text(encoding="utf-8")
+    match = re.search(
+        r"^enable_and_configure\(\)\s*\{.*?<<'PYEOF'\n"
+        r"(?P<code>.*?)^PYEOF\n\s*then",
+        text,
+        re.MULTILINE | re.DOTALL,
+    )
+    assert match is not None
+    return match["code"]
+
+
+def _run_unix_blackbox_config_writer(
+    config_path: Path,
+    *,
+    dkg_url: str,
+    dkg_home: Path,
+    dkg_bin: Path,
+) -> dict:
+    subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            _extract_unix_blackbox_config_writer(),
+            str(config_path),
+            "mainnet-base",
+            "owner/agent-blackbox",
+            "curator-peer",
+            dkg_url,
+            str(dkg_home),
+            str(dkg_bin),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    import yaml
+
+    return yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+
+
+def _extract_powershell_function_body(name: str) -> str:
+    text = INSTALL_PS1.read_text(encoding="utf-8")
+    match = re.search(
+        rf"^function\s+{re.escape(name)}\s*\{{\s*\n(?P<body>.*?)^\}}",
+        text,
+        re.MULTILINE | re.DOTALL,
+    )
+    assert match is not None, f"{name} not found in scripts/blackbox-install.ps1"
+    return match["body"]
+
+
+def test_unix_installer_creates_global_blackbox_launcher(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    hermes_bin = tmp_path / "venv" / "bin" / "hermes"
+    args_file = tmp_path / "args.txt"
+    hermes_bin.parent.mkdir(parents=True)
+    hermes_bin.write_text(
+        "#!/bin/sh\n"
+        "printf '%s\\n' \"$@\" > \"$BLACKBOX_ARGS_OUT\"\n"
+        "exit \"${BLACKBOX_EXIT_CODE:-0}\"\n",
+        encoding="utf-8",
+    )
+    hermes_bin.chmod(0o755)
+
+    body = _extract_function_body("link_hermes")
+    command = f"""
+ok() {{ :; }}
+warn() {{ :; }}
+link_hermes() {{
+{body}
+}}
+HOME={shlex.quote(str(home))}
+HERMES_BIN={shlex.quote(str(hermes_bin))}
+VENV_DIR={shlex.quote(str(hermes_bin.parent.parent))}
+PATH=/usr/bin:/bin
+link_hermes
+"""
+    subprocess.run(["bash", "-c", command], check=True)
+
+    launcher = home / ".local" / "bin" / "blackbox"
+    assert launcher.is_file()
+    assert os.access(launcher, os.X_OK)
+    assert "managed-by: agent-blackbox-installer" in launcher.read_text(encoding="utf-8")
+    result = subprocess.run(
+        [str(launcher), "sync", "--wait", "--require-rules"],
+        env={
+            **os.environ,
+            "BLACKBOX_ARGS_OUT": str(args_file),
+            "BLACKBOX_EXIT_CODE": "17",
+        },
+        check=False,
+    )
+    assert result.returncode == 17
+    assert args_file.read_text(encoding="utf-8").splitlines() == [
+        "blackbox",
+        "sync",
+        "--wait",
+        "--require-rules",
+    ]
+
+
+def test_unix_installer_does_not_replace_unmanaged_blackbox_command(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    link_dir = home / ".local" / "bin"
+    link_dir.mkdir(parents=True)
+    existing = link_dir / "blackbox"
+    existing.write_text("#!/bin/sh\necho unrelated\n", encoding="utf-8")
+    existing.chmod(0o755)
+    hermes_bin = tmp_path / "venv" / "bin" / "hermes"
+    hermes_bin.parent.mkdir(parents=True)
+    hermes_bin.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    hermes_bin.chmod(0o755)
+
+    body = _extract_function_body("link_hermes")
+    command = f"""
+ok() {{ :; }}
+warn() {{ :; }}
+link_hermes() {{
+{body}
+}}
+HOME={shlex.quote(str(home))}
+HERMES_BIN={shlex.quote(str(hermes_bin))}
+VENV_DIR={shlex.quote(str(hermes_bin.parent.parent))}
+PATH=/usr/bin:/bin
+link_hermes
+"""
+    subprocess.run(["bash", "-c", command], check=True)
+
+    assert existing.read_text(encoding="utf-8") == "#!/bin/sh\necho unrelated\n"
+
+
+def test_windows_installer_creates_global_blackbox_launcher() -> None:
+    text = INSTALL_PS1.read_text(encoding="utf-8")
+
+    assert "function Install-BlackboxCommand" in text
+    assert 'Join-Path $HOME ".local\\bin"' in text
+    assert 'Join-Path $shimDir "blackbox.cmd"' in text
+    assert "managed-by: agent-blackbox-installer" in text
+    assert '"$HermesBin" blackbox %*' in text
+    assert 'exit /b %ERRORLEVEL%' in text
+    assert '[Environment]::SetEnvironmentVariable("Path", $newUserPath, "User")' in text
+    assert text.index("Install-BlackboxCommand") < text.rindex("Install-Dkg")
+
+
+def _select_unix_install_root(home: Path, explicit: Path | None = None) -> Path:
+    """Evaluate only the install-root preamble with an isolated fake home."""
+    text = INSTALL_SH.read_text(encoding="utf-8")
+    preamble = text.split('DKG_NETWORK="${BLACKBOX_DKG_NETWORK', 1)[0]
+    env = {"HOME": str(home), "PATH": os.environ.get("PATH", "")}
+    if explicit is not None:
+        env["BLACKBOX_INSTALL_DIR"] = str(explicit)
+    result = subprocess.run(
+        ["bash", "-c", f'{preamble}\nprintf %s "$BLACKBOX_INSTALL_ROOT"'],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    return Path(result.stdout)
+
+
+def test_llm_setup_reuses_existing_config_without_prompting() -> None:
+    body = _extract_function_body("setup_llm")
+
+    assert "blackbox setup-llm --configure" not in body
+    assert "blackbox setup-llm --auto" in body
+    assert "existing Blackbox, Hermes, or OpenClaw LLM config" in body
+    assert "LLM reviewer not configured; this is optional" in body
+
+
+def test_llm_setup_is_optional_not_install_blocking() -> None:
+    body = _extract_function_body("setup_llm")
+
+    assert "LLM setup skipped" not in body
+    assert "blackbox setup-llm --auto" in body
+    assert "BLACKBOX_LLM_INCOMPLETE=true" not in body
+    assert "BLACKBOX_INSTALL_INCOMPLETE=true" not in body
+    assert not re.search(r"<\s*/dev/tty", body), "installer must not prompt for optional LLM setup"
+
+
+def test_next_steps_only_blocks_on_threat_graph_sync() -> None:
+    body = _extract_function_body("next_steps")
+
+    assert "BLACKBOX_THREAT_GRAPH_INCOMPLETE" in body
+    assert "BLACKBOX_LLM_INCOMPLETE" not in body
+    assert "The LLM reviewer is not configured yet." not in body
+
+
+def test_unix_installer_is_directly_executable_and_detaches_background_processes(
+    tmp_path: Path,
+) -> None:
+    assert os.access(INSTALL_SH, os.X_OK)
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    (fake_bin / "nohup").symlink_to(shutil.which("nohup") or "/usr/bin/nohup")
+    pid_file = tmp_path / "child.pid"
+    log_file = tmp_path / "child.log"
+    body = _extract_function_body("run_detached")
+    child_code = (
+        "import os,time,pathlib; "
+        f"pathlib.Path({str(pid_file)!r}).write_text(str(os.getpid())); "
+        "time.sleep(30)"
+    )
+    command = f"""
+run_detached() {{
+{body}
+}}
+PATH={shlex.quote(str(fake_bin))}
+run_detached {shlex.quote(str(log_file))} {shlex.quote(sys.executable)} -c {shlex.quote(child_code)}
+"""
+    subprocess.run(["bash", "-c", command], check=True, timeout=5)
+
+    deadline = time.monotonic() + 3
+    while not pid_file.exists() and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert pid_file.exists(), "detached child did not survive the installer shell"
+    child_pid = int(pid_file.read_text(encoding="utf-8"))
+    try:
+        os.kill(child_pid, 0)
+    finally:
+        # The detached process is intentionally reparented, so the suite's
+        # Python-level process-tree guard no longer considers it a child.
+        subprocess.run(["/bin/kill", "-TERM", str(child_pid)], check=False)
+
+
+def test_unix_installer_verifies_background_sync_survives_startup() -> None:
+    run_body = _extract_function_body("run_detached")
+    health_body = _extract_function_body("detached_process_survived_startup")
+    sync_body = _extract_function_body("sync_ruleset")
+
+    assert 'BLACKBOX_DETACHED_PID=$!' in run_body
+    assert 'kill -0 "$pid"' in health_body
+    assert 'detached_process_survived_startup "$sync_pid"' in sync_body
+    assert 'BLACKBOX_INSTALL_INCOMPLETE=true' in sync_body
+    assert 'BLACKBOX_THREAT_GRAPH_INCOMPLETE=true' in sync_body
+    assert 'Threat graph sync exited during startup.' in sync_body
+    assert 'Threat graph sync running in background (PID $sync_pid)' in sync_body
+
+
+def test_installers_enable_blackbox_noninteractively() -> None:
+    unix = _extract_function_body("enable_and_configure")
+    windows = _extract_powershell_function_body("Enable-AndConfigure")
+
+    assert "plugins enable blackbox --no-allow-tool-override" in unix
+    assert "plugins enable blackbox --no-allow-tool-override" in windows
+
+
+def test_hermes_setup_defaults_to_reuse_without_prompting() -> None:
+    text = INSTALL_SH.read_text()
+    body = _extract_function_body("run_hermes_setup")
+
+    assert 'BLACKBOX_HERMES_SETUP="${BLACKBOX_HERMES_SETUP:-reuse}"' in text
+    assert "reuse_existing_hermes_api_keys" in body
+    assert "No existing Hermes API key found; skipping Hermes setup wizard." in body
+    assert "Threat-graph sync does not require a Nous subscription or model key." in body
+
+
+def test_hermes_key_reuse_finds_existing_env_files() -> None:
+    body = _extract_function_body("reuse_existing_hermes_api_keys")
+
+    assert '"$REPO_DIR/.env"' in body
+    assert '"$HOME/.hermes/.env"' in body
+    assert "Reused existing Hermes API key configuration" in body
+    assert "grep -E \"$HERMES_API_KEY_RE\"" in body
+
+
+def test_unix_installer_uses_isolated_blackbox_dkg_node() -> None:
+    text = INSTALL_SH.read_text()
+
+    assert 'BLACKBOX_DKG_PORT="${BLACKBOX_DKG_PORT:-9320}"' in text
+    assert 'BLACKBOX_DKG_STORE_PORT="${BLACKBOX_DKG_STORE_PORT:-9999}"' in text
+    assert 'BLACKBOX_DKG_STORE_URL="${BLACKBOX_DKG_STORE_URL:-}"' in text
+    assert 'BLACKBOX_INSTALL_ROOT="$HOME/agent-blackbox"' in text
+    assert 'BLACKBOX_DKG_HOME="$BLACKBOX_INSTALL_ROOT/.dkg"' in text
+    assert 'BLACKBOX_DKG_CLI_DIR="$BLACKBOX_INSTALL_ROOT/dkg"' in text
+    assert 'BLACKBOX_DKG_BIN="$BLACKBOX_DKG_CLI_DIR/node_modules/.bin/dkg"' in text
+    assert (
+        'BLACKBOX_DKG_PACKAGE="${BLACKBOX_DKG_PACKAGE:-'
+        '@origintrail-official/dkg@latest}"'
+    ) in text
+    assert 'BLACKBOX_DKG_DAEMON_URL="http://127.0.0.1:$BLACKBOX_DKG_PORT"' in text
+    assert 'npm install --prefix "$BLACKBOX_DKG_CLI_DIR"' in text
+    assert '--prefer-online' in text
+    assert "BLACKBOX_DKG_REPO_URL" not in text
+    assert "corepack pnpm" not in text
+    assert "ensure_blackbox_dkg_config" in text
+    assert 'blackbox_dkg start' in text
+    assert '"apiPort"] = api_port' in text
+    assert '"backend": "blazegraph"' in text
+    assert '"options": {"url": store_url, "managedByDkg": store_managed, "timeout": 900000}' in text
+    assert "blackbox-blazegraph.mjs" in text
+    assert 'blackbox_dkg subscribe "$blackbox_cg" --save' not in text
+    assert '"$HERMES_BIN" blackbox sync --wait' in text
+    assert "uses_unpaired_shared_dkg_home" in text
+    assert "uses_legacy_blackbox_dkg_home" in text
+    assert "migrate_legacy_blackbox_dkg_home" in text
+    assert 'blackbox["dkg_home"] = dkg_home' in text
+    assert 'blackbox["dkg_bin"] = dkg_bin' in text
+    assert "npm i -g" not in text
+    assert "npm install -g" not in text
+    assert '"dkg_url": "http://127.0.0.1:9200"' not in text
+
+
+def test_unix_installer_rebinds_stale_dkg_paths_as_one_runtime(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    stale_checkout = tmp_path / "deleted-agent-blackbox"
+    config_path.write_text(
+        """plugins:
+  entries:
+    blackbox:
+      dkg_url: http://127.0.0.1:9320
+      dkg_home: %s
+      dkg_bin: %s
+"""
+        % (
+            stale_checkout / ".dkg",
+            stale_checkout / "dkg" / "node_modules" / ".bin" / "dkg",
+        ),
+        encoding="utf-8",
+    )
+    target_checkout = tmp_path / "current-agent-blackbox"
+    target_home = target_checkout / ".dkg"
+    target_bin = target_checkout / "dkg" / "node_modules" / ".bin" / "dkg"
+
+    migrated = _run_unix_blackbox_config_writer(
+        config_path,
+        dkg_url="http://127.0.0.1:9337",
+        dkg_home=target_home,
+        dkg_bin=target_bin,
+    )
+    blackbox = migrated["plugins"]["entries"]["blackbox"]
+
+    assert blackbox["dkg_url"] == "http://127.0.0.1:9337"
+    assert blackbox["dkg_home"] == str(target_home)
+    assert blackbox["dkg_bin"] == str(target_bin)
+
+
+def test_unix_installer_rebinds_an_existing_previous_managed_checkout(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    old_checkout = tmp_path / "old-agent-blackbox"
+    old_home = old_checkout / ".dkg"
+    old_bin = old_checkout / "dkg" / "node_modules" / ".bin" / "dkg"
+    old_home.mkdir(parents=True)
+    old_bin.parent.mkdir(parents=True)
+    old_bin.write_text("old managed dkg", encoding="utf-8")
+    config_path.write_text(
+        """plugins:
+  entries:
+    blackbox:
+      dkg_url: http://127.0.0.1:9320
+      dkg_home: %s
+      dkg_bin: %s
+"""
+        % (old_home, old_bin),
+        encoding="utf-8",
+    )
+    target_checkout = tmp_path / "current-agent-blackbox"
+    target_home = target_checkout / ".dkg"
+    target_bin = target_checkout / "dkg" / "node_modules" / ".bin" / "dkg"
+
+    migrated = _run_unix_blackbox_config_writer(
+        config_path,
+        dkg_url="http://127.0.0.1:9337",
+        dkg_home=target_home,
+        dkg_bin=target_bin,
+    )
+    blackbox = migrated["plugins"]["entries"]["blackbox"]
+
+    assert blackbox["dkg_url"] == "http://127.0.0.1:9337"
+    assert blackbox["dkg_home"] == str(target_home)
+    assert blackbox["dkg_bin"] == str(target_bin)
+
+
+def test_unix_installer_rebinds_the_port_for_its_current_managed_checkout(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "config.yaml"
+    target_checkout = tmp_path / "current-agent-blackbox"
+    target_home = target_checkout / ".dkg"
+    target_bin = target_checkout / "dkg" / "node_modules" / ".bin" / "dkg"
+    target_home.mkdir(parents=True)
+    target_bin.parent.mkdir(parents=True)
+    target_bin.write_text("managed dkg", encoding="utf-8")
+    config_path.write_text(
+        """plugins:
+  entries:
+    blackbox:
+      dkg_url: http://127.0.0.1:9320
+      dkg_home: %s
+      dkg_bin: %s
+"""
+        % (target_home, target_bin),
+        encoding="utf-8",
+    )
+
+    migrated = _run_unix_blackbox_config_writer(
+        config_path,
+        dkg_url="http://127.0.0.1:9337",
+        dkg_home=target_home,
+        dkg_bin=target_bin,
+    )
+    blackbox = migrated["plugins"]["entries"]["blackbox"]
+
+    assert blackbox["dkg_url"] == "http://127.0.0.1:9337"
+    assert blackbox["dkg_home"] == str(target_home)
+    assert blackbox["dkg_bin"] == str(target_bin)
+
+
+def test_unix_installer_preserves_a_valid_custom_dkg_runtime(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    custom_home = tmp_path / "custom-state"
+    custom_bin = tmp_path / "custom-cli" / "dkg"
+    custom_home.mkdir()
+    custom_bin.parent.mkdir()
+    custom_bin.write_text("custom dkg", encoding="utf-8")
+    config_path.write_text(
+        """plugins:
+  entries:
+    blackbox:
+      dkg_url: http://127.0.0.1:9444
+      dkg_home: %s
+      dkg_bin: %s
+"""
+        % (custom_home, custom_bin),
+        encoding="utf-8",
+    )
+
+    migrated = _run_unix_blackbox_config_writer(
+        config_path,
+        dkg_url="http://127.0.0.1:9337",
+        dkg_home=tmp_path / "managed" / ".dkg",
+        dkg_bin=tmp_path / "managed" / "dkg" / "node_modules" / ".bin" / "dkg",
+    )
+    blackbox = migrated["plugins"]["entries"]["blackbox"]
+
+    assert blackbox["dkg_url"] == "http://127.0.0.1:9444"
+    assert blackbox["dkg_home"] == str(custom_home)
+    assert blackbox["dkg_bin"] == str(custom_bin)
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash is unavailable")
+def test_unix_installer_uses_agent_blackbox_checkout(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+
+    assert _select_unix_install_root(home) == home / "agent-blackbox"
+
+    repo_checkout = home / "agent-blackbox"
+    (repo_checkout / ".git").mkdir(parents=True)
+    assert _select_unix_install_root(home) == repo_checkout
+
+    explicit = tmp_path / "custom-blackbox"
+    assert _select_unix_install_root(home, explicit) == explicit
+
+
+def test_windows_installer_uses_agent_blackbox_checkout() -> None:
+    text = INSTALL_PS1.read_text(encoding="utf-8")
+
+    assert 'Test-Path "$env:USERPROFILE\\agent-blackbox\\.git"' in text
+    assert '$DefaultRepoDir = "$env:USERPROFILE\\agent-blackbox"' in text
+
+
+# The four mainnet-base core relays written to config.relayPeers.
+# On DKG <=10.0.4 an empty relayPeers left the node with 0 circuit reservations
+# 10.0.5+ also resolves relays from preferredRelays and the built-in network config,
+# so this explicit configuration is
+# now defensive belt-and-suspenders rather than the sole reachability path. It
+# stays because it is harmless (deduped) and protects pre-10.0.5 nodes; guard the
+# exact multiaddrs and the merge logic against silent regression either way.
+MAINNET_BASE_RELAYS = (
+    "/ip4/178.104.98.10/tcp/9090/p2p/12D3KooWFWm8sg6dkitmdBd5Uxaqp3CDRL27mFcM7vEHK92Xapyy",
+    "/ip4/168.119.127.54/tcp/9090/p2p/12D3KooWMasqzRrim48ZJM64UyTfHufDTmSG3n3jqwsS5phz8m91",
+    "/ip4/178.156.237.133/tcp/9090/p2p/12D3KooWDgTunUpkGaE7dYCaDP1CCBT6Dm2HPMXSZhJn2KXYLH15",
+    "/ip4/178.105.211.42/tcp/9090/p2p/12D3KooWCodgXHMwybaEe93rbKgWMfGXQvUb6cpT3VCrjCbbnyEu",
+)
+
+_RELAY_SEED_ASSERTS = (
+    'existing_relays = data.get("relayPeers")',
+    "merged_relays = list(dict.fromkeys([*existing_relays, *MAINNET_BASE_RELAYS]))",
+    'data["relayPeers"] = merged_relays',
+    'data["relayReservationCount"] = int(data.get("relayReservationCount") or 4)',
+)
+
+
+def test_unix_installer_configures_relay_peers_for_reachability() -> None:
+    text = INSTALL_SH.read_text()
+
+    for relay in MAINNET_BASE_RELAYS:
+        assert relay in text, f"missing mainnet-base relay {relay}"
+    for line in _RELAY_SEED_ASSERTS:
+        assert line in text, f"relayPeers configuration line missing: {line}"
+
+
+def test_windows_installer_configures_relay_peers_for_reachability() -> None:
+    text = INSTALL_PS1.read_text()
+
+    for relay in MAINNET_BASE_RELAYS:
+        assert relay in text, f"missing mainnet-base relay {relay}"
+    for line in _RELAY_SEED_ASSERTS:
+        assert line in text, f"relayPeers configuration line missing: {line}"
+
+
+def test_windows_installer_uses_isolated_blackbox_dkg_node() -> None:
+    text = INSTALL_PS1.read_text()
+
+    assert "$DkgPort" in text and "9320" in text
+    assert "$DkgStorePort" in text and "9999" in text
+    assert "$DkgStoreUrl" in text
+    assert '$DkgHome     = Join-Path $DefaultRepoDir ".dkg"' in text
+    assert '$DkgCliDir   = Join-Path $DefaultRepoDir "dkg"' in text
+    assert r'$DkgBin      = Join-Path $DkgCliDir "node_modules\.bin\dkg.cmd"' in text
+    assert "@origintrail-official/dkg@latest" in text
+    assert '$DkgDaemonUrl = "http://127.0.0.1:$DkgPort"' in text
+    assert "npm install --prefix $DkgCliDir --prefer-online $DkgPackage" in text
+    assert "BLACKBOX_DKG_REPO_URL" not in text
+    assert "corepack pnpm" not in text
+    assert "Ensure-BlackboxDkgConfig" in text
+    assert "Invoke-BlackboxDkg start" in text
+    assert 'data["apiPort"] = api_port' in text
+    assert '"backend": "blazegraph"' in text
+    assert '"options": {"url": store_url, "managedByDkg": store_managed, "timeout": 900000}' in text
+    assert "blackbox-blazegraph.mjs" in text
+    assert "uses_unpaired_shared_dkg_home" in text
+    assert "uses_legacy_blackbox_dkg_home" in text
+    assert "uses_target_managed_home" in text
+    assert "uses_other_managed_checkout" in text
+    assert "stale_configured_dkg_home" in text
+    assert "stale_configured_dkg_bin" in text
+    assert "rebind_managed_dkg" in text
+    assert "Move-LegacyBlackboxDkgHome" in text
+    assert 'blackbox["dkg_home"] = dkg_home' in text
+    assert 'blackbox["dkg_bin"] = dkg_bin' in text
+    assert "npm i -g" not in text
+    assert "npm install -g" not in text
+    assert '"dkg_url": "http://127.0.0.1:9200"' not in text
+
+
+def test_dkg_config_writer_leaves_subscriptions_to_the_dkg_api(tmp_path: Path) -> None:
+    home = tmp_path / "dkg"
+    home.mkdir()
+    config = home / "config.json"
+    config.write_text(
+        json.dumps(
+            {
+                "contextGraphs": [
+                    "umanitek/guardian-threats-staging",
+                    "custom/private-graph",
+                ],
+                "syncAgentsMeta": True,
+                "restrictAutoSubscribeContextGraphs": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+    writer = _extract_unix_config_writer()
+
+    subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            writer,
+            str(home),
+            "9320",
+            "blazegraph",
+            BLAZEGRAPH_URL,
+            "true",
+            "umanitek/blackbox-threats-staging",
+        ],
+        check=True,
+    )
+    migrated = json.loads(config.read_text(encoding="utf-8"))
+
+    assert migrated["contextGraphs"] == [
+        "umanitek/guardian-threats-staging",
+        "custom/private-graph",
+    ]
+    assert "autoApproveJoinRequests" not in migrated
+    assert "syncAgentsMeta" not in migrated
+    assert "syncOnConnectEnabled" not in migrated
+    assert "syncGlobalMaxInflight" not in migrated
+    assert "syncGlobalQueueLimit" not in migrated
+    assert "restrictAutoSubscribeContextGraphs" not in migrated
+    assert migrated["store"] == {
+        "backend": "blazegraph",
+        "options": {"url": BLAZEGRAPH_URL, "managedByDkg": True, "timeout": 900000},
+    }
+
+def test_dkg_config_writer_reports_only_real_runtime_changes(tmp_path: Path) -> None:
+    home = tmp_path / "dkg"
+    writer = _extract_unix_config_writer()
+    command = [
+        sys.executable,
+        "-c",
+        writer,
+        str(home),
+        "9320",
+        "blazegraph",
+        BLAZEGRAPH_URL,
+        "true",
+        "umanitek/blackbox-threats-staging",
+    ]
+
+    first = subprocess.run(command, check=True, capture_output=True, text=True)
+    config = home / "config.json"
+    first_mtime = config.stat().st_mtime_ns
+    second = subprocess.run(command, check=True, capture_output=True, text=True)
+
+    assert first.stdout.strip() == "changed"
+    assert second.stdout.strip() == "unchanged"
+    assert config.stat().st_mtime_ns == first_mtime
+
+
+def test_dkg_config_writer_preserves_oxigraph_config_during_switch(tmp_path: Path) -> None:
+    home = tmp_path / "dkg"
+    home.mkdir()
+    config = home / "config.json"
+    previous = {
+        "name": "existing-node",
+        "store": {
+            "backend": "oxigraph-server",
+            "options": {"port": 7879, "readyTimeoutMs": 120000},
+        },
+    }
+    config.write_text(json.dumps(previous), encoding="utf-8")
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            _extract_unix_config_writer(),
+            str(home),
+            "9320",
+            "blazegraph",
+            BLAZEGRAPH_URL,
+            "true",
+            "umanitek/blackbox-threats-staging",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.stdout.strip() == "switched"
+    assert json.loads((home / "config.json.pre-blazegraph").read_text()) == previous
+    assert (home / ".blackbox-store-reset-pending").read_text() == "blazegraph\n"
+    assert json.loads(config.read_text())["store"] == {
+        "backend": "blazegraph",
+        "options": {"url": BLAZEGRAPH_URL, "managedByDkg": True, "timeout": 900000},
+    }
+
+
+def test_dkg_config_writer_supports_oxigraph_fallback_without_losing_blazegraph_config(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "dkg"
+    home.mkdir()
+    config = home / "config.json"
+    previous = {
+        "name": "existing-node",
+        "store": {
+            "backend": "blazegraph",
+            "options": {"url": BLAZEGRAPH_URL, "managedByDkg": True},
+        },
+    }
+    config.write_text(json.dumps(previous), encoding="utf-8")
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            _extract_unix_config_writer(),
+            str(home),
+            "9320",
+            "oxigraph-server",
+            "",
+            "false",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.stdout.strip() == "switched"
+    assert json.loads((home / "config.json.pre-oxigraph-server").read_text()) == previous
+    assert (home / ".blackbox-store-reset-pending").read_text() == "oxigraph-server\n"
+    assert json.loads(config.read_text())["store"] == {"backend": "oxigraph-server"}
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash is unavailable")
+def test_unix_installer_marks_missing_docker_as_fatal() -> None:
+    body = _extract_function_body("require_docker_for_blazegraph")
+    command = f"""
+require_docker_for_blazegraph() {{
+{body}
+}}
+docker_setup_hint() {{ printf 'docker-setup-hint\\n'; }}
+ok() {{ :; }}
+BLACKBOX_DOCKER_REQUIRED=false
+PATH=
+require_docker_for_blazegraph
+rc=$?
+printf '%s|%s\\n' "$rc" "$BLACKBOX_DOCKER_REQUIRED"
+"""
+    completed = subprocess.run(
+        ["bash", "-c", command],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert "docker-setup-hint" in completed.stdout
+    assert completed.stdout.rstrip().endswith("1|true")
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash is unavailable")
+def test_unix_installer_stops_when_blazegraph_needs_docker(tmp_path: Path) -> None:
+    command = f"""
+install_dkg() {{
+{_extract_function_body("install_dkg")}
+}}
+heading() {{ :; }}
+step() {{ :; }}
+warn() {{ :; }}
+err() {{ printf '%s\\n' "$*"; }}
+dkg_manual_hint() {{ :; }}
+prepare_blackbox_dkg_process_environment() {{ return 0; }}
+install_blackbox_dkg_package() {{ return 0; }}
+migrate_legacy_blackbox_dkg_home() {{ return 0; }}
+check_blackbox_dkg_port() {{ return 0; }}
+provision_blackbox_store() {{ BLACKBOX_DOCKER_REQUIRED=true; return 2; }}
+SKIP_DKG=false
+HAS_NODE=true
+NODE_MAJOR=22
+BLACKBOX_DKG_PACKAGE=test-package
+BLACKBOX_DKG_CLI_DIR={shlex.quote(str(tmp_path / "cli"))}
+BLACKBOX_DKG_HOME={shlex.quote(str(tmp_path / "home"))}
+BLACKBOX_DOCKER_REQUIRED=false
+install_dkg
+printf 'installer-continued\\n'
+"""
+    completed = subprocess.run(
+        ["bash", "-c", command],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 1
+    assert "Installation stopped before changing the DKG store" in completed.stdout
+    assert "installer-continued" not in completed.stdout
+
+
+@pytest.mark.skipif(
+    shutil.which("bash") is None or shutil.which("node") is None,
+    reason="bash or Node.js is unavailable",
+)
+def test_unix_installer_falls_back_to_oxigraph_after_blazegraph_failure(
+    tmp_path: Path,
+) -> None:
+    venv_bin = tmp_path / "venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    (venv_bin / "python").symlink_to(sys.executable)
+    scripts = tmp_path / "repo" / "scripts"
+    scripts.mkdir(parents=True)
+    (scripts / "blackbox-blazegraph.mjs").write_text("process.exit(1);\n", encoding="utf-8")
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    docker = fake_bin / "docker"
+    docker.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    docker.chmod(0o755)
+
+    command = f"""
+require_docker_for_blazegraph() {{
+{_extract_function_body("require_docker_for_blazegraph")}
+}}
+use_blackbox_oxigraph() {{
+{_extract_function_body("use_blackbox_oxigraph")}
+}}
+confirm_oxigraph_fallback() {{ return 0; }}
+check_blackbox_blazegraph() {{
+{_extract_function_body("check_blackbox_blazegraph")}
+}}
+provision_blackbox_store() {{
+{_extract_function_body("provision_blackbox_store")}
+}}
+step() {{ :; }}
+ok() {{ :; }}
+warn() {{ :; }}
+err() {{ :; }}
+docker_setup_hint() {{ :; }}
+VENV_DIR={shlex.quote(str(tmp_path / "venv"))}
+REPO_DIR={shlex.quote(str(tmp_path / "repo"))}
+BLACKBOX_DKG_HOME={shlex.quote(str(tmp_path / "dkg-home"))}
+BLACKBOX_DKG_CLI_DIR={shlex.quote(str(tmp_path / "dkg-cli"))}
+BLACKBOX_DKG_STORE_PORT=9999
+BLACKBOX_DKG_STORE_URL=
+BLACKBOX_DKG_STORE_URL_EXPLICIT=false
+BLACKBOX_DKG_STORE_MANAGED_BY_DKG=false
+BLACKBOX_DKG_STORE_BACKEND=auto
+BLACKBOX_DKG_SELECTED_STORE_BACKEND=
+BLACKBOX_DOCKER_REQUIRED=false
+PATH={shlex.quote(str(fake_bin) + os.pathsep + os.environ.get("PATH", ""))}
+provision_blackbox_store
+printf '%s|%s|%s\\n' "$BLACKBOX_DKG_SELECTED_STORE_BACKEND" "$BLACKBOX_DKG_STORE_URL" "$BLACKBOX_DKG_STORE_MANAGED_BY_DKG"
+"""
+    completed = subprocess.run(
+        ["bash", "-c", command],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.stdout.rstrip().endswith("oxigraph-server||false")
+
+
+@pytest.mark.skipif(
+    shutil.which("bash") is None or shutil.which("node") is None,
+    reason="bash or Node.js is unavailable",
+)
+def test_unix_installer_does_not_fall_back_to_oxigraph_without_confirmation(
+    tmp_path: Path,
+) -> None:
+    venv_bin = tmp_path / "venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    (venv_bin / "python").symlink_to(sys.executable)
+    scripts = tmp_path / "repo" / "scripts"
+    scripts.mkdir(parents=True)
+    (scripts / "blackbox-blazegraph.mjs").write_text("process.exit(1);\n", encoding="utf-8")
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    docker = fake_bin / "docker"
+    docker.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    docker.chmod(0o755)
+
+    command = f"""
+require_docker_for_blazegraph() {{
+{_extract_function_body("require_docker_for_blazegraph")}
+}}
+use_blackbox_oxigraph() {{
+{_extract_function_body("use_blackbox_oxigraph")}
+}}
+confirm_oxigraph_fallback() {{ return 1; }}
+check_blackbox_blazegraph() {{
+{_extract_function_body("check_blackbox_blazegraph")}
+}}
+provision_blackbox_store() {{
+{_extract_function_body("provision_blackbox_store")}
+}}
+step() {{ :; }}
+ok() {{ :; }}
+warn() {{ :; }}
+err() {{ :; }}
+docker_setup_hint() {{ :; }}
+VENV_DIR={shlex.quote(str(tmp_path / "venv"))}
+REPO_DIR={shlex.quote(str(tmp_path / "repo"))}
+BLACKBOX_DKG_HOME={shlex.quote(str(tmp_path / "dkg-home"))}
+BLACKBOX_DKG_CLI_DIR={shlex.quote(str(tmp_path / "dkg-cli"))}
+BLACKBOX_DKG_STORE_PORT=9999
+BLACKBOX_DKG_STORE_URL=
+BLACKBOX_DKG_STORE_URL_EXPLICIT=false
+BLACKBOX_DKG_STORE_MANAGED_BY_DKG=false
+BLACKBOX_DKG_STORE_BACKEND=auto
+BLACKBOX_DKG_SELECTED_STORE_BACKEND=
+BLACKBOX_DOCKER_REQUIRED=false
+PATH={shlex.quote(str(fake_bin) + os.pathsep + os.environ.get("PATH", ""))}
+provision_blackbox_store && printf 'unexpected-continue\n'
+"""
+    completed = subprocess.run(
+        ["bash", "-c", command],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode != 0
+    assert "unexpected-continue" not in completed.stdout
+
+
+def test_installers_offer_both_store_backends_and_actionable_docker_setup() -> None:
+    unix = INSTALL_SH.read_text(encoding="utf-8")
+    windows = INSTALL_PS1.read_text(encoding="utf-8")
+
+    assert "--store MODE" in unix
+    assert "Store backend: auto, blazegraph, or oxigraph" in unix
+    assert "auto|blazegraph|oxigraph" in windows
+    assert "oxigraph-server" in unix and "oxigraph-server" in windows
+    assert "https://get.docker.com" in unix
+    assert "brew install --cask docker && open -a Docker" in unix
+    assert "Docker.DockerDesktop" in windows
+    assert "docker info" in unix and "docker info" in windows
+    assert "Continue with Oxigraph instead? [y/N]" in unix
+    assert "Continue with Oxigraph instead? [y/N]" in windows
+    assert "confirm_oxigraph_fallback" in unix
+    assert "Confirm-OxigraphFallback" in windows
+    assert "Installation stopped before changing the DKG store" in unix
+    assert "Installation stopped before changing the DKG store" in windows
+
+
+def test_blazegraph_helper_uses_built_dkg_provisioner(tmp_path: Path) -> None:
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("Node.js is not installed")
+    cli = tmp_path / "node_modules" / "@origintrail-official" / "dkg"
+    module = cli / "dist" / "daemon" / "blazegraph-docker.js"
+    module.parent.mkdir(parents=True)
+    (cli / "package.json").write_text('{"type":"module"}', encoding="utf-8")
+    module.write_text(
+        "export async function provisionBlazegraphDocker(options) {\n"
+        "  return {url: `http://127.0.0.1:${options.port}/${options.namespace}`, "
+        "port: options.port, managedByDkg: true};\n"
+        "}\n",
+        encoding="utf-8",
+    )
+
+    completed = subprocess.run(
+        [node, str(BLAZEGRAPH_HELPER), str(tmp_path), "blackbox-test", "10001"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert json.loads(completed.stdout) == {
+        "url": "http://127.0.0.1:10001/blackbox-test",
+        "port": 10001,
+        "managedByDkg": True,
+    }
+
+
+def test_blazegraph_helper_uses_dkg_store_health_check(tmp_path: Path) -> None:
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("Node.js is not installed")
+    cli = tmp_path / "node_modules" / "@origintrail-official" / "dkg"
+    module = cli / "dist" / "daemon" / "store-health-check.js"
+    module.parent.mkdir(parents=True)
+    (cli / "package.json").write_text('{"type":"module"}', encoding="utf-8")
+    module.write_text(
+        "export async function checkExternalStoreReachable(options) {\n"
+        "  const endpoint = options.storeConfig.options.url;\n"
+        "  return endpoint.includes('healthy')\n"
+        "    ? {ok: true, backend: 'blazegraph', endpoint}\n"
+        "    : {ok: false, backend: 'blazegraph', endpoint, error: 'HTTP 500'};\n"
+        "}\n"
+        "export function formatHealthCheckFailure(result) {\n"
+        "  return `store unreachable: ${result.endpoint}: ${result.error}`;\n"
+        "}\n",
+        encoding="utf-8",
+    )
+
+    healthy = subprocess.run(
+        [node, str(BLAZEGRAPH_HELPER), "check", str(tmp_path), "http://healthy/sparql"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    failed = subprocess.run(
+        [node, str(BLAZEGRAPH_HELPER), "check", str(tmp_path), "http://broken/sparql"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert json.loads(healthy.stdout)["ok"] is True
+    assert failed.returncode == 1
+    assert "store unreachable: http://broken/sparql: HTTP 500" in failed.stderr
+
+
+def test_dkg_config_writer_recovers_invalid_utf8(tmp_path: Path) -> None:
+    home = tmp_path / "dkg"
+    home.mkdir()
+    config = home / "config.json"
+    config.write_bytes(b"\xff\xfeinvalid")
+    writer = _extract_unix_config_writer()
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            writer,
+            str(home),
+            "9320",
+            "blazegraph",
+            BLAZEGRAPH_URL,
+            "true",
+            "umanitek/blackbox-threats-staging",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.stdout.strip() == "changed"
+    recovered = json.loads(config.read_text(encoding="utf-8"))
+    assert "contextGraphs" not in recovered
+
+
+def test_installers_use_native_dkg_membership_without_sync_overrides() -> None:
+    unix = INSTALL_SH.read_text(encoding="utf-8")
+    windows = INSTALL_PS1.read_text(encoding="utf-8")
+
+    for text in (unix, windows):
+        assert "blackbox-clean-dkg-subscriptions.py" not in text
+        assert "DKG_CATCHUP_MAX_CONCURRENT_PEERS" not in text
+        assert "DKG_SYNC_PAGE_TIMEOUT_MS" not in text
+        assert "DKG_SYNC_TOTAL_TIMEOUT_MS" in text
+        assert "DKG_SYNC_MIN_GRAPH_BUDGET_MS" not in text
+        assert "DKG_SYNC_RESPONDER_PER_SNAPSHOT_ROW_LIMIT" not in text
+        assert "DKG_SYNC_RESPONDER_GLOBAL_SNAPSHOT_ROW_LIMIT" not in text
+        assert "blackbox-dkg-runtime-fingerprint.py" in text
+        assert "DKG daemon is ready on npm build" in text
+        assert "autoApproveJoinRequests" not in text
+        assert 'data.pop("syncOnConnectEnabled", None)' in text
+        assert 'data.pop("syncGlobalMaxInflight", None)' in text
+        assert 'data.pop("syncGlobalQueueLimit", None)' in text
+        assert 'data.pop("restrictAutoSubscribeContextGraphs", None)' in text
+        assert '"backend": "blazegraph"' in text
+        assert '"options": {"url": store_url, "managedByDkg": store_managed, "timeout": 900000}' in text
+        assert "DKG_ACCEPT_STORE_RESET" in text
+        assert "DKG_STORE_QUEUE_LIMIT" in text
+        assert "DKG_LIST_CONTEXT_GRAPHS_PROJECTION" in text
+        assert "DKG_SYNC_GLOBAL_MAX_INFLIGHT" in text
+        assert "NODE_OPTIONS" in text
+        assert "blackbox-npm-install.log" in text
+        assert "Blazegraph SPARQL endpoint is healthy" in text
+        assert "Blazegraph is unavailable or returned an error" in text
+
+    assert 'BLACKBOX_DKG_SYNC_GLOBAL_MAX_INFLIGHT="1"' in unix
+    assert '$DkgSyncGlobalMaxInflight = "1"' in windows
+    assert "one large sync at a time" in unix
+    assert "one large sync at a time" in windows
+
+
+@pytest.mark.parametrize("store_backend", ["blazegraph", "oxigraph-server"])
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash is unavailable")
+def test_unix_dkg_launcher_applies_memory_and_single_flight_guards(
+    tmp_path: Path,
+    store_backend: str,
+) -> None:
+    dkg = tmp_path / "dkg"
+    dkg.write_text(
+        "#!/bin/sh\n"
+        "backend=$(sed -n 's/.*\"backend\": *\"\\([^\"]*\\)\".*/\\1/p' "
+        "\"$DKG_HOME/config.json\")\n"
+        "printf '%s|%s|%s|%s|%s\\n' \"$backend\" \"$DKG_HOME\" "
+        "\"$DKG_SYNC_GLOBAL_MAX_INFLIGHT\" \"$NODE_OPTIONS\" \"$1\"\n",
+        encoding="utf-8",
+    )
+    dkg.chmod(0o755)
+    dkg_home = tmp_path / "dkg-home"
+    dkg_home.mkdir()
+    (dkg_home / "config.json").write_text(
+        json.dumps({"store": {"backend": store_backend}}),
+        encoding="utf-8",
+    )
+    body = _extract_function_body("blackbox_dkg")
+    command = f"""
+blackbox_dkg() {{
+{body}
+}}
+BLACKBOX_DKG_HOME={shlex.quote(str(dkg_home))}
+BLACKBOX_DKG_BIN={shlex.quote(str(dkg))}
+BLACKBOX_DKG_ACCEPT_STORE_RESET=false
+BLACKBOX_DKG_STORE_RESET_MARKER={shlex.quote(str(dkg_home / '.reset'))}
+BLACKBOX_DKG_STORE_QUEUE_LIMIT=512
+BLACKBOX_DKG_LIST_CONTEXT_GRAPHS_PROJECTION=1
+BLACKBOX_DKG_SYNC_GLOBAL_MAX_INFLIGHT=1
+BLACKBOX_DKG_NODE_OPTIONS='--enable-source-maps --max-old-space-size=8192'
+blackbox_dkg start
+"""
+
+    completed = subprocess.run(
+        ["bash", "-c", command],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.stdout.strip() == (
+        f"{store_backend}|{dkg_home}|1|"
+        "--enable-source-maps --max-old-space-size=8192|start"
+    )
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash is unavailable")
+def test_unix_large_graph_patch_updates_both_private_recovery_call_sites(
+    tmp_path: Path,
+) -> None:
+    cli_dir = tmp_path / "dkg-cli"
+    lifecycle = (
+        cli_dir
+        / "node_modules"
+        / "@origintrail-official"
+        / "dkg-agent"
+        / "dist"
+        / "dkg-agent-lifecycle.js"
+    )
+    constants = (
+        cli_dir
+        / "node_modules"
+        / "@origintrail-official"
+        / "dkg-agent"
+        / "dist"
+        / "dkg-agent-constants.js"
+    )
+    route = (
+        cli_dir
+        / "node_modules"
+        / "@origintrail-official"
+        / "dkg"
+        / "dist"
+        / "daemon"
+        / "routes"
+        / "memory.js"
+    )
+    lifecycle.parent.mkdir(parents=True)
+    route.parent.mkdir(parents=True)
+    old_deadline = (
+        "createContextGraphSyncDeadline: (remaining) => "
+        "this.createContextGraphSyncDeadline(remaining),"
+    )
+    lifecycle.write_text(f"first {old_deadline}\nsecond {old_deadline}\n", encoding="utf-8")
+    constants.write_text(
+        "export const SYNC_TOTAL_TIMEOUT_MS = 120_000;\n",
+        encoding="utf-8",
+    )
+    route.write_text("const MAX_BUDGET_MS = 300_000;\n", encoding="utf-8")
+    venv = tmp_path / "venv"
+    (venv / "bin").mkdir(parents=True)
+    (venv / "bin" / "python").symlink_to(Path(sys.executable))
+    body = _extract_function_body("patch_blackbox_dkg_large_graph_recovery")
+    command = f"""
+patch_blackbox_dkg_large_graph_recovery() {{
+{body}
+}}
+VENV_DIR={shlex.quote(str(venv))}
+BLACKBOX_DKG_CLI_DIR={shlex.quote(str(cli_dir))}
+patch_blackbox_dkg_large_graph_recovery 10.0.6
+"""
+
+    subprocess.run(["bash", "-c", command], check=True)
+
+    patched = lifecycle.read_text(encoding="utf-8")
+    assert old_deadline not in patched
+    assert patched.count("DKG_SWM_RECOVERY_TIMEOUT_MS") == 2
+    assert "DKG_SYNC_TOTAL_TIMEOUT_MS" in constants.read_text(encoding="utf-8")
+    assert "SYNC_TOTAL_TIMEOUT_MS = 120_000;" not in constants.read_text(encoding="utf-8")
+    assert "const MAX_BUDGET_MS = 3_600_000;" in route.read_text(encoding="utf-8")
+
+
+def test_unix_large_graph_patch_defers_to_newer_upstream_dkg(tmp_path: Path) -> None:
+    cli_dir = tmp_path / "dkg-cli"
+    lifecycle = (
+        cli_dir
+        / "node_modules"
+        / "@origintrail-official"
+        / "dkg-agent"
+        / "dist"
+        / "dkg-agent-lifecycle.js"
+    )
+    lifecycle.parent.mkdir(parents=True)
+    lifecycle.write_text("upstream sync implementation\n", encoding="utf-8")
+    body = _extract_function_body("patch_blackbox_dkg_large_graph_recovery")
+    command = f"""
+patch_blackbox_dkg_large_graph_recovery() {{
+{body}
+}}
+step() {{ :; }}
+BLACKBOX_DKG_CLI_DIR={shlex.quote(str(cli_dir))}
+patch_blackbox_dkg_large_graph_recovery 10.0.7
+"""
+
+    subprocess.run(["bash", "-c", command], check=True)
+    assert lifecycle.read_text(encoding="utf-8") == "upstream sync implementation\n"
+
+
+def test_installers_restart_running_owned_dkg_only_for_runtime_changes() -> None:
+    unix = _extract_function_body("install_dkg")
+    windows = INSTALL_PS1.read_text(encoding="utf-8")
+
+    assert "BLACKBOX_DKG_RESTART_REQUIRED" in INSTALL_SH.read_text(encoding="utf-8")
+    assert 'if [ "$BLACKBOX_DKG_RESTART_REQUIRED" != true ]; then' in unix
+    assert "blackbox_dkg stop && blackbox_dkg start && wait_for_blackbox_dkg_runtime" in unix
+    assert "install_blackbox_dkg_package" in unix
+    assert "prepare_blackbox_dkg_runtime_fingerprint" in unix
+    assert "record_blackbox_dkg_runtime_fingerprint" in unix
+    assert ".blackbox-runtime.sha256" in INSTALL_SH.read_text(encoding="utf-8")
+
+    assert "if ($script:DkgAlreadyRunning)" in windows
+    assert "if (-not $script:DkgRestartRequired)" in windows
+    assert "Invoke-BlackboxDkg stop" in windows
+    assert "Invoke-BlackboxDkg start" in windows
+    assert "Wait-BlackboxDkgRuntime" in windows
+    assert "updated sync settings are not active" in windows
+    assert "Prepare-BlackboxDkgRuntimeFingerprint" in windows
+    assert "Save-BlackboxDkgRuntimeFingerprint" in windows
+    assert ".blackbox-runtime.sha256" in windows
+
+
+def test_installers_migrate_only_the_known_legacy_blackbox_dkg_paths() -> None:
+    unix = INSTALL_SH.read_text(encoding="utf-8")
+    windows = INSTALL_PS1.read_text(encoding="utf-8")
+
+    assert '$HOME/.hermes/blackbox/dkg' in unix
+    assert '$HOME/.hermes/blackbox/dkg-cli/node_modules/.bin/dkg' in unix
+    assert 'mv "$legacy_home" "$BLACKBOX_DKG_HOME"' in unix
+    assert 'DKG_HOME="$legacy_home" "$legacy_bin" stop' in unix
+    assert '.hermes\\blackbox\\dkg' in windows
+    assert 'Move-Item $legacyHome $DkgHome' in windows
+    assert '& $legacyBin stop' in windows
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash is unavailable")
+def test_unix_legacy_dkg_state_moves_into_project_without_losing_identity(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    legacy = home / ".hermes" / "blackbox" / "dkg"
+    target = home / "agent-blackbox" / ".dkg"
+    legacy.mkdir(parents=True)
+    target.parent.mkdir(parents=True)
+    (legacy / "config.json").write_text('{"apiPort":9320}\n', encoding="utf-8")
+    (legacy / "agent-key.bin").write_bytes(b"preserved-peer-identity")
+    body = _extract_function_body("migrate_legacy_blackbox_dkg_home")
+    command = f"""
+migrate_legacy_blackbox_dkg_home() {{
+{body}
+}}
+warn() {{ :; }}
+step() {{ :; }}
+ok() {{ :; }}
+HOME={shlex.quote(str(home))}
+BLACKBOX_DKG_HOME={shlex.quote(str(target))}
+BLACKBOX_INSTALL_INCOMPLETE=false
+BLACKBOX_THREAT_GRAPH_INCOMPLETE=false
+migrate_legacy_blackbox_dkg_home
+"""
+
+    subprocess.run(["bash", "-c", command], check=True)
+
+    assert not legacy.exists()
+    assert (target / "config.json").is_file()
+    assert (target / "agent-key.bin").read_bytes() == b"preserved-peer-identity"
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash is unavailable")
+def test_unix_runtime_marker_survives_interrupted_restart_window(
+    tmp_path: Path,
+) -> None:
+    cli_dir = tmp_path / "dkg-cli"
+    home = tmp_path / "dkg-home"
+    cli_package = cli_dir / "packages" / "cli"
+    agent_package = cli_dir / "packages" / "agent"
+    (cli_package / "dist").mkdir(parents=True)
+    (agent_package / "dist").mkdir(parents=True)
+    home.mkdir()
+    (cli_package / "package.json").write_text(
+        '{"name":"@origintrail-official/dkg","version":"10.0.6"}\n',
+        encoding="utf-8",
+    )
+    (cli_package / "dist" / "cli.js").write_text(
+        "export const cli = 1;\n", encoding="utf-8"
+    )
+    (agent_package / "package.json").write_text(
+        '{"name":"@origintrail-official/dkg-agent","version":"10.0.6"}\n',
+        encoding="utf-8",
+    )
+    agent_runtime = agent_package / "dist" / "agent.js"
+    agent_runtime.write_text("export const agent = 1;\n", encoding="utf-8")
+    (home / "config.json").write_text("{}\n", encoding="utf-8")
+    dkg_bin = tmp_path / "dkg"
+    dkg_bin.write_text("launcher\n", encoding="utf-8")
+    venv = tmp_path / "venv"
+    (venv / "bin").mkdir(parents=True)
+    (venv / "bin" / "python").symlink_to(Path(sys.executable))
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    (fake_bin / "node").symlink_to(Path(sys.executable))
+    marker = home / ".blackbox-runtime.sha256"
+    prepare_body = _extract_function_body(
+        "prepare_blackbox_dkg_runtime_fingerprint"
+    )
+    record_body = _extract_function_body(
+        "record_blackbox_dkg_runtime_fingerprint"
+    )
+
+    def invoke(*, record: bool) -> tuple[str, ...]:
+        command = f"""
+warn() {{ :; }}
+prepare_blackbox_dkg_runtime_fingerprint() {{
+{prepare_body}
+}}
+record_blackbox_dkg_runtime_fingerprint() {{
+{record_body}
+}}
+REPO_DIR={shlex.quote(str(REPO_ROOT))}
+VENV_DIR={shlex.quote(str(venv))}
+BLACKBOX_DKG_CLI_DIR={shlex.quote(str(cli_dir))}
+BLACKBOX_DKG_HOME={shlex.quote(str(home))}
+BLACKBOX_DKG_BIN={shlex.quote(str(dkg_bin))}
+BLACKBOX_DKG_RUNTIME_MARKER={shlex.quote(str(marker))}
+BLACKBOX_DKG_RUNTIME_FINGERPRINT=''
+BLACKBOX_DKG_RESTART_REQUIRED=false
+BLACKBOX_INSTALL_INCOMPLETE=false
+BLACKBOX_THREAT_GRAPH_INCOMPLETE=false
+PATH={shlex.quote(str(fake_bin))}:$PATH
+prepare_blackbox_dkg_runtime_fingerprint
+prepare_rc=$?
+record_rc=skipped
+if {str(record).lower()}; then
+    record_blackbox_dkg_runtime_fingerprint
+    record_rc=$?
+fi
+fingerprint_length=$(printf %s "$BLACKBOX_DKG_RUNTIME_FINGERPRINT" | wc -c | tr -d ' ')
+printf '%s|%s|%s|%s\n' "$prepare_rc" "$BLACKBOX_DKG_RESTART_REQUIRED" "$fingerprint_length" "$record_rc"
+"""
+        completed = subprocess.run(
+            ["bash", "-c", command],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return tuple(completed.stdout.strip().split("|"))
+
+    assert invoke(record=True) == ("0", "true", "64", "0")
+    assert invoke(record=False) == ("0", "false", "64", "skipped")
+
+    # Disk changes without a successful restart must remain stale on every retry.
+    agent_runtime.write_text("export const agent = 2;\n", encoding="utf-8")
+    assert invoke(record=False) == ("0", "true", "64", "skipped")
+    assert invoke(record=False) == ("0", "true", "64", "skipped")
+
+
+def test_unix_installer_stops_dkg_setup_when_npm_install_fails(tmp_path: Path) -> None:
+    install_body = _extract_function_body("install_dkg")
+    continued = tmp_path / "continued"
+    command = f"""
+heading() {{ :; }}
+ok() {{ :; }}
+step() {{ :; }}
+warn() {{ :; }}
+dkg_manual_hint() {{ printf 'manual-hint\n'; }}
+install_blackbox_dkg_package() {{ return 1; }}
+check_blackbox_dkg_port() {{ : > {shlex.quote(str(continued))}; return 0; }}
+install_dkg() {{
+{install_body}
+}}
+SKIP_DKG=false
+HAS_NODE=true
+BLACKBOX_DKG_CLI_DIR={shlex.quote(str(tmp_path / 'dkg-cli'))}
+BLACKBOX_DKG_BIN=/bin/true
+BLACKBOX_DKG_PACKAGE=@origintrail-official/dkg@10.0.6
+install_dkg
+"""
+    result = subprocess.run(
+        ["bash", "-c", command],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert "manual-hint" in result.stdout
+    assert not continued.exists(), "installer continued into DKG port/config setup"
+
+
+def test_windows_dkg_npm_failure_is_fatal_to_dkg_setup() -> None:
+    install_body = _extract_powershell_function_body("Install-Dkg")
+    failure_guard = """if (-not (Install-BlackboxDkgPackage)) {
+        $script:InstallIncomplete = $true
+        Show-DkgManualHint
+        return
+    }"""
+    assert failure_guard in install_body
+    assert install_body.index(failure_guard) < install_body.index(
+        "New-Item -ItemType Directory -Force -Path $DkgHome"
+    )

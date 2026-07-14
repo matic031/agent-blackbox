@@ -24,6 +24,7 @@ import io
 import re
 import sys
 from contextlib import redirect_stdout
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -139,6 +140,56 @@ def test_discovery_skipped_for_builtins(argv):
 def test_discovery_runs_for_unknown_positional(argv):
     with patch.object(sys, "argv", argv):
         assert _plugin_cli_discovery_needed() is True
+
+
+def test_general_plugin_cli_survives_memory_cli_setup_failure():
+    """A broken active memory plugin must not hide unrelated plugin CLIs."""
+    from hermes_cli import main as _main
+    import hermes_cli.plugins as plugin_mod
+    import plugins.memory as memory_mod
+
+    def broken_memory_setup(_parser):
+        raise AttributeError("'ArgumentParser' object has no attribute 'group'")
+
+    def setup_blackbox(parser):
+        parser.set_defaults(func=lambda _args: None)
+
+    fake_manager = SimpleNamespace(
+        _cli_commands={
+            "blackbox": {
+                "name": "blackbox",
+                "help": "Blackbox",
+                "description": "Blackbox",
+                "setup_fn": setup_blackbox,
+                "handler_fn": None,
+            }
+        }
+    )
+    memory_commands = [
+        {
+            "name": "dkg",
+            "help": "DKG",
+            "description": "DKG",
+            "setup_fn": broken_memory_setup,
+            "handler_fn": None,
+        }
+    ]
+
+    argv_backup = sys.argv[:]
+    sys.argv = ["hermes", "blackbox", "--help"]
+    buf = io.StringIO()
+    try:
+        with patch.object(memory_mod, "discover_plugin_cli_commands", return_value=memory_commands):
+            with patch.object(plugin_mod, "discover_plugins", return_value=None):
+                with patch.object(plugin_mod, "get_plugin_manager", return_value=fake_manager):
+                    with redirect_stdout(buf):
+                        with pytest.raises(SystemExit) as exc:
+                            _main.main()
+    finally:
+        sys.argv = argv_backup
+
+    assert exc.value.code == 0
+    assert "usage: hermes blackbox" in buf.getvalue()
 
 
 # ── _BUILTIN_SUBCOMMANDS ↔ argparse registration parity ────────────────────

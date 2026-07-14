@@ -84,7 +84,7 @@ export function shapePath(ctx: CanvasRenderingContext2D, shape: Shape, x: number
 // Center the tilted disk in the viewport at a fit zoom. `outer` is the radius to
 // fit (defaults to the full disk); the scrubber passes the revealed extent so the
 // camera tightens at the core and zooms out as the rings grow.
-export function fitViewport(w: number, h: number, outer: number = RING_OUTER): Viewport {
+export function fitViewport(w: number, h: number, outer: number = RING_OUTER, allowFullFit = false): Viewport {
   if (w <= 0 || h <= 0) {
     return { k: 1, x: w / 2, y: h / 2 }
   }
@@ -96,11 +96,10 @@ export function fitViewport(w: number, h: number, outer: number = RING_OUTER): V
     return Math.min((w - FIT_PADDING * 2) / spanX, (h - FIT_PADDING * 2) / (spanX * TILT), 2.2)
   }
 
-  // Never zoom out past the reference (RING_OUTER / 5-ring) extent: a bigger map
-  // renders at that constant scale and overflows — you pan it — instead of
-  // shrinking every node to fit. Smaller extents (few rings, or the playback
-  // core) still fit tightly / zoom in.
-  const k = clamp(Math.max(kFor(outer), kFor(RING_OUTER)), ZOOM_MIN, ZOOM_MAX)
+  // Default: never zoom out past the reference (RING_OUTER / 5-ring) extent, so
+  // a bigger map stays readable and pannable. All-mode can opt into a true full
+  // fit when the user explicitly asks to see the whole thing at once.
+  const k = clamp(allowFullFit ? kFor(outer) : Math.max(kFor(outer), kFor(RING_OUTER)), ZOOM_MIN, ZOOM_MAX)
 
   // Bias the center down a touch — the timeline along the top adds visual weight
   // up there, so true-center reads as sitting high.

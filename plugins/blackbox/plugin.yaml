@@ -1,0 +1,16 @@
+name: blackbox
+version: "1.0.0"
+# `backend` is the only bundled kind Hermes auto-loads without a per-home
+# `plugins.enabled` entry (hermes_cli/plugins.py load gate). Blackbox must watch
+# every session with zero setup, so it opts into eager auto-load this way. It
+# registers no tool backend — only the lifecycle hooks below — so the load path
+# is otherwise identical to a standalone plugin.
+kind: backend
+description: "Agent Blackbox — graph-driven agent security. Syncs a threat ruleset from the local OriginTrail DKG node (verified public threats + local graph) and matches every tool call and model request against it: prompt-injection patterns, privilege-escalation tool shapes, and vulnerable dependency installs. Audit mode by default (records findings, shares anonymized sightings to SWM); block mode refuses tool calls at/above a configured severity. Fail-open everywhere."
+author: Umanitek
+hooks:
+  - pre_tool_call
+  - post_tool_call
+  - pre_api_request
+  - on_session_start
+  - on_session_end

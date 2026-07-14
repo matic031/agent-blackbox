@@ -826,6 +826,12 @@ export interface Translations {
     importSuccess: (nodes: number) => string
     importedBadge: string
     resetToMine: string
+    detailControl: string
+    detailHint: string
+    detailOverview: string
+    detailExplore: string
+    detailAll: string
+    graphCounts: (nodes: number, links: number) => string
   }
   agents: {
     close: string

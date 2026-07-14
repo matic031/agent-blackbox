@@ -2035,7 +2035,7 @@ def _smart_approve(command: str, description: str) -> str:
     3. The system message explicitly warns the guard to ignore any
        directives embedded in the command text.
 
-    Inspired by OpenAI Codex's Smart Approvals guardian subagent
+    Inspired by OpenAI Codex's Smart Approvals blackbox subagent
     (openai/codex#13860).
     """
     try:
@@ -2837,7 +2837,7 @@ def check_all_command_guards(command: str, env_type: str,
 
     # --- Phase 2.5: Smart approval (auxiliary LLM risk assessment) ---
     # When approvals.mode=smart, ask the aux LLM before prompting the user.
-    # Inspired by OpenAI Codex's Smart Approvals guardian subagent
+    # Inspired by OpenAI Codex's Smart Approvals blackbox subagent
     # (openai/codex#13860).
     smart_denied_for_owner = False
     if approval_mode == "smart":

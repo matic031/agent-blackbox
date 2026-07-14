@@ -13303,11 +13303,10 @@ def main():
     # 500-650ms on typical installs.
     # =========================================================================
     if _plugin_cli_discovery_needed():
+        seen_plugin_commands = set()
         try:
             from plugins.memory import discover_plugin_cli_commands
-            from hermes_cli.plugins import discover_plugins, get_plugin_manager
 
-            seen_plugin_commands = set()
             for cmd_info in discover_plugin_cli_commands():
                 plugin_parser = subparsers.add_parser(
                     cmd_info["name"],
@@ -13315,10 +13314,24 @@ def main():
                     description=cmd_info.get("description", ""),
                     formatter_class=__import__("argparse").RawDescriptionHelpFormatter,
                 )
-                cmd_info["setup_fn"](plugin_parser)
-                if cmd_info.get("handler_fn") is not None:
-                    plugin_parser.set_defaults(func=cmd_info["handler_fn"])
-                seen_plugin_commands.add(cmd_info["name"])
+                try:
+                    cmd_info["setup_fn"](plugin_parser)
+                    if cmd_info.get("handler_fn") is not None:
+                        plugin_parser.set_defaults(func=cmd_info["handler_fn"])
+                    seen_plugin_commands.add(cmd_info["name"])
+                except Exception as _exc:
+                    logging.getLogger(__name__).debug(
+                        "Memory plugin CLI setup failed for %s: %s",
+                        cmd_info.get("name"),
+                        _exc,
+                    )
+        except Exception as _exc:
+            logging.getLogger(__name__).debug(
+                "Memory plugin CLI discovery failed: %s", _exc
+            )
+
+        try:
+            from hermes_cli.plugins import discover_plugins, get_plugin_manager
 
             discover_plugins()
             for cmd_info in get_plugin_manager()._cli_commands.values():
@@ -14873,7 +14886,9 @@ def main():
 
     # Execute the command
     if hasattr(args, "func"):
-        args.func(args)
+        result = args.func(args)
+        if isinstance(result, int) and not isinstance(result, bool):
+            sys.exit(result)
     else:
         parser.print_help()
 

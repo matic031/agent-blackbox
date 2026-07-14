@@ -5,6 +5,7 @@ import type { StarmapGraph, StarmapNode } from '@/types/hermes'
 export type MemoryCard = StarmapGraph['memory'][number]
 
 export type Shape = 'circle' | 'diamond' | 'hexagon' | 'square' | 'triangle'
+export type GraphDetailMode = 'overview' | 'explore' | 'all'
 
 export interface Viewport {
   k: number
