@@ -29,6 +29,8 @@ let publishState = 'finalized';
 let rejectCreateStatus;
 let synchronousPublish = false;
 let staleVmStatus = false;
+let missingLifecycleStamp = false;
+let includeTrustLevel = false;
 let chainMerkleRoot = `0x${staleAssertion}`;
 let membershipChanges = false;
 let participantReads = 0;
@@ -95,7 +97,18 @@ const server = createServer(async (request, response) => {
       return json(response, 200, { result: { bindings: [] } });
     }
     const batch = JSON.parse(readFileSync(join(queryBatchDir, `${queryBatchName}.json`)));
-    const bindings = batch.records.flatMap(recordQuads).map((quad) => ({
+    const quads = batch.records.flatMap(recordQuads);
+    if (includeTrustLevel) {
+      for (const subject of new Set(quads.map((quad) => quad.subject))) {
+        quads.push({
+          subject,
+          predicate: 'http://dkg.io/ontology/trustLevel',
+          object: '"0"^^<http://www.w3.org/2001/XMLSchema#integer>',
+          graph: '',
+        });
+      }
+    }
+    const bindings = quads.map((quad) => ({
       s: quad.subject,
       p: quad.predicate,
       o: quad.object,
@@ -157,7 +170,7 @@ const server = createServer(async (request, response) => {
       status: staleVmStatus ? 'draft-open' : 'swm-shared',
       memoryLayer: 'SWM',
       wmCurrentAssertion: assertion,
-      swmCurrentAssertion: assertion,
+      swmCurrentAssertion: missingLifecycleStamp ? null : assertion,
       vmCurrentAssertion: null,
       publishedUal: null,
       reservedUal: `did:dkg:base:8453/${owner}/${ordinal}`,
@@ -467,6 +480,39 @@ try {
   assert.notEqual(collision.code, 0, 'different on-chain assertion unexpectedly reconciled');
   assert.match(collision.stderr, /already published with a different assertion/);
   assert.deepEqual(calls, callsBeforeChainReconcile, 'collision check reached a mutating operation');
+
+  const explicitRegistryPath = join(temp, 'explicit-registry.json');
+  const explicitProgressPath = join(temp, 'explicit-progress.json');
+  writeFileSync(explicitRegistryPath, `${JSON.stringify(staleRegistry, null, 2)}\n`);
+  chainMerkleRoot = `0x${staleAssertion}`;
+  missingLifecycleStamp = true;
+  includeTrustLevel = true;
+  const callsBeforeExplicitReconcile = { ...calls };
+  const explicitReconcile = await run('publish.mjs', ['--publish', '--confirm', confirmation], {
+    ...env,
+    KC_VM_PUBLISH_MODE: 'sync',
+    KC_SWM_RESTORE_MODE: 'skip',
+    KC_CONFIRMED_VM_RECOVERIES: JSON.stringify({
+      'batch-001': {
+        ual: `did:dkg:base:8453/0x2222222222222222222222222222222222222222/${staleKaId}`,
+        txHash: `0x${'12'.repeat(32)}`,
+        blockNumber: 456,
+      },
+    }),
+    KC_REGISTRY_PATH: explicitRegistryPath,
+    KC_PROGRESS_PATH: explicitProgressPath,
+  });
+  assert.equal(explicitReconcile.code, 0, explicitReconcile.stderr);
+  assert.equal(synchronousPublish, false, 'explicit reconciliation replayed the paid endpoint');
+  assert.deepEqual(calls, callsBeforeExplicitReconcile, 'explicit reconciliation replayed a mutating operation');
+  const explicitRegistry = JSON.parse(readFileSync(explicitRegistryPath, 'utf8'));
+  assert.equal(explicitRegistry.batches['batch-001'].status, 'finalized');
+  assert.equal(explicitRegistry.batches['batch-001'].chainKaId, staleKaId);
+  assert.equal(explicitRegistry.batches['batch-001'].vmVerificationMode, 'exact-with-dkg-trust-level');
+  assert.equal(explicitRegistry.batches['batch-001'].vmVerifiedSubjectCount, 2);
+  assert.equal(explicitRegistry.batches['batch-001'].swmRestoreMode, 'skipped-vm-only');
+  missingLifecycleStamp = false;
+  includeTrustLevel = false;
 
   const membershipRegistryPath = join(temp, 'membership-registry.json');
   const membershipProgressPath = join(temp, 'membership-progress.json');

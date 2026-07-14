@@ -57,6 +57,7 @@ const swmRestoreMode = process.env.KC_SWM_RESTORE_MODE ?? 'restore';
 const pipelineWidth = Number(process.env.KC_PIPELINE_WIDTH ?? '1');
 const publisherNodeIdentityId = Number(process.env.KC_PUBLISHER_NODE_IDENTITY_ID ?? '0');
 const expectedOnChainCgId = process.env.KC_CG_ONCHAIN_ID ?? '';
+const confirmedVmRecoveries = new Map(Object.entries(JSON.parse(process.env.KC_CONFIRMED_VM_RECOVERIES ?? '{}')));
 const startedAt = Date.now();
 let lockFd;
 let authToken;
@@ -80,6 +81,11 @@ function assertConfig() {
   if (!['restore', 'skip'].includes(swmRestoreMode)) throw new Error(`KC_SWM_RESTORE_MODE must be restore or skip; got ${swmRestoreMode}`);
   if (!Number.isSafeInteger(pipelineWidth) || ![1, 2].includes(pipelineWidth)) throw new Error(`KC_PIPELINE_WIDTH must be 1 or 2; got ${pipelineWidth}`);
   if (!Number.isSafeInteger(publisherNodeIdentityId) || publisherNodeIdentityId < 0) throw new Error(`KC_PUBLISHER_NODE_IDENTITY_ID must be a non-negative integer; got ${publisherNodeIdentityId}`);
+  for (const [batchName, recovery] of confirmedVmRecoveries) {
+    if (!/^batch-\d{3}$/.test(batchName) || !recovery || typeof recovery !== 'object') throw new Error(`invalid KC_CONFIRMED_VM_RECOVERIES entry: ${batchName}`);
+    if (!/^did:dkg:[^/]+\/0x[0-9a-fA-F]{40}\/\d+$/.test(String(recovery.ual ?? ''))) throw new Error(`invalid confirmed VM UAL for ${batchName}`);
+    if (!/^0x[0-9a-fA-F]{64}$/.test(String(recovery.txHash ?? ''))) throw new Error(`invalid confirmed VM transaction hash for ${batchName}`);
+  }
   if ((mode === 'preflight' || mode === 'publish') && !contextGraphId) throw new Error('KC_CG_ID is required for node preflight/publish');
   if (mode === 'publish' && !kaPrefix) throw new Error('KC_KA_PREFIX or KC_CG_ID is required');
   if (onlyBatch && (fromBatch || toBatch)) throw new Error('--batch cannot be combined with --from-batch or --to-batch');
@@ -401,8 +407,24 @@ function memoryVerificationMode(stored, expectedQuads) {
 }
 
 function exactMemoryVerificationMode(stored, expectedQuads) {
-  if (stored.quads.length !== expectedQuads.length) return null;
-  return memoryVerificationMode(stored, expectedQuads);
+  const baseMode = memoryVerificationMode(stored, expectedQuads);
+  if (!baseMode) return null;
+  if (stored.quads.length === expectedQuads.length) return baseMode;
+
+  const expectedSet = new Set(expectedQuads.map((quad) => JSON.stringify(quad)));
+  const expectedSubjects = new Set(expectedQuads.map((quad) => quad.subject));
+  const extras = stored.quads.filter((quad) => !expectedSet.has(JSON.stringify(quad)));
+  const trustLevelPredicate = 'http://dkg.io/ontology/trustLevel';
+  const trustLevelZero = '"0"^^<http://www.w3.org/2001/XMLSchema#integer>';
+  if (extras.length !== expectedSubjects.size) return null;
+  if (new Set(extras.map((quad) => quad.subject)).size !== expectedSubjects.size) return null;
+  if (!extras.every((quad) => (
+    expectedSubjects.has(quad.subject)
+    && quad.predicate === trustLevelPredicate
+    && quad.object === trustLevelZero
+    && quad.graph === ''
+  ))) return null;
+  return `${baseMode}-with-dkg-trust-level`;
 }
 
 function reservedKaIdentity(reservedUal) {
@@ -415,6 +437,11 @@ function reservedKaIdentity(reservedUal) {
     ordinal: match[2],
     kaId: ((BigInt(match[1]) << 96n) | ordinal).toString(),
   };
+}
+
+function publishedKaIdentity(ual) {
+  const match = String(ual ?? '').match(/^did:dkg:[^/]+\/(0x[0-9a-fA-F]{40})\/(\d+)$/);
+  return match ? { contract: match[1], kaId: match[2] } : null;
 }
 
 async function reconcileCreate(kaName, expectedQuads) {
@@ -592,6 +619,52 @@ async function reconcileChainConfirmedVm(entry, rec, status, expectedQuads, regi
   return true;
 }
 
+async function reconcileExplicitConfirmedVm(entry, rec, status, expectedQuads, registry) {
+  const recovery = confirmedVmRecoveries.get(entry.name);
+  if (!recovery || !rec.publishStartedAt) return false;
+  const published = publishedKaIdentity(recovery.ual);
+  const reserved = reservedKaIdentity(status?.reservedUal);
+  const assertion = status?.wmCurrentAssertion;
+  if (!published || !reserved || typeof assertion !== 'string' || !assertion) return false;
+
+  const chain = await api('GET', `/api/kc/${published.kaId}`);
+  const chainRoot = String(chain.merkleRoot ?? '').toLowerCase();
+  const expectedRoot = `0x${assertion.replace(/^0x/, '')}`.toLowerCase();
+  if (chainRoot !== expectedRoot) throw new Error(`[${entry.name}] confirmed recovery UAL has Merkle root ${chainRoot || 'missing'}, expected ${expectedRoot}`);
+  if (String(chain.author ?? '').toLowerCase() !== reserved.agentAddress.toLowerCase()) {
+    throw new Error(`[${entry.name}] confirmed recovery UAL has author ${String(chain.author ?? 'missing')}, expected ${reserved.agentAddress}`);
+  }
+
+  const vm = await queryMemoryQuads('verifiable-memory', expectedQuads);
+  const vmVerificationMode = exactMemoryVerificationMode(vm, expectedQuads);
+  if (!vmVerificationMode) throw new Error(`[${entry.name}] confirmed recovery UAL does not contain the exact expected VM quad set`);
+
+  const finalizedAt = new Date().toISOString();
+  Object.assign(rec, {
+    status: 'vm-finalized',
+    publishMode: 'sync-explicit-chain-reconciled',
+    publishJobState: 'chain-confirmed',
+    txHash: recovery.txHash,
+    ual: recovery.ual,
+    blockNumber: recovery.blockNumber ?? null,
+    finalizedAt,
+    dkgFinalizationMode: 'published-chain-reconciled',
+    chainKaId: published.kaId,
+    chainKaOrdinal: reserved.ordinal,
+    chainMerkleRoot: chainRoot,
+    chainAuthor: chain.author,
+    vmAssertion: assertion,
+    vmVerifiedAt: finalizedAt,
+    vmVerificationMode,
+    vmVerifiedQuadCount: vm.quads.length,
+    vmVerifiedSubjectCount: vm.subjectCount,
+  });
+  delete rec.lastError;
+  saveRegistry(registry);
+  log(`[${entry.name}] reconciled explicitly confirmed UAL from matching chain state and exact VM data (${vm.subjectCount.toLocaleString()} subjects, ${vm.quads.length.toLocaleString()} quads)`);
+  return true;
+}
+
 async function reconcileSynchronousPublish(entry, rec, kaName, expectedQuads, registry, waitForCompletion) {
   const deadline = Date.now() + requestTimeoutMs;
   const query = `contextGraphId=${encodeURIComponent(contextGraphId)}`;
@@ -620,6 +693,7 @@ async function reconcileSynchronousPublish(entry, rec, kaName, expectedQuads, re
       log(`[${entry.name}] reconciled paid publish from matching WM/SWM/VM state: ${status.publishedUal}`);
       return true;
     }
+    if (status && await reconcileExplicitConfirmedVm(entry, rec, status, expectedQuads, registry)) return true;
     if (status && await reconcileChainConfirmedVm(entry, rec, status, expectedQuads, registry)) return true;
     if (!waitForCompletion) return false;
     if (Date.now() >= deadline) {
