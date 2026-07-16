@@ -1691,15 +1691,58 @@
 
   @media (max-width: 520px) {
     .header-inner { min-height: 72px; padding-left: 16px; padding-right: 16px; }
-    .brand-wordmark { font-size: 27px; }
+    .brand-wordmark { min-width: 0; font-size: 25px; }
+    .status-pills { gap: 6px; }
     .gear-btn, .chat-close, .modal-close { width: 44px; height: 44px; }
     .gear-btn svg { width: 18px; height: 18px; }
+    .agents-strip { padding: 12px; gap: 10px; }
+    .agent-card, .agent-add-tile { width: 100%; min-width: 0; padding: 12px; }
     .section-head.graph-head { position: relative; }
     .graph-head .section-htext { padding-right: 56px; }
+    .graph-head-right, .graph-head-right .tabs, .tabs { min-width: 0; }
     .graph-head-right .refresh-btn { position: absolute; top: 0; right: 0; }
-    .tab { min-height: 44px; }
+    .tab { min-width: 0; min-height: 44px; gap: 4px; padding: 7px 4px; font-size: 9px; }
+    .tab .tab-count { padding: 0 4px; }
+    .graph-stage { height: 330px; }
+    .sync-progress-meta { gap: 8px; }
+    .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+    .stat { min-height: 124px; padding: 14px; }
+    .stat:last-child { grid-column: 1 / -1; min-height: 106px; }
+    .stat .label { gap: 6px; letter-spacing: 0.12em; }
+    .stat .value { margin-top: 10px; font-size: 24px; }
+    .stat .meta { font-size: 11px; line-height: 1.4; }
+    .findings-head, .activity-head { flex-direction: column; gap: 10px; }
+    .findings-head .sort-control, .activity-head .audit-filter { width: 100%; }
+    .findings-head .sort-control { justify-content: space-between; }
+    .findings-head .sort-seg, .activity-head .audit-filter { flex: 1 1 auto; }
+    .findings-head .sort-seg button, .activity-head .audit-filter button { flex: 1 1 0; }
     .sort-seg button { min-height: 40px; padding-left: 14px; padding-right: 14px; }
     .graph-detail button { min-height: 40px; padding-left: 12px; padding-right: 12px; }
+    .table-scroll { overflow-x: hidden; }
+    .table-scroll table:not(.audit-table) { display: block; width: 100%; }
+    .table-scroll table:not(.audit-table) thead { display: none; }
+    .table-scroll table:not(.audit-table) tbody { display: block; }
+    .table-scroll table:not(.audit-table) tbody tr:not(:has(td[colspan])) {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 9px 12px;
+      padding: 14px 12px;
+      border-bottom: 1px solid var(--border);
+    }
+    .table-scroll table:not(.audit-table) tbody tr:not(:has(td[colspan])) td {
+      display: block;
+      min-width: 0;
+      padding: 0;
+      border: 0;
+    }
+    .table-scroll table:not(.audit-table) tbody tr:not(:has(td[colspan])) td:nth-child(1) { grid-column: 1; grid-row: 1; }
+    .table-scroll table:not(.audit-table) tbody tr:not(:has(td[colspan])) td:nth-child(2) { grid-column: 1; grid-row: 2; }
+    .table-scroll table:not(.audit-table) tbody tr:not(:has(td[colspan])) td:nth-child(3) { grid-column: 2; grid-row: 1; }
+    .table-scroll table:not(.audit-table) tbody tr:not(:has(td[colspan])) td:nth-child(4) { grid-column: 2; grid-row: 2; }
+    .table-scroll table:not(.audit-table) tbody tr:not(:has(td[colspan])) td:nth-child(5) { grid-column: 1 / -1; grid-row: 3; }
+    .table-scroll tbody tr:has(td[colspan]) { display: block; width: 100%; }
+    .table-scroll tbody td[colspan] { display: block; width: 100%; padding: 0; }
+    .table-scroll tbody td[colspan] .empty { width: 100%; padding: 44px 20px; }
     .audit-scroll { max-height: 600px; }
     .audit-table { width: 100%; min-width: 0; }
     .audit-table thead { display: none; }
@@ -1719,6 +1762,13 @@
     .audit-table tbody td:nth-child(4) { grid-column: 2; grid-row: 2; }
     .audit-table tbody tr.threat-row { border-left: 2px solid var(--signal); }
     .audit-table tbody tr.threat-row td:first-child { border-left: 0; }
+    .audit-table tbody tr:has(td[colspan]) { display: block; padding: 0; }
+    .audit-table tbody tr:has(td[colspan]) td[colspan] {
+      display: block;
+      width: 100%;
+      padding: 0;
+    }
+    .audit-table tbody tr:has(td[colspan]) .empty { width: 100%; padding: 44px 20px; }
     .audit-table .au-detail,
     .audit-table .au-detail-primary,
     .audit-table .au-detail-meta { min-width: 0; overflow-wrap: anywhere; }
@@ -1893,7 +1943,7 @@
 
     <!-- Threats detected -->
     <section class="section" aria-label="Threats detected">
-      <div class="section-head">
+      <div class="section-head findings-head">
         <div class="section-htext">
           <h2 class="findings-title">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><path d="M12 9v4M12 17h.01"/></svg>
@@ -1935,7 +1985,7 @@
 
     <!-- Audit trail — every agent action, timestamped -->
     <section class="section" aria-label="Audit trail">
-      <div class="section-head">
+      <div class="section-head activity-head">
         <div class="section-htext">
           <h2>Agent activity</h2>
           <span class="section-note">Recorded sessions, API calls, tool calls, and installs.</span>
