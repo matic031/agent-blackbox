@@ -50,12 +50,23 @@ const tokenPath = resolve((process.env.DKG_AUTH_TOKEN_PATH ?? join(homedir(), '.
 const pollMs = Number(process.env.KC_POLL_MS ?? '30000');
 const requestTimeoutMs = Number(process.env.KC_REQUEST_TIMEOUT_MS ?? '2700000');
 const expectedRecords = Number(process.env.KC_EXPECT_RECORDS ?? '460000');
+const allowPartialManifest = process.env.KC_ALLOW_PARTIAL_MANIFEST === '1';
+const swmOnlyBatches = Number(process.env.KC_SWM_ONLY_BATCHES ?? '0');
+const pauseAfterBatch = Number(process.env.KC_PAUSE_AFTER_BATCH ?? '0');
+const pauseControlPath = process.env.KC_PAUSE_CONTROL_PATH
+  ? resolve(process.env.KC_PAUSE_CONTROL_PATH)
+  : null;
+const expectedManifestPath = process.env.KC_EXPECTED_MANIFEST_PATH
+  ? resolve(process.env.KC_EXPECTED_MANIFEST_PATH)
+  : null;
 const vmPublishMode = process.env.KC_VM_PUBLISH_MODE ?? 'sync';
+const vmMaxInflight = Number(process.env.KC_VM_MAX_INFLIGHT ?? '12');
 const publisherNodeIdentityId = Number(process.env.KC_PUBLISHER_NODE_IDENTITY_ID ?? '0');
 const expectedOnChainCgId = process.env.KC_CG_ONCHAIN_ID ?? '';
 const startedAt = Date.now();
 let lockFd;
 let authToken;
+let authTokens = [];
 let progress = {};
 
 function usage() {
@@ -72,7 +83,12 @@ function assertConfig() {
   if (!Number.isSafeInteger(epochs) || epochs !== 12) throw new Error(`KC_EPOCHS must be exactly 12 for this production corpus; got ${epochs}`);
   if (!Number.isSafeInteger(pollMs) || pollMs < 1_000) throw new Error(`KC_POLL_MS must be an integer >= 1000; got ${pollMs}`);
   if (!Number.isSafeInteger(requestTimeoutMs) || requestTimeoutMs < 60_000) throw new Error(`KC_REQUEST_TIMEOUT_MS must be >= 60000; got ${requestTimeoutMs}`);
-  if (!['sync', 'async'].includes(vmPublishMode)) throw new Error(`KC_VM_PUBLISH_MODE must be sync or async; got ${vmPublishMode}`);
+  if (!Number.isSafeInteger(expectedRecords) || expectedRecords < 1) throw new Error(`KC_EXPECT_RECORDS must be a positive integer; got ${expectedRecords}`);
+  if (!Number.isSafeInteger(swmOnlyBatches) || swmOnlyBatches < 0) throw new Error(`KC_SWM_ONLY_BATCHES must be a non-negative integer; got ${swmOnlyBatches}`);
+  if (!Number.isSafeInteger(pauseAfterBatch) || pauseAfterBatch < 0) throw new Error(`KC_PAUSE_AFTER_BATCH must be a non-negative integer; got ${pauseAfterBatch}`);
+  if (pauseAfterBatch > 0 && !pauseControlPath) throw new Error('KC_PAUSE_CONTROL_PATH is required when KC_PAUSE_AFTER_BATCH is non-zero');
+  if (!['sync', 'async', 'async-all'].includes(vmPublishMode)) throw new Error(`KC_VM_PUBLISH_MODE must be sync, async, or async-all; got ${vmPublishMode}`);
+  if (!Number.isSafeInteger(vmMaxInflight) || vmMaxInflight < 1) throw new Error(`KC_VM_MAX_INFLIGHT must be a positive integer; got ${vmMaxInflight}`);
   if (!Number.isSafeInteger(publisherNodeIdentityId) || publisherNodeIdentityId < 0) throw new Error(`KC_PUBLISHER_NODE_IDENTITY_ID must be a non-negative integer; got ${publisherNodeIdentityId}`);
   if ((mode === 'preflight' || mode === 'publish') && !contextGraphId) throw new Error('KC_CG_ID is required for node preflight/publish');
   if (mode === 'publish' && !kaPrefix) throw new Error('KC_KA_PREFIX or KC_CG_ID is required');
@@ -105,11 +121,11 @@ function duration(ms) {
   return `${hours ? `${hours}h ` : ''}${minutes ? `${minutes}m ` : ''}${rest}s`;
 }
 
-function readToken() {
+function readTokens() {
   if (!existsSync(tokenPath)) throw new Error(`auth token not found: ${tokenPath}`);
-  const token = readFileSync(tokenPath, 'utf8').split('\n').map((line) => line.trim()).find((line) => line && !line.startsWith('#'));
-  if (!token) throw new Error(`auth token file is empty: ${tokenPath}`);
-  return token;
+  const tokens = readFileSync(tokenPath, 'utf8').split('\n').map((line) => line.trim()).filter((line) => line && !line.startsWith('#'));
+  if (tokens.length === 0) throw new Error(`auth token file is empty: ${tokenPath}`);
+  return tokens;
 }
 
 async function api(method, path, body, timeoutMs = 60_000) {
@@ -121,13 +137,24 @@ async function api(method, path, body, timeoutMs = 60_000) {
   }, 60_000);
   const requestStarted = Date.now();
   try {
-    const response = await fetch(`${base}${path}`, {
-      method,
-      headers: { 'content-type': 'application/json', authorization: `Bearer ${authToken}` },
-      body: body === undefined ? undefined : JSON.stringify(body),
-      signal: controller.signal,
-    });
-    const text = await response.text();
+    const payload = body === undefined ? undefined : JSON.stringify(body);
+    const candidates = [authToken, ...authTokens.filter((token) => token !== authToken)];
+    let response;
+    let text = '';
+    for (const candidate of candidates) {
+      response = await fetch(`${base}${path}`, {
+        method,
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${candidate}` },
+        body: payload,
+        signal: controller.signal,
+      });
+      text = await response.text();
+      if (response.status !== 401) {
+        authToken = candidate;
+        break;
+      }
+    }
+    if (!response) throw new Error(`no API authentication candidates available for ${path}`);
     let json;
     try { json = JSON.parse(text); } catch { json = { raw: text }; }
     if (!response.ok) {
@@ -166,10 +193,12 @@ function loadAndValidateBatches() {
   const manifestBytes = readFileSync(manifestPath);
   const manifest = JSON.parse(manifestBytes.toString('utf8'));
   if (manifest.version !== 1) throw new Error(`unsupported manifest version: ${manifest.version}`);
-  if (!manifest.complete) throw new Error('manifest is a partial/max-batches build; production publish requires the complete corpus');
+  if (!manifest.complete && !allowPartialManifest) throw new Error('manifest is a partial/max-batches build; production publish requires the complete corpus');
   if (manifest.includedRecords !== expectedRecords) throw new Error(`expected ${expectedRecords.toLocaleString()} records, manifest has ${Number(manifest.includedRecords).toLocaleString()}`);
   if (manifest.batchCount !== manifest.batches?.length) throw new Error('manifest batchCount does not match batches list');
   if (manifest.batchCount !== Math.ceil(expectedRecords / manifest.batchSize)) throw new Error('manifest batch count/size does not cover the expected corpus exactly');
+  if (swmOnlyBatches > manifest.batchCount) throw new Error(`KC_SWM_ONLY_BATCHES=${swmOnlyBatches} exceeds manifest batch count ${manifest.batchCount}`);
+  if (pauseAfterBatch > manifest.batchCount) throw new Error(`KC_PAUSE_AFTER_BATCH=${pauseAfterBatch} exceeds manifest batch count ${manifest.batchCount}`);
   const mappingHash = sha256(readFileSync(join(here, 'mapping.mjs')));
   if (mappingHash !== manifest.mapping?.sha256) throw new Error('mapping.mjs changed since the batches were prepared; rebuild them before publishing');
 
@@ -194,11 +223,25 @@ function loadAndValidateBatches() {
       if (seenKeys.has(key)) throw new Error(`${entry.name}: duplicate record key across batches: ${key}`);
       seenKeys.add(key);
     }
-    const quads = parsed.records.flatMap(recordQuads);
-    for (const quad of quads) validateQuad(entry.name, quad);
+    const mappedQuads = parsed.records.flatMap(recordQuads);
+    for (const quad of mappedQuads) validateQuad(entry.name, quad);
+    // An RDF graph is a set, not a bag. Triple stores collapse exact duplicate
+    // triples, so commitments and receiver expectations must be calculated
+    // from the same canonical set that the node will persist. This also keeps
+    // repeated source tags/references from creating false integrity failures.
+    const quads = canonicalRdfSetQuads(mappedQuads);
     const payloadBytes = Buffer.byteLength(JSON.stringify(quads));
     if (payloadBytes > 9_000_000) throw new Error(`${entry.name}: ${payloadBytes} byte payload exceeds the 9MB safety cap`);
-    stats.push({ name: entry.name, records: parsed.records.length, quads: quads.length, payloadBytes });
+    stats.push({
+      name: entry.name,
+      records: parsed.records.length,
+      quads: quads.length,
+      sourceQuads: mappedQuads.length,
+      duplicateQuadsRemoved: mappedQuads.length - quads.length,
+      payloadBytes,
+      quadSetSha256: quadSetHash(quads),
+      publicQuadsDigest: workspacePublicQuadsDigest(quads),
+    });
     if ((index + 1) % 25 === 0 || index + 1 === manifest.batches.length) {
       log(`validated ${index + 1}/${manifest.batches.length} batch files`);
     }
@@ -229,10 +272,22 @@ function definitiveCreateRejection(error) {
 }
 
 async function nodePreflight(manifestSha256) {
-  authToken = readToken();
+  authTokens = readTokens();
+  authToken = authTokens[0];
   const status = await api('GET', '/api/status');
   if (status.networkConfig !== network) throw new Error(`node network is ${status.networkConfig}, expected ${network}`);
   if (status.version !== expectedVersion) throw new Error(`node DKG version is ${status.version ?? 'unknown'}, expected official npm ${expectedVersion}`);
+  if (vmPublishMode !== 'sync' && status.asyncPublisher?.available !== true) {
+    const reason = status.asyncPublisher?.reason ?? 'availability_not_reported';
+    const operatorAction = reason === 'publisher_disabled'
+      ? 'enable it with `dkg publisher enable`, configure at least one publisher wallet, then restart the daemon'
+      : reason === 'no_publisher_wallets'
+        ? 'configure at least one publisher wallet, then restart the daemon'
+        : reason === 'publisher_starting'
+          ? 'wait for the async publisher to become ready, then rerun preflight'
+          : 'inspect the daemon publisher startup error, correct it, restart the daemon, and rerun preflight';
+    throw new Error(`async VM mode ${vmPublishMode} requires an available async publisher; node reports ${reason}: ${operatorAction}`);
+  }
   const exists = await api('GET', `/api/context-graph/exists?id=${encodeURIComponent(contextGraphId)}`);
   if (!exists.exists) throw new Error(`context graph does not exist: ${contextGraphId}; create and review it before publishing`);
   let graph;
@@ -266,7 +321,8 @@ async function nodePreflight(manifestSha256) {
   log(`wallet preflight: ${JSON.stringify(walletBalanceSummary(wallets))}`);
   log(`async publisher queue: ${JSON.stringify(publisherStats).slice(0, 1000)}`);
   log(`VM publish mode: ${vmPublishMode}; publisher node identity id: ${publisherNodeIdentityId}`);
-  const confirmation = `${contextGraphId}:12:${manifestSha256.slice(0, 12)}`;
+  const confirmation = `${contextGraphId}:12:${manifestSha256.slice(0, 12)}`
+    + (swmOnlyBatches > 0 ? `:swm${swmOnlyBatches}` : '');
   log(`paid confirmation token: ${confirmation}`);
   return { status, graph, wallets, publisherStats, confirmation };
 }
@@ -283,6 +339,8 @@ function loadRegistry(manifest, manifestSha256) {
     manifestSha256,
     batchCount: manifest.batchCount,
     recordCount: manifest.includedRecords,
+    allowPartialManifest,
+    swmOnlyBatches,
   };
   if (!existsSync(registryPath)) return { meta: expectedMeta, createdAt: new Date().toISOString(), batches: {} };
   const registry = JSON.parse(readFileSync(registryPath, 'utf8'));
@@ -301,11 +359,47 @@ function saveRegistry(registry) {
 
 function readBatch(entry) {
   const parsed = JSON.parse(readFileSync(join(batchDir, entry.file), 'utf8'));
-  return { records: parsed.records, quads: parsed.records.flatMap(recordQuads) };
+  return { records: parsed.records, quads: canonicalRdfSetQuads(parsed.records.flatMap(recordQuads)) };
+}
+
+function canonicalRdfSetQuads(quads) {
+  const unique = new Map();
+  for (const quad of quads) {
+    // Graph-scoped KAs are relocated into their UAL-derived assertion graph by
+    // the node, so the submitted graph term is placement metadata and the
+    // canonical public commitment deliberately binds only (s,p,o).
+    const normalized = {
+      subject: String(quad.subject),
+      predicate: String(quad.predicate),
+      object: String(quad.object),
+      graph: '',
+    };
+    const key = JSON.stringify([
+      normalized.subject,
+      normalized.predicate,
+      normalized.object,
+      normalized.graph,
+    ]);
+    if (!unique.has(key)) unique.set(key, normalized);
+  }
+  return [...unique.entries()]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([, quad]) => quad);
 }
 
 function quadSetHash(quads) {
   return sha256([...quads].map((quad) => JSON.stringify(quad)).sort().join('\n'));
+}
+
+// Keep this byte-for-byte aligned with
+// packages/publisher/src/workspace-snapshot-store.ts:workspacePublicQuadsDigest.
+// Graph-scoped sharing normalizes every submitted quad into the UAL-derived
+// assertion graph, so the durable commitment intentionally hashes graph="".
+function workspacePublicQuadsDigest(quads) {
+  const canonical = canonicalRdfSetQuads(quads)
+    .map((quad) => [String(quad.subject), String(quad.predicate), String(quad.object), ''])
+    .sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right)));
+  return `sha256:${sha256(JSON.stringify(canonical))}`;
 }
 
 async function reconcileCreate(kaName, expectedQuads) {
@@ -355,7 +449,13 @@ async function pollPublishJob(batchName, jobId) {
       readFailures = 0;
     } catch (error) {
       readFailures += 1;
-      if (readFailures > 20 || (error.status && error.status < 500)) throw error;
+      // A freshly accepted async publisher job can briefly be absent from
+      // the single-job read path while the durable job index catches up.
+      // The list endpoint and worker may already contain/finalize it, so a
+      // transient 404 is a status-read race, not proof that publishing
+      // failed. Keep the retry bounded and never enqueue a replacement job.
+      const transientNotFound = error.status === 404;
+      if (readFailures > 20 || (error.status && error.status < 500 && !transientNotFound)) throw error;
       log(`[${batchName}] publish-status read failed ${readFailures}/20; retrying without mutating: ${error.message}`);
       await new Promise((resolvePromise) => setTimeout(resolvePromise, pollMs));
       continue;
@@ -366,6 +466,31 @@ async function pollPublishJob(batchName, jobId) {
     log(`[${batchName}] publish job ${jobId}: ${state}`);
     if (state === 'finalized') return job;
     if (state === 'failed') throw new Error(`[${batchName}] publish job ${jobId} failed: ${job.failure?.message ?? job.error ?? JSON.stringify(job.failure ?? job).slice(0, 1500)}`);
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, pollMs));
+  }
+}
+
+function publisherInflight(stats) {
+  return ['accepted', 'claimed', 'validated', 'broadcast', 'included']
+    .reduce((sum, state) => sum + Number(stats?.[state] ?? 0), 0);
+}
+
+async function waitForAsyncPublisherCapacity(batchName) {
+  let lastReportedAt = 0;
+  while (true) {
+    const stats = await api('GET', '/api/publisher/stats');
+    const inflight = publisherInflight(stats);
+    if (inflight < vmMaxInflight) return;
+    if (Date.now() - lastReportedAt >= 10_000 || lastReportedAt === 0) {
+      log(`[${batchName}] publisher backpressure: ${inflight}/${vmMaxInflight} jobs in flight; waiting before enqueue`);
+      updateProgress({
+        phase: 'publisher-backpressure',
+        currentBatch: batchName,
+        publisherInflight: inflight,
+        publisherMaxInflight: vmMaxInflight,
+      });
+      lastReportedAt = Date.now();
+    }
     await new Promise((resolvePromise) => setTimeout(resolvePromise, pollMs));
   }
 }
@@ -417,6 +542,40 @@ async function publishSynchronous(entry, rec, kaName, registry) {
   recordSynchronousFinalized(rec, result);
 }
 
+async function waitForMidRunResume(completed, currentBatch) {
+  if (!pauseControlPath || pauseAfterBatch === 0 || completed !== pauseAfterBatch) return;
+  const readyPath = `${pauseControlPath}.ready.json`;
+  const resumePath = `${pauseControlPath}.resume`;
+  atomicJson(readyPath, {
+    runPid: process.pid,
+    contextGraphId,
+    completedBatches: completed,
+    currentBatch,
+    readyAt: new Date().toISOString(),
+  });
+  if (existsSync(resumePath)) {
+    log(`mid-run pause ${completed}/${pauseAfterBatch}: resume marker already present`);
+    return;
+  }
+  log(`PAUSED after ${completed} batches; waiting for mid-run join validation before ${resumePath} is created`);
+  let lastHeartbeat = 0;
+  while (!existsSync(resumePath)) {
+    if (Date.now() - lastHeartbeat >= 30_000) {
+      updateProgress({
+        status: 'paused',
+        phase: 'awaiting-mid-join',
+        completedBatches: completed,
+        pauseReadyPath: readyPath,
+        resumePath,
+      });
+      lastHeartbeat = Date.now();
+    }
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 2_000));
+  }
+  updateProgress({ status: 'running', phase: 'mid-join-complete', completedBatches: completed });
+  log(`mid-run join validation complete; resuming after ${completed} batches`);
+}
+
 async function publishAll(validated, preflight) {
   const suppliedConfirmation = option('confirm', '');
   if (suppliedConfirmation !== preflight.confirmation) throw new Error(`paid confirmation mismatch; rerun --preflight and pass --confirm ${preflight.confirmation}`);
@@ -426,7 +585,7 @@ async function publishAll(validated, preflight) {
   const registry = loadRegistry(validated.manifest, validated.manifestSha256);
   saveRegistry(registry);
   const entries = onlyBatch ? validated.selected : validated.manifest.batches;
-  let completed = Object.values(registry.batches).filter((record) => record.status === 'finalized').length;
+  let completed = Object.values(registry.batches).filter((record) => ['swm', 'finalized'].includes(record.status)).length;
   let processedThisRun = 0;
   updateProgress({
     status: 'running', phase: 'starting', startedAt: new Date(startedAt).toISOString(),
@@ -434,10 +593,22 @@ async function publishAll(validated, preflight) {
     completedBatches: completed, totalRecords: validated.manifest.includedRecords,
   });
 
+  await waitForMidRunResume(completed, null);
+
   for (const entry of entries) {
+    const manifestIndex = validated.manifest.batches.findIndex((candidate) => candidate.name === entry.name);
+    const targetMemory = manifestIndex < swmOnlyBatches ? 'SWM' : 'VM';
     const batchStartedAt = Date.now();
-    const rec = (registry.batches[entry.name] ??= { checksum: entry.sha256, records: entry.records, epochs, status: 'pending' });
+    const rec = (registry.batches[entry.name] ??= {
+      checksum: entry.sha256,
+      records: entry.records,
+      epochs,
+      targetMemory,
+      status: 'pending',
+    });
     if (rec.checksum !== entry.sha256) throw new Error(`${entry.name}: registry checksum differs from manifest`);
+    if (rec.targetMemory && rec.targetMemory !== targetMemory) throw new Error(`${entry.name}: registry target memory ${rec.targetMemory} differs from ${targetMemory}`);
+    rec.targetMemory = targetMemory;
     const priorCreateRejected = rec.createStartedAt
       && rec.lastError?.phase === 'create'
       && definitiveCreateRejection(rec.lastError);
@@ -447,8 +618,12 @@ async function publishAll(validated, preflight) {
       saveRegistry(registry);
       log(`[${entry.name}] retrying after definitive HTTP 413 gateway rejection`);
     }
+    if (rec.status === 'swm' && targetMemory === 'SWM') {
+      log(`[${entry.name}] already retained in SWM`);
+      continue;
+    }
     if (rec.status === 'finalized' && (rec.txHash || rec.dkgFinalizationMode === 'noop')) {
-      log(`[${entry.name}] already finalized: ${rec.txHash ?? rec.dkgFinalizationMode}`);
+      log(`[${entry.name}] already finalized in VM: ${rec.txHash ?? rec.dkgFinalizationMode}`);
       continue;
     }
     const kaName = `${kaPrefix}-${entry.name}`;
@@ -529,12 +704,34 @@ async function publishAll(validated, preflight) {
       }
     }
 
+    if (targetMemory === 'SWM') {
+      rec.status = 'swm';
+      rec.swmRetainedAt = new Date().toISOString();
+      rec.durationSeconds = Math.round((Date.now() - batchStartedAt) / 1000);
+      saveRegistry(registry);
+      completed += 1;
+      processedThisRun += 1;
+      const elapsed = Date.now() - startedAt;
+      const averageMs = elapsed / processedThisRun;
+      const remaining = Math.max(0, validated.manifest.batchCount - completed);
+      updateProgress({
+        phase: 'batch-complete', currentBatch: entry.name, completedBatches: completed,
+        percent: Number(((completed / validated.manifest.batchCount) * 100).toFixed(2)),
+        estimatedRemainingSeconds: Math.round((averageMs * remaining) / 1000),
+        lastMemoryLayer: 'SWM',
+      });
+      log(`[${entry.name}] retained in SWM; ${completed}/${validated.manifest.batchCount} complete`);
+      await waitForMidRunResume(completed, entry.name);
+      continue;
+    }
+
     try {
       if (vmPublishMode === 'sync') {
         await publishSynchronous(entry, rec, kaName, registry);
         saveRegistry(registry);
       } else {
         if (!rec.publishJobId) {
+          if (vmPublishMode === 'async-all') await waitForAsyncPublisherCapacity(entry.name);
           log(`[${entry.name}] enqueueing PAID async VM publish for ${epochs} epochs`);
           try {
             const queued = await api('POST', `/api/knowledge-assets/${encodeURIComponent(kaName)}/vm/publish-async`, {
@@ -552,6 +749,18 @@ async function publishAll(validated, preflight) {
             } else throw error;
           }
         }
+        if (vmPublishMode === 'async-all') {
+          rec.durationSeconds = Math.round((Date.now() - batchStartedAt) / 1000);
+          saveRegistry(registry);
+          const enqueued = Object.values(registry.batches)
+            .filter((record) => record.targetMemory === 'VM' && record.publishJobId).length;
+          updateProgress({
+            phase: 'vm-enqueued', currentBatch: entry.name, completedBatches: completed,
+            enqueuedVmBatches: enqueued,
+          });
+          log(`[${entry.name}] VM publish enqueued (${enqueued}/${validated.manifest.batchCount - swmOnlyBatches}); continuing without serial confirmation wait`);
+          continue;
+        }
         const job = await pollPublishJob(entry.name, rec.publishJobId);
         recordFinalized(rec, job);
       }
@@ -568,12 +777,74 @@ async function publishAll(validated, preflight) {
         estimatedRemainingSeconds: Math.round((averageMs * remaining) / 1000),
         lastTxHash: rec.txHash, lastUal: rec.ual,
       });
-      log(`[${entry.name}] finalized tx=${rec.txHash ?? rec.dkgFinalizationMode} block=${rec.blockNumber ?? 'n/a'}; ${completed}/${validated.manifest.batchCount} complete`);
+      log(`[${entry.name}] finalized in VM tx=${rec.txHash ?? rec.dkgFinalizationMode} block=${rec.blockNumber ?? 'n/a'}; ${completed}/${validated.manifest.batchCount} complete`);
+      await waitForMidRunResume(completed, entry.name);
     } catch (error) {
       rec.lastError = { at: new Date().toISOString(), phase: 'publish', message: error.message, code: error.code ?? null };
       rec.status = 'error';
       saveRegistry(registry);
       throw error;
+    }
+  }
+
+  if (vmPublishMode === 'async-all') {
+    const vmEntries = entries.filter((entry) => (
+      validated.manifest.batches.findIndex((candidate) => candidate.name === entry.name) >= swmOnlyBatches
+    ));
+    updateProgress({
+      phase: 'awaiting-vm-batch', completedBatches: completed,
+      enqueuedVmBatches: vmEntries.length,
+    });
+    log(`all ${vmEntries.length} VM publications are enqueued; waiting for terminal results in parallel`);
+    const outcomes = new Array(vmEntries.length);
+    let nextVmEntry = 0;
+    const finalizeEntry = async (entry) => {
+      const rec = registry.batches[entry.name];
+      if (rec?.status === 'finalized' && (rec.txHash || rec.dkgFinalizationMode === 'noop')) return;
+      if (!rec?.publishJobId) throw new Error(`[${entry.name}] has no async VM publish job id`);
+      try {
+        const job = await pollPublishJob(entry.name, rec.publishJobId);
+        recordFinalized(rec, job);
+        const enqueuedAt = Date.parse(rec.publishEnqueuedAt ?? rec.publishStartedAt ?? '');
+        rec.durationSeconds = Number.isFinite(enqueuedAt)
+          ? Math.round((Date.now() - enqueuedAt) / 1000)
+          : rec.durationSeconds;
+        saveRegistry(registry);
+        completed += 1;
+        updateProgress({
+          phase: 'vm-finalized', currentBatch: entry.name, completedBatches: completed,
+          percent: Number(((completed / validated.manifest.batchCount) * 100).toFixed(2)),
+          lastTxHash: rec.txHash, lastUal: rec.ual,
+        });
+        log(`[${entry.name}] async VM finalized tx=${rec.txHash ?? rec.dkgFinalizationMode} block=${rec.blockNumber ?? 'n/a'}; ${completed}/${validated.manifest.batchCount} complete`);
+      } catch (error) {
+        rec.lastError = { at: new Date().toISOString(), phase: 'publish', message: error.message, code: error.code ?? null };
+        rec.status = 'error';
+        saveRegistry(registry);
+        throw error;
+      }
+    };
+    const workers = Array.from(
+      { length: Math.min(vmMaxInflight, vmEntries.length) },
+      async () => {
+        while (true) {
+          const index = nextVmEntry;
+          nextVmEntry += 1;
+          if (index >= vmEntries.length) return;
+          try {
+            await finalizeEntry(vmEntries[index]);
+            outcomes[index] = { status: 'fulfilled' };
+          } catch (reason) {
+            outcomes[index] = { status: 'rejected', reason };
+          }
+        }
+      },
+    );
+    await Promise.all(workers);
+    const failures = outcomes.filter((outcome) => outcome.status === 'rejected');
+    if (failures.length > 0) {
+      const messages = failures.map((outcome) => outcome.reason?.message ?? String(outcome.reason));
+      throw new Error(`${failures.length}/${vmEntries.length} async VM publications failed: ${messages.join(' | ')}`);
     }
   }
 
@@ -603,7 +874,40 @@ async function main() {
   const validated = loadAndValidateBatches();
   const totalQuads = validated.stats.reduce((sum, batch) => sum + batch.quads, 0);
   const totalPayloadBytes = validated.stats.reduce((sum, batch) => sum + batch.payloadBytes, 0);
+  if (!validated.manifest.complete) log(`HARNESS MODE: accepting an explicit ${validated.manifest.batchCount}-batch prefix of the checksummed production corpus`);
   log(`local validation OK: ${validated.manifest.includedRecords.toLocaleString()} records, ${validated.manifest.batchCount} batches, ${totalQuads.toLocaleString()} quads, ${(totalPayloadBytes / 1e9).toFixed(2)} GB JSON payload`);
+  if (expectedManifestPath) {
+    atomicJson(expectedManifestPath, {
+      version: 1,
+      // Bind the canonical verification manifest to the immutable batch build
+      // instead of changing its checksum on every dry-run/preflight.
+      generatedAt: validated.manifest.createdAt,
+      source: validated.manifest.source,
+      mapping: validated.manifest.mapping,
+      batchManifestSha256: validated.manifestSha256,
+      contextGraphId: contextGraphId ?? null,
+      kaPrefix: kaPrefix ?? null,
+      swmOnlyBatches,
+      vmBatches: validated.manifest.batchCount - swmOnlyBatches,
+      totalRecords: validated.manifest.includedRecords,
+      totalQuads,
+      totalPayloadBytes,
+      batches: validated.stats.map((batch, index) => ({
+        ordinal: index + 1,
+        batch: batch.name,
+        kaName: kaPrefix ? `${kaPrefix}-${batch.name}` : null,
+        targetMemory: index < swmOnlyBatches ? 'SWM' : 'VM',
+        records: batch.records,
+        quads: batch.quads,
+        sourceQuads: batch.sourceQuads,
+        duplicateQuadsRemoved: batch.duplicateQuadsRemoved,
+        payloadBytes: batch.payloadBytes,
+        quadSetSha256: batch.quadSetSha256,
+        publicQuadsDigest: batch.publicQuadsDigest,
+      })),
+    });
+    log(`expected per-KA manifest: ${expectedManifestPath}`);
+  }
   if (mode === 'dry-run') {
     updateProgress({ status: 'validated', phase: 'dry-run-complete', validatedBatches: validated.stats.length });
     log('dry-run complete: no node calls and no writes');

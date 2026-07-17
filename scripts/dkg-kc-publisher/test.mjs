@@ -8,6 +8,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
+import { recordQuads } from './mapping.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const temp = mkdtempSync(join(tmpdir(), 'blackbox-publisher-test-'));
@@ -16,11 +17,15 @@ const tokenPath = join(temp, 'auth.token');
 const registryPath = join(temp, 'registry.json');
 const progressPath = join(temp, 'progress.json');
 const sourcePath = join(temp, 'source.json');
+const expectedPath = join(temp, 'expected-manifest.json');
 const cg = '0xtest/private-blackbox';
 let accessPolicy = 1;
 let publishState = 'finalized';
 let rejectCreateStatus;
 let synchronousPublish = false;
+let asyncPublisher = { available: true };
+let publisherStats = { accepted: 0, finalized: 0, failed: 0 };
+let lastCreateBody;
 const calls = { create: 0, share: 0, publish: 0 };
 
 function run(script, args, env = {}) {
@@ -43,9 +48,11 @@ function json(response, status, body) {
   response.end(JSON.stringify(body));
 }
 
-const server = createServer((request, response) => {
+const server = createServer(async (request, response) => {
   const url = new URL(request.url, 'http://127.0.0.1');
-  if (request.method === 'GET' && url.pathname === '/api/status') return json(response, 200, { name: 'fixture', version: '10.0.5', networkConfig: 'mainnet-base', connectedPeers: 3 });
+  if (request.method === 'GET' && url.pathname === '/api/status') return json(response, 200, {
+    name: 'fixture', version: '10.0.5', networkConfig: 'mainnet-base', connectedPeers: 3, asyncPublisher,
+  });
   if (request.method === 'GET' && url.pathname === '/api/context-graph/exists') return json(response, 200, { id: cg, exists: true });
   if (request.method === 'GET' && url.pathname === '/api/context-graph/list') return json(response, 200, { contextGraphs: [{ id: cg, accessPolicy, onChainId: '13' }] });
   if (request.method === 'GET' && url.pathname.endsWith('/participants')) return json(response, 200, { contextGraphId: cg, allowedAgents: ['0xtest'] });
@@ -55,8 +62,11 @@ const server = createServer((request, response) => {
     wallets: ['0xtest'],
     balances: [{ address: '0xtest', eth: '1', trac: '10000' }],
   });
-  if (request.method === 'GET' && url.pathname === '/api/publisher/stats') return json(response, 200, { accepted: 0, finalized: 0, failed: 0 });
+  if (request.method === 'GET' && url.pathname === '/api/publisher/stats') return json(response, 200, publisherStats);
   if (request.method === 'POST' && url.pathname === '/api/knowledge-assets') {
+    const chunks = [];
+    for await (const chunk of request) chunks.push(chunk);
+    lastCreateBody = JSON.parse(Buffer.concat(chunks).toString('utf8'));
     calls.create += 1;
     if (rejectCreateStatus) {
       const status = rejectCreateStatus;
@@ -91,14 +101,32 @@ try {
   mkdirSync(batches, { recursive: true });
   writeFileSync(tokenPath, 'test-token\n');
   writeFileSync(sourcePath, JSON.stringify({
-    dependencies: [{ type: 'dependency', ecosystem: 'npm', name: 'Example-Package', version: '1.0.0', title: 'fixture dependency' }],
+    dependencies: [{
+      type: 'dependency', ecosystem: 'npm', name: 'Example-Package', version: '1.0.0',
+      title: 'fixture dependency', references: ['https://duplicate.example', 'https://duplicate.example'],
+    }],
     iocs: [{ type: 'ioc', ioc_type: 'domain', value: 'EVIL.EXAMPLE.', threat: 'fixture IOC' }],
   }));
 
   const chunk = await run('chunk.mjs', [sourcePath, '--size', '2', '--expect-records', '2', '--out-dir', batches]);
   assert.equal(chunk.code, 0, chunk.stderr);
-  const dry = await run('publish.mjs', ['--dry-run'], { KC_BATCH_DIR: batches, KC_EXPECT_RECORDS: '2', KC_PROGRESS_PATH: progressPath });
+  const dry = await run('publish.mjs', ['--dry-run'], {
+    KC_BATCH_DIR: batches,
+    KC_EXPECT_RECORDS: '2',
+    KC_PROGRESS_PATH: progressPath,
+    KC_EXPECTED_MANIFEST_PATH: expectedPath,
+  });
   assert.equal(dry.code, 0, dry.stderr);
+  const fixtureRecords = JSON.parse(readFileSync(join(batches, 'batch-001.json'), 'utf8')).records;
+  const rawQuads = fixtureRecords.flatMap(recordQuads);
+  const uniqueQuadKeys = new Set(rawQuads.map((quad) => JSON.stringify([
+    quad.subject, quad.predicate, quad.object, '',
+  ])));
+  const expected = JSON.parse(readFileSync(expectedPath, 'utf8'));
+  assert.equal(expected.batches[0].sourceQuads, rawQuads.length);
+  assert.equal(expected.batches[0].quads, uniqueQuadKeys.size);
+  assert.equal(expected.batches[0].duplicateQuadsRemoved, rawQuads.length - uniqueQuadKeys.size);
+  assert.equal(expected.batches[0].duplicateQuadsRemoved, 1);
 
   await new Promise((resolvePromise) => server.listen(0, '127.0.0.1', resolvePromise));
   const port = server.address().port;
@@ -133,6 +161,18 @@ try {
   const confirmation = `${cg}:12:${manifestHash.slice(0, 12)}`;
   assert.match(preflight.stdout, new RegExp(confirmation.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
 
+  asyncPublisher = {
+    available: false,
+    reason: 'publisher_disabled',
+    retryable: false,
+    operatorActionRequired: true,
+  };
+  const disabledPublisher = await run('publish.mjs', ['--preflight'], env);
+  assert.notEqual(disabledPublisher.code, 0, 'async preflight unexpectedly accepted a disabled publisher');
+  assert.match(disabledPublisher.stderr, /requires an available async publisher; node reports publisher_disabled/);
+  assert.match(disabledPublisher.stderr, /dkg publisher enable/);
+  asyncPublisher = { available: true };
+
   rejectCreateStatus = 413;
   const rejected = await run('publish.mjs', ['--publish', '--confirm', confirmation], env);
   assert.notEqual(rejected.code, 0, 'HTTP 413 unexpectedly produced success');
@@ -154,6 +194,14 @@ try {
   const publish = await run('publish.mjs', ['--publish', '--confirm', confirmation], env);
   assert.equal(publish.code, 0, publish.stderr);
   assert.deepEqual(calls, { create: 3, share: 1, publish: 1 });
+  assert.equal(lastCreateBody.quads.length, uniqueQuadKeys.size, 'create payload retained duplicate RDF triples');
+  assert.equal(
+    new Set(lastCreateBody.quads.map((quad) => JSON.stringify([
+      quad.subject, quad.predicate, quad.object, quad.graph ?? '',
+    ]))).size,
+    lastCreateBody.quads.length,
+    'create payload is not an RDF set',
+  );
   const registry = JSON.parse(readFileSync(registryPath, 'utf8'));
   assert.equal(registry.batches['batch-001'].txHash, '0xabc');
   assert.equal(registry.batches['batch-001'].epochs, 12);
@@ -199,6 +247,28 @@ try {
   assert.equal(syncRegistry.batches['batch-001'].ual, 'did:dkg:sync');
   assert.equal(syncRegistry.batches['batch-001'].publishMode, 'sync');
   assert.equal(syncRegistry.batches['batch-001'].status, 'finalized');
+
+  const asyncAllRegistryPath = join(temp, 'async-all-registry.json');
+  const asyncAllProgressPath = join(temp, 'async-all-progress.json');
+  const publishesBeforeAsyncAll = calls.publish;
+  publisherStats = { accepted: 1, finalized: 0, failed: 0 };
+  setTimeout(() => { publisherStats = { accepted: 0, finalized: 1, failed: 0 }; }, 1_100);
+  const asyncAllPublish = await run('publish.mjs', ['--publish', '--confirm', confirmation], {
+    ...env,
+    KC_VM_PUBLISH_MODE: 'async-all',
+    KC_VM_MAX_INFLIGHT: '1',
+    KC_REGISTRY_PATH: asyncAllRegistryPath,
+    KC_PROGRESS_PATH: asyncAllProgressPath,
+  });
+  assert.equal(asyncAllPublish.code, 0, asyncAllPublish.stderr);
+  assert.match(asyncAllPublish.stdout, /publisher backpressure: 1\/1 jobs in flight/);
+  assert.equal(calls.publish, publishesBeforeAsyncAll + 1);
+  const asyncAllRegistry = JSON.parse(readFileSync(asyncAllRegistryPath, 'utf8'));
+  assert.equal(asyncAllRegistry.batches['batch-001'].txHash, '0xabc');
+  assert.equal(asyncAllRegistry.batches['batch-001'].status, 'finalized');
+  const asyncAllProgress = JSON.parse(readFileSync(asyncAllProgressPath, 'utf8'));
+  assert.equal(asyncAllProgress.status, 'complete');
+  assert.equal(asyncAllProgress.completedBatches, 1);
   console.log('publisher integration smoke test: PASS');
 } finally {
   await new Promise((resolvePromise) => server.close(resolvePromise));
