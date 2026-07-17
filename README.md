@@ -142,14 +142,6 @@ plugins:
 
 Every detection is logged to the audit trail and shown live in the dashboard. Eligible findings can also be shared as privacy-safe community reports.
 
-### Optional: AI reviewer
-
-On top of the built-in pattern and graph detection, Blackbox can use an LLM for a second opinion on prompt injection. The installer reuses an existing Hermes/OpenClaw LLM config when it can; otherwise it asks for provider, key, and model on a real terminal. Run it anytime:
-
-```bash
-blackbox setup-llm
-```
-
 The reviewer only flags - it never blocks, and its verdicts stay on your machine (never shared to the community graph). Turn it off with `blackbox setup-llm --disable`.
 
 ### Try it
@@ -229,6 +221,14 @@ blackbox detach   # turn it back off
 
 `attach` finds every Hermes home and OpenClaw workspace on your machine and enables Agent Blackbox in each one - no per-agent setup.
 
+### Optional: AI reviewer
+
+On top of the built-in pattern and graph detection, Blackbox can use an LLM for a second opinion on prompt injection. The installer reuses an existing Hermes/OpenClaw LLM config when it can; otherwise it asks for provider, key, and model on a real terminal. Run it anytime:
+
+```bash
+blackbox setup-llm
+```
+
 ## Configuration
 
 Set under `plugins.entries.blackbox.*` in `config.yaml`.
@@ -250,7 +250,7 @@ Full options in the [plugin README](plugins/blackbox/README.md).
 
 ### Customize to your needs
 
-Open the dashboard and click the gear icon - no config file needed. Switch threat categories on/off and set their minimum severity, list protected files and folders (globs welcome, e.g. `~/.ssh/*`, `**/.env`) that always block and never leave your machine, and flip between *audit* and *block* mode. Changes are saved to `config.yaml` and apply to every agent.
+Open the dashboard and click the gear icon. Switch threat categories on/off and set their minimum severity, list protected files and folders (globs welcome, e.g. `~/.ssh/*`, `**/.env`) that always block and never leave your machine, and flip between *audit* and *block* mode. Changes are saved to `config.yaml` and apply to every agent.
 
 ## About Umanitek
 

@@ -1454,8 +1454,13 @@
     .stats { grid-template-columns: repeat(3, 1fr); }
   }
   @media (max-width: 860px) {
-    .stats { grid-template-columns: repeat(2, 1fr); }
-    .agent-card { min-width: 0; flex: 1 1 100%; }
+    .stats { grid-template-columns: repeat(6, minmax(0, 1fr)); }
+    .stat { grid-column: span 2; }
+    .stat:nth-last-child(-n + 2) { grid-column: span 3; }
+    .agent-card, .agent-add-tile {
+      min-width: min(280px, 100%);
+      flex: 1 1 280px;
+    }
     .brand-logo { height: 58px; }
     .section-head.graph-head { align-items: stretch; flex-direction: column; }
     .graph-head-right { width: 100%; }
@@ -1477,10 +1482,13 @@
     thead th, tbody td { padding-left: 12px; padding-right: 12px; }
     .stats { grid-template-columns: 1fr; }
     .brand-logo { height: 46px; }
-    .chat-sheet { top: 0; right: 0; bottom: 0; width: 100vw; border-radius: 0; }
+    .chat-sheet { top: 0; right: 0; bottom: 0; width: 100vw; height: 100dvh; border-radius: 0; }
+    .chat-head { min-height: 72px; padding: 14px 64px 14px 16px; }
+    .chat-log { padding: 16px; }
     .chat-msg { max-width: 94%; }
     .chat-prompts { padding: 10px 12px; }
-    .chat-form { padding: 12px; }
+    .chat-form { padding: 12px 12px calc(12px + env(safe-area-inset-bottom)); }
+    .chat-send { min-width: 72px; }
   }
 
   /* ---------- Threat detail modal ---------- */
@@ -1916,12 +1924,103 @@
     outline-offset: 1px;
   }
 
+  @media (max-width: 1024px) {
+    .modal-overlay { padding: 16px; }
+    .modal { max-height: calc(100dvh - 32px); }
+    .modal.settings-modal {
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      max-height: calc(100dvh - 32px);
+    }
+    .settings-modal .set-head,
+    .settings-modal .set-foot { flex: 0 0 auto; }
+    .settings-modal .set-body {
+      flex: 1 1 auto;
+      min-height: 0;
+      overflow-y: auto;
+      overscroll-behavior: contain;
+    }
+    .settings-modal .set-foot { position: static; }
+    .settings-modal .modal-close,
+    .chat-close { width: 44px; height: 44px; }
+    .settings-modal .set-seg button,
+    .settings-modal .set-select,
+    .settings-modal .path-input,
+    .settings-modal .path-add-btn,
+    .settings-modal .set-reset,
+    .settings-modal .set-cancel,
+    .settings-modal .set-save { min-height: 44px; }
+    .settings-modal .set-toggle { width: 44px; height: 44px; }
+    .settings-modal .set-track { inset: 11px 3px; }
+    .settings-modal .path-del { width: 44px; height: 44px; }
+    .chat-prompt { min-height: 44px; }
+    .chat-form { align-items: stretch; }
+    .chat-input { min-height: 48px; }
+    .chat-send { min-height: 48px; height: auto; }
+  }
+
   @media (max-width: 560px) {
-    .set-row { flex-wrap: wrap; }
-    .cat-row { flex-wrap: wrap; }
-    .set-body { padding-bottom: 88px; }
-    .set-foot { position: static; flex-wrap: wrap; }
-    .set-foot .set-status { flex-basis: 100%; }
+    .modal-overlay { align-items: stretch; padding: 0; }
+    .modal {
+      width: 100%;
+      max-width: none;
+      height: 100dvh;
+      max-height: 100dvh;
+      border: 0;
+      border-radius: 0;
+    }
+    .modal.settings-modal { max-width: none; max-height: 100dvh; }
+    .set-head { min-height: 72px; padding: 14px 64px 14px 16px; }
+    .set-ico { width: 38px; height: 38px; }
+    .set-body { padding: 0 16px; }
+    .set-group { padding: 16px 0; }
+    .set-group > .set-glabel {
+      align-items: flex-start;
+      flex-direction: column;
+      gap: 4px;
+    }
+    .set-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 8px 12px;
+      align-items: start;
+      padding: 12px 0;
+    }
+    .set-row .set-rc {
+      grid-column: 1 / -1;
+      width: 100%;
+      justify-content: flex-end;
+    }
+    .set-row .set-seg { width: 100%; }
+    .set-row .set-seg button { flex: 1 1 0; }
+    .cat-row {
+      display: grid;
+      grid-template-columns: 30px minmax(0, 1fr);
+      gap: 8px 12px;
+      align-items: start;
+      padding: 12px 0;
+    }
+    .cat-ico { grid-column: 1; grid-row: 1; }
+    .cat-main { grid-column: 2; grid-row: 1; }
+    .cat-ctrl {
+      grid-column: 2;
+      grid-row: 2;
+      width: 100%;
+      padding-top: 0;
+      justify-content: space-between;
+    }
+    .cat-ctrl .set-select { flex: 1 1 auto; }
+    .path-add { align-items: stretch; }
+    .path-add-btn { padding-left: 14px; padding-right: 14px; }
+    .set-reset-row { align-items: stretch; flex-direction: column; gap: 12px; }
+    .set-reset-row .set-reset { width: 100%; }
+    .set-foot {
+      flex-wrap: wrap;
+      padding: 12px 16px calc(12px + env(safe-area-inset-bottom));
+    }
+    .set-foot .set-status { flex-basis: 100%; order: -1; }
+    .set-foot .set-status:empty { display: none; }
     .set-cancel, .set-save { flex: 1 1 0; }
     .threat-toast-region { top: 82px; right: 12px; width: calc(100vw - 24px); }
     .threat-toast { grid-template-columns: 34px minmax(0, 1fr); }
@@ -2157,15 +2256,58 @@
 
   @media (max-width: 520px) {
     .header-inner { min-height: 72px; padding-left: 16px; padding-right: 16px; }
-    .brand-wordmark { font-size: 27px; }
+    .brand-wordmark { min-width: 0; font-size: 25px; }
+    .status-pills { gap: 6px; }
     .gear-btn, .chat-close, .modal-close { width: 44px; height: 44px; }
     .gear-btn svg { width: 18px; height: 18px; }
+    .agents-strip { padding: 12px; gap: 10px; }
+    .agent-card, .agent-add-tile { width: 100%; min-width: 0; padding: 12px; flex: 1 1 100%; }
     .section-head.graph-head { position: relative; }
     .graph-head .section-htext { padding-right: 56px; }
+    .graph-head-right, .graph-head-right .tabs, .tabs { min-width: 0; }
     .graph-head-right .refresh-btn { position: absolute; top: 0; right: 0; }
-    .tab { min-height: 44px; }
+    .tab { min-width: 0; min-height: 44px; gap: 4px; padding: 7px 4px; font-size: 9px; }
+    .tab .tab-count { padding: 0 4px; }
+    .graph-stage { height: 330px; }
+    .sync-progress-meta { gap: 8px; }
+    .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+    .stat, .stat:nth-last-child(-n + 2) { grid-column: auto; min-height: 124px; padding: 14px; }
+    .stat:last-child { grid-column: 1 / -1; min-height: 106px; }
+    .stat .label { gap: 6px; letter-spacing: 0.12em; }
+    .stat .value { margin-top: 10px; font-size: 24px; }
+    .stat .meta { font-size: 11px; line-height: 1.4; }
+    .findings-head, .activity-head { flex-direction: column; gap: 10px; }
+    .findings-head .sort-control, .activity-head .audit-filter { width: 100%; }
+    .findings-head .sort-control { justify-content: space-between; }
+    .findings-head .sort-seg, .activity-head .audit-filter { flex: 1 1 auto; }
+    .findings-head .sort-seg button, .activity-head .audit-filter button { flex: 1 1 0; }
     .sort-seg button { min-height: 40px; padding-left: 14px; padding-right: 14px; }
     .graph-detail button { min-height: 40px; padding-left: 12px; padding-right: 12px; }
+    .table-scroll { overflow-x: hidden; }
+    .table-scroll table:not(.audit-table) { display: block; width: 100%; }
+    .table-scroll table:not(.audit-table) thead { display: none; }
+    .table-scroll table:not(.audit-table) tbody { display: block; }
+    .table-scroll table:not(.audit-table) tbody tr:not(:has(td[colspan])) {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 9px 12px;
+      padding: 14px 12px;
+      border-bottom: 1px solid var(--border);
+    }
+    .table-scroll table:not(.audit-table) tbody tr:not(:has(td[colspan])) td {
+      display: block;
+      min-width: 0;
+      padding: 0;
+      border: 0;
+    }
+    .table-scroll table:not(.audit-table) tbody tr:not(:has(td[colspan])) td:nth-child(1) { grid-column: 1; grid-row: 1; }
+    .table-scroll table:not(.audit-table) tbody tr:not(:has(td[colspan])) td:nth-child(2) { grid-column: 1; grid-row: 2; }
+    .table-scroll table:not(.audit-table) tbody tr:not(:has(td[colspan])) td:nth-child(3) { grid-column: 2; grid-row: 1; }
+    .table-scroll table:not(.audit-table) tbody tr:not(:has(td[colspan])) td:nth-child(4) { grid-column: 2; grid-row: 2; }
+    .table-scroll table:not(.audit-table) tbody tr:not(:has(td[colspan])) td:nth-child(5) { grid-column: 1 / -1; grid-row: 3; }
+    .table-scroll tbody tr:has(td[colspan]) { display: block; width: 100%; }
+    .table-scroll tbody td[colspan] { display: block; width: 100%; padding: 0; }
+    .table-scroll tbody td[colspan] .empty { width: 100%; padding: 44px 20px; }
     .audit-scroll { max-height: 600px; }
     .audit-table { width: 100%; min-width: 0; }
     .audit-table thead { display: none; }
@@ -2185,6 +2327,13 @@
     .audit-table tbody td:nth-child(4) { grid-column: 2; grid-row: 2; }
     .audit-table tbody tr.threat-row { border-left: 2px solid var(--signal); }
     .audit-table tbody tr.threat-row td:first-child { border-left: 0; }
+    .audit-table tbody tr:has(td[colspan]) { display: block; padding: 0; }
+    .audit-table tbody tr:has(td[colspan]) td[colspan] {
+      display: block;
+      width: 100%;
+      padding: 0;
+    }
+    .audit-table tbody tr:has(td[colspan]) .empty { width: 100%; padding: 44px 20px; }
     .audit-table .au-detail,
     .audit-table .au-detail-primary,
     .audit-table .au-detail-meta { min-width: 0; overflow-wrap: anywhere; }
@@ -2371,7 +2520,7 @@
 
     <!-- Threats detected -->
     <section class="section" id="findings-section" aria-label="Threats detected">
-      <div class="section-head">
+      <div class="section-head findings-head">
         <div class="section-htext">
           <h2 class="findings-title">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><path d="M12 9v4M12 17h.01"/></svg>
@@ -2448,7 +2597,7 @@
 
     <!-- Audit trail — every agent action, timestamped -->
     <section class="section" aria-label="Audit trail">
-      <div class="section-head">
+      <div class="section-head activity-head">
         <div class="section-htext">
           <h2>Agent activity</h2>
           <span class="section-note">Recorded sessions, API calls, tool calls, and installs.</span>
