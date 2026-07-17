@@ -435,6 +435,11 @@ export function commandFromArgs(toolName: string, args: unknown): string {
   return "";
 }
 
+/** Whether a tool's payload is treated as a shell command. */
+export function isShellTool(toolName: string): boolean {
+  return SHELL_TOOLS.has((toolName || "").trim().toLowerCase());
+}
+
 /**
  * Derive a deterministic escalation `argShape` for a tool call.
  *
@@ -938,6 +943,52 @@ function tokenizeShell(command: string): string[] {
     out.push(m[1] ?? m[2] ?? m[3] ?? "");
   }
   return out;
+}
+
+const SHELL_READ_COMMANDS = new Set([
+  "cat",
+  "less",
+  "more",
+  "head",
+  "tail",
+  "bat",
+  "xxd",
+  "hexdump",
+  "strings",
+  "od",
+  "nl",
+]);
+
+function looksLikePath(token: string): boolean {
+  return token.includes("/") || token.startsWith("~") || token.startsWith(".") || token.includes(".");
+}
+
+/** File paths read through cat-family shell commands (visibility only). */
+export function parseShellReads(command: string): string[] {
+  if (!command || ![...SHELL_READ_COMMANDS].some((name) => ` ${command} `.includes(` ${name} `))) return [];
+  const tokens = tokenizeShell(command);
+  const out: string[] = [];
+  let i = 0;
+  while (i < tokens.length) {
+    if (SHELL_READ_COMMANDS.has((tokens[i] ?? "").toLowerCase())) {
+      let j = i + 1;
+      while (j < tokens.length && ![";", "&&", "||", "|", ">", ">>", "<"].includes(tokens[j] ?? "")) {
+        const token = tokens[j] ?? "";
+        if (!token.startsWith("-") && looksLikePath(token)) out.push(token);
+        j += 1;
+      }
+      i = j;
+    } else {
+      i += 1;
+    }
+  }
+  return [...new Set(out)];
+}
+
+/** HTTP(S) URLs fetched through curl/wget shell commands (visibility only). */
+export function parseDownloads(command: string): string[] {
+  if (!command || !/\b(?:curl|wget)\b/i.test(command)) return [];
+  return [...new Set(command.match(/https?:\/\/[^\s;'"|&>]+/gi) ?? [])];
 }
 
 export interface ParsedPackage {

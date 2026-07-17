@@ -52,7 +52,7 @@ escalate, or downgrade a verified public rule.
 
 | Hook | Behavior |
 |------|----------|
-| `before_tool_call` | detect escalation + dependency + injection over params; **block** (block mode, ≥ `blockSeverity`) or observe + report |
+| `before_tool_call` | record the tool call plus routine file/download/package activity; detect escalation + dependency + injection over params; **block** (block mode, ≥ `blockSeverity`) or observe + report |
 | `after_tool_call` | observe result (redacted); never blocks |
 | `before_agent_run` | prompt-injection scan of the incoming prompt + history — **requires `allowConversationAccess`** |
 | `message_received` | observe inbound content for injection sightings |

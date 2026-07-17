@@ -30,6 +30,8 @@ import {
   emptyRuleset,
   normalizeArgShape,
   parseDependencyInstalls,
+  parseDownloads,
+  parseShellReads,
 } from "../src/detection.ts";
 import { DkgClient } from "../src/dkgClient.ts";
 
@@ -147,7 +149,19 @@ function eq(a, b) {
       );
     }
   }
-  report("dependencyParses", ok, mismatches.join("\n"));
+report("dependencyParses", ok, mismatches.join("\n"));
+}
+
+// --- routine visibility parsing -------------------------------------------
+{
+  const reads = parseShellReads("cat ~/.ssh/id_rsa ./notes.txt | head -n 2 /tmp/out.log");
+  const downloads = parseDownloads("curl https://example.test/a.tgz && wget 'https://cdn.test/b.zip'");
+  report(
+    "activity visibility parses",
+    eq(reads, ["~/.ssh/id_rsa", "./notes.txt", "/tmp/out.log"]) &&
+      eq(downloads, ["https://example.test/a.tgz", "https://cdn.test/b.zip"]),
+    `reads=${JSON.stringify(reads)} downloads=${JSON.stringify(downloads)}`,
+  );
 }
 
 // --- reportQuads (drop dateModified, sort by (predicate,object)) ------------

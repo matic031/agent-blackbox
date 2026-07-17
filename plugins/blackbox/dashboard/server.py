@@ -18,7 +18,9 @@ from __future__ import annotations
 import logging
 import os
 import shutil
+import socket
 import subprocess
+import sys
 import threading
 import time
 from collections import deque
@@ -35,6 +37,10 @@ _RULESET_EMPTY_RETRY_SEC = 10.0
 _RULESET_MIN_RETRY_SEC = 5.0
 _JOIN_RETRY_SEC = 60.0
 _CATCHUP_RESTART_SEC = 60.0
+_GUARDIAN_PROFILE = "guardian"
+_GUARDIAN_RUNTIME_HOST = "127.0.0.1"
+_GUARDIAN_RUNTIME_PORT = 9121
+_GUARDIAN_RESTART_DELAY_SEC = 2.0
 _join_attempts: Dict[str, float] = {}
 _catchup_restarts: Dict[str, float] = {}
 _join_lock = threading.Lock()
@@ -43,6 +49,40 @@ _connection_states: Dict[str, Dict[str, Any]] = {}
 _STATIC_DIR = Path(__file__).resolve().parent / "static"
 _ASSETS_DIR = Path(__file__).resolve().parent / "assets"
 _FONTS_DIR = _ASSETS_DIR / "fonts"
+
+
+def _guardian_runtime_argv(port: int = _GUARDIAN_RUNTIME_PORT) -> List[str]:
+    """Command for the dashboard-owned, profile-isolated Guardian backend."""
+    return [
+        sys.executable,
+        "-m",
+        "hermes_cli.main",
+        "--profile",
+        _GUARDIAN_PROFILE,
+        "serve",
+        "--host",
+        _GUARDIAN_RUNTIME_HOST,
+        "--port",
+        str(int(port)),
+        "--isolated",
+    ]
+
+
+def _guardian_runtime_env() -> Dict[str, str]:
+    """Build a clean named-profile environment without changing the parent."""
+    env = dict(os.environ)
+    # The explicit --profile selector must win even when Blackbox itself was
+    # launched from another Hermes profile.
+    env.pop("HERMES_HOME", None)
+    return env
+
+
+def _port_is_listening(host: str, port: int) -> bool:
+    try:
+        with socket.create_connection((host, int(port)), timeout=0.2):
+            return True
+    except OSError:
+        return False
 
 
 def _recent_daemon_lines(dkg_home: str, *, max_lines: int = 400) -> List[str]:
@@ -519,7 +559,81 @@ def _sync_activity(
     return progress
 
 
-def create_app():
+def _workspace_key(value: Any) -> str:
+    """Normalize a local profile path for stable cross-log matching."""
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    try:
+        return os.path.normcase(os.path.realpath(os.path.expanduser(text)))
+    except Exception:
+        return os.path.normcase(text)
+
+
+def _profile_activity_state(
+    attach_rows: List[Dict[str, Any]],
+    audit_rows: List[Dict[str, Any]],
+    finding_rows: List[Dict[str, Any]],
+) -> Dict[Tuple[str, str], Dict[str, Any]]:
+    """Aggregate local activity and findings by framework *and* workspace.
+
+    Older rows predate workspace attribution. They are assigned exactly once
+    to the first (canonical/default) protected workspace for that framework,
+    rather than copied onto every attached profile.
+    """
+    states: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    canonical: Dict[str, Tuple[str, str]] = {}
+    for row in attach_rows:
+        if not row.get("target") or not row.get("protected", row.get("already")):
+            continue
+        framework = str(row.get("kind") or "").lower()
+        workspace = _workspace_key(row.get("target"))
+        if not framework or not workspace:
+            continue
+        key = (framework, workspace)
+        states.setdefault(key, {"is_active": False, "findings": 0})
+        canonical.setdefault(framework, key)
+
+    legacy_active: Set[str] = set()
+    legacy_findings: Dict[str, int] = {}
+
+    def _identity(row: Dict[str, Any]) -> Tuple[str, str]:
+        detail = row.get("detail") if isinstance(row.get("detail"), dict) else {}
+        finding = row.get("finding") if isinstance(row.get("finding"), dict) else {}
+        framework = str(
+            row.get("framework") or finding.get("framework") or "hermes"
+        ).lower()
+        workspace = _workspace_key(
+            row.get("workspace") or finding.get("workspace") or detail.get("workspace")
+        )
+        return framework, workspace
+
+    for row in audit_rows:
+        framework, workspace = _identity(row)
+        key = (framework, workspace)
+        if workspace and key in states:
+            states[key]["is_active"] = True
+        elif not workspace and framework in canonical:
+            legacy_active.add(framework)
+
+    for row in finding_rows:
+        framework, workspace = _identity(row)
+        key = (framework, workspace)
+        if workspace and key in states:
+            states[key]["is_active"] = True
+            states[key]["findings"] += 1
+        elif not workspace and framework in canonical:
+            legacy_active.add(framework)
+            legacy_findings[framework] = legacy_findings.get(framework, 0) + 1
+
+    for framework, key in canonical.items():
+        if framework in legacy_active:
+            states[key]["is_active"] = True
+        states[key]["findings"] += legacy_findings.get(framework, 0)
+    return states
+
+
+def create_app(*, manage_guardian: bool = False):
     """Build and return the FastAPI application."""
     from fastapi import Body, FastAPI, Query
     from fastapi.responses import FileResponse, JSONResponse, HTMLResponse
@@ -536,6 +650,124 @@ def create_app():
         "last_reconcile": 0.0,
         "lock": threading.Lock(),
     }
+    _guardian_stop = threading.Event()
+    _guardian_state: Dict[str, Any] = {
+        "process": None,
+        "thread": None,
+        "ready": False,
+        "error": "",
+        "lock": threading.Lock(),
+    }
+
+    def _guardian_profile_dir() -> Path:
+        from hermes_cli.profiles import get_profile_dir
+
+        return get_profile_dir(_GUARDIAN_PROFILE)
+
+    def _set_guardian_state(**updates: Any) -> None:
+        with _guardian_state["lock"]:
+            _guardian_state.update(updates)
+
+    def _guardian_snapshot() -> Dict[str, Any]:
+        with _guardian_state["lock"]:
+            process = _guardian_state.get("process")
+            return {
+                "managed": bool(manage_guardian),
+                "ready": bool(_guardian_state.get("ready")),
+                "error": str(_guardian_state.get("error") or ""),
+                "pid": process.pid if process is not None and process.poll() is None else None,
+                "profile": _GUARDIAN_PROFILE,
+                "host": _GUARDIAN_RUNTIME_HOST,
+                "port": _GUARDIAN_RUNTIME_PORT,
+            }
+
+    def _guardian_runtime_loop() -> None:
+        """Keep one dashboard-owned Guardian backend alive, fail-open.
+
+        This supervisor only terminates the exact ``Popen`` child it created.
+        An occupied port is treated as a conflict; it never searches for or
+        stops an unrelated process.
+        """
+        profile_dir = _guardian_profile_dir()
+        if not profile_dir.is_dir():
+            _set_guardian_state(error="Guardian profile is not installed")
+            logger.warning("blackbox guardian runtime: profile not found at %s", profile_dir)
+            return
+        log_dir = profile_dir / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_path = log_dir / "blackbox-dashboard-runtime.log"
+
+        while not _guardian_stop.is_set():
+            if _port_is_listening(_GUARDIAN_RUNTIME_HOST, _GUARDIAN_RUNTIME_PORT):
+                _set_guardian_state(
+                    ready=False,
+                    error=f"Port {_GUARDIAN_RUNTIME_PORT} is already in use",
+                )
+                logger.warning(
+                    "blackbox guardian runtime: port %d is occupied; leaving its process untouched",
+                    _GUARDIAN_RUNTIME_PORT,
+                )
+                _guardian_stop.wait(_GUARDIAN_RESTART_DELAY_SEC)
+                continue
+
+            process = None
+            try:
+                with log_path.open("a", encoding="utf-8") as log_handle:
+                    process = subprocess.Popen(
+                        _guardian_runtime_argv(),
+                        cwd=str(attach._repo_root()),
+                        env=_guardian_runtime_env(),
+                        stdin=subprocess.DEVNULL,
+                        stdout=log_handle,
+                        stderr=subprocess.STDOUT,
+                    )
+                    _set_guardian_state(process=process, ready=False, error="")
+                    logger.info(
+                        "blackbox guardian runtime: started pid %d on %s:%d",
+                        process.pid,
+                        _GUARDIAN_RUNTIME_HOST,
+                        _GUARDIAN_RUNTIME_PORT,
+                    )
+
+                    deadline = time.monotonic() + 30.0
+                    while (
+                        not _guardian_stop.is_set()
+                        and process.poll() is None
+                        and time.monotonic() < deadline
+                    ):
+                        if _port_is_listening(_GUARDIAN_RUNTIME_HOST, _GUARDIAN_RUNTIME_PORT):
+                            _set_guardian_state(ready=True, error="")
+                            break
+                        _guardian_stop.wait(0.2)
+                    else:
+                        if process.poll() is None and not _guardian_stop.is_set():
+                            _set_guardian_state(error="Guardian runtime did not become ready")
+
+                    while not _guardian_stop.is_set() and process.poll() is None:
+                        _guardian_stop.wait(0.5)
+            except Exception as exc:  # pragma: no cover - fail open
+                _set_guardian_state(ready=False, error=str(exc))
+                logger.warning("blackbox guardian runtime: failed to start: %s", exc)
+            finally:
+                if process is not None and process.poll() is None and _guardian_stop.is_set():
+                    # Only the child created above is in scope for shutdown.
+                    process.terminate()
+                    try:
+                        process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.wait(timeout=2)
+                exit_code = process.poll() if process is not None else None
+                _set_guardian_state(process=None, ready=False)
+                if process is not None and not _guardian_stop.is_set():
+                    _set_guardian_state(error=f"Guardian runtime exited with code {exit_code}")
+                    logger.warning(
+                        "blackbox guardian runtime: pid %d exited with code %s; restarting",
+                        process.pid,
+                        exit_code,
+                    )
+            if not _guardian_stop.is_set():
+                _guardian_stop.wait(_GUARDIAN_RESTART_DELAY_SEC)
 
     def _rescan_once(*, force: bool = False) -> List[Dict[str, Any]]:
         """Discover local Hermes/OpenClaw workspaces and hook Blackbox into them.
@@ -650,10 +882,28 @@ def create_app():
         logger.info("blackbox rescan: background thread started (interval %.1fs)", _RESCAN_INTERVAL_SEC)
         threading.Thread(target=_ruleset_sync_loop, name="blackbox-ruleset-sync", daemon=True).start()
         logger.info("blackbox ruleset sync: background thread started")
+        if manage_guardian:
+            guardian_thread = threading.Thread(
+                target=_guardian_runtime_loop,
+                name="blackbox-guardian-runtime",
+                daemon=True,
+            )
+            _set_guardian_state(thread=guardian_thread)
+            guardian_thread.start()
+            logger.info("blackbox guardian runtime: supervisor started")
 
     @app.on_event("shutdown")
     def _stop_rescanner() -> None:
         _rescan_state["stop"] = True
+        _guardian_stop.set()
+        with _guardian_state["lock"]:
+            guardian_process = _guardian_state.get("process")
+            guardian_thread = _guardian_state.get("thread")
+        if guardian_process is not None and guardian_process.poll() is None:
+            # Wake the supervisor immediately; it still owns final reap/kill.
+            guardian_process.terminate()
+        if guardian_thread is not None:
+            guardian_thread.join(timeout=6)
 
     _PREFIX = "PREFIX g: <http://umanitek.ai/ontology/guardian/> "
 
@@ -1106,20 +1356,34 @@ def create_app():
             if row.get("target") and row.get("protected", row.get("already"))
         }
 
-        # Local active agents: one per framework that has emitted a local
-        # Blackbox audit/finding event. Attachment alone is not a live signal.
+        # Read local evidence once, then split it by framework + workspace.
+        # Legacy rows without a workspace are attributed once to the default
+        # protected profile by _profile_activity_state.
         try:
             local_fw = audit.local_active_frameworks()
         except Exception:  # pragma: no cover - fail open
             local_fw = []
-        # Per-framework local finding counts.
+        try:
+            audit_rows = audit.read_audit(limit=1_000_000)
+        except Exception:  # pragma: no cover - fail open
+            audit_rows = []
         counts_by_fw: "Dict[str, int]" = {}
         try:
-            for row in audit.read_findings(limit=100000):
+            finding_rows = audit.read_findings(limit=1_000_000)
+            for row in finding_rows:
                 fw = (row.get("framework") or "hermes").lower()
                 counts_by_fw[fw] = counts_by_fw.get(fw, 0) + 1
         except Exception:  # pragma: no cover - fail open
-            pass
+            finding_rows = []
+        profile_state = _profile_activity_state(attach_rows, audit_rows, finding_rows)
+        guardian_runtime = _guardian_snapshot()
+        guardian_workspace = _workspace_key(_guardian_profile_dir())
+        if guardian_runtime["ready"]:
+            guardian_key = ("hermes", guardian_workspace)
+            if guardian_key in profile_state:
+                # The supervised backend is direct liveness evidence for this
+                # exact profile even before its next audited chat turn.
+                profile_state[guardian_key]["is_active"] = True
         for fw in local_fw:
             if fw in known_local_fw and fw not in protected_local_fw:
                 continue
@@ -1198,28 +1462,45 @@ def create_app():
                     found.pop(k, None)
             for fw, ws in attached:
                 ws_name = Path(ws).name or ws
+                state = profile_state.get(
+                    (fw, _workspace_key(ws)), {"is_active": False, "findings": 0}
+                )
                 key = (fw, ws.lower())
                 if key in found:
                     found[key]["workspace"] = ws
                     found[key]["workspace_label"] = ws_name
-                    found[key]["is_active"] = fw in local_fw
+                    found[key]["is_active"] = bool(state["is_active"])
+                    found[key]["findings"] = int(state["findings"])
                     continue
                 found[key] = {
                     "framework": fw,
                     "address": local_addr or fw,
                     "reports": 0,
-                    "findings": counts_by_fw.get(fw, 0),
+                    "findings": int(state["findings"]),
                     "is_local": True,
                     # Protection/attachment is persistent configuration; only
-                    # a real local audit event marks an agent currently active.
-                    "is_active": fw in local_fw,
+                    # activity from this exact workspace marks it active.
+                    "is_active": bool(state["is_active"]),
                     "workspace": ws,
                     "workspace_label": ws_name,
+                    "dashboard_managed": fw == "hermes" and _workspace_key(ws) == guardian_workspace,
                 }
         except Exception as exc:  # pragma: no cover - fail open
             logger.debug("blackbox dashboard: attached-workspace enumeration failed: %s", exc)
 
-        return {"agents": list(found.values())}
+        agents_out = list(found.values())
+        connected_count = sum(1 for row in agents_out if row.get("is_active"))
+        protected_profile_count = sum(
+            1
+            for row in agents_out
+            if row.get("is_local") and row.get("workspace") and not row.get("is_active")
+        )
+        return {
+            "agents": agents_out,
+            "connected_count": connected_count,
+            "protected_profile_count": protected_profile_count,
+            "guardian_runtime": guardian_runtime,
+        }
 
     @app.get("/api/attach-targets")
     def attach_targets() -> Any:
@@ -1643,4 +1924,9 @@ def start_dashboard(port: int = 9700) -> None:
     """Run the dashboard with uvicorn on ``127.0.0.1:{port}`` (blocking)."""
     import uvicorn
 
-    uvicorn.run(create_app(), host="127.0.0.1", port=int(port), log_level="warning")
+    uvicorn.run(
+        create_app(manage_guardian=True),
+        host="127.0.0.1",
+        port=int(port),
+        log_level="warning",
+    )

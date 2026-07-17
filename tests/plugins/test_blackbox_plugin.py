@@ -724,7 +724,7 @@ def test_blackbox_chat_wraps_bare_prompt(monkeypatch):
     assert cli_mod._blackbox_chat_argv(["who", "are", "you?"]) == [
         "hermes",
         "--profile",
-        "blackbox",
+        "guardian",
         "chat",
         "--query",
         "who are you?",
@@ -732,14 +732,14 @@ def test_blackbox_chat_wraps_bare_prompt(monkeypatch):
     assert cli_mod._blackbox_chat_argv(["--tui"]) == [
         "hermes",
         "--profile",
-        "blackbox",
+        "guardian",
         "chat",
         "--tui",
     ]
 
 
 def test_blackbox_chat_profile_writes_identity_and_attaches(tmp_path, monkeypatch):
-    profile_dir = tmp_path / "blackbox"
+    profile_dir = tmp_path / "guardian"
     calls = []
 
     monkeypatch.setattr(cli_mod.attach, "attach_hermes", lambda path: calls.append(path))
@@ -756,7 +756,7 @@ def test_blackbox_chat_profile_writes_identity_and_attaches(tmp_path, monkeypatc
     monkeypatch.setattr(profiles, "create_profile", fake_create_profile)
     monkeypatch.setattr(profiles, "get_profile_dir", lambda name: profile_dir)
 
-    assert cli_mod._ensure_blackbox_chat_profile() == "blackbox"
+    assert cli_mod._ensure_blackbox_chat_profile() == "guardian"
     soul = (profile_dir / "SOUL.md").read_text(encoding="utf-8")
     assert "You are Blackbox" in soul
     assert "connected agents" in soul

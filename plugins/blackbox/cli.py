@@ -21,8 +21,9 @@ from .dkg_client import DkgClient, DkgError
 
 logger = logging.getLogger(__name__)
 
-_BLACKBOX_CHAT_PROFILE = "blackbox"
+_BLACKBOX_CHAT_PROFILE = "guardian"
 _BLACKBOX_SOUL_MARKER = "<!-- managed-by: hermes-blackbox-chat -->"
+_LEGACY_GUARDIAN_SOUL_MARKER = "<!-- managed-by: hermes-guardian-chat -->"
 _BLACKBOX_SOURCE_ROOT_MARKER = ".blackbox-source-root"
 _BLACKBOX_CONTEXT_FILE_MAX_CHARS = 100_000
 _PRIVATE_AUTO_JOIN_GRAPH_IDS = {constants.DEFAULT_CONTEXT_GRAPH_ID}
@@ -341,7 +342,7 @@ def _write_blackbox_soul(profile_dir: Path) -> None:
             existing = soul_path.read_text(encoding="utf-8")
         except OSError:
             existing = ""
-    if existing == _BLACKBOX_SOUL:
+    if existing == _BLACKBOX_SOUL or _LEGACY_GUARDIAN_SOUL_MARKER in existing:
         return
     if existing and _BLACKBOX_SOUL_MARKER not in existing:
         backup = profile_dir / "SOUL.md.before-blackbox-chat"
