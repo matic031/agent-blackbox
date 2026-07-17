@@ -64,6 +64,7 @@ try {
   const batches = [];
   let batchRecords = [];
   let duplicateRecords = 0;
+  let sourceRecordsVisited = 0;
 
   const flush = () => {
     if (batchRecords.length === 0) return false;
@@ -79,6 +80,7 @@ try {
   };
 
   for (const record of records) {
+    sourceRecordsVisited += 1;
     const key = recordKey(record);
     if (typeof key !== 'string' || key.length === 0) throw new Error('mapping.recordKey() returned an empty/non-string key');
     if (seen.has(key)) {
@@ -92,7 +94,7 @@ try {
   if (!(maxBatches > 0 && batches.length >= maxBatches)) flush();
 
   const includedRecords = batches.reduce((sum, batch) => sum + batch.records, 0);
-  const complete = maxBatches === 0 || includedRecords === seen.size;
+  const complete = sourceRecordsVisited === records.length;
   if (expectedRecords !== undefined && includedRecords !== expectedRecords) {
     throw new Error(`record-count contract failed: expected ${expectedRecords.toLocaleString()}, prepared ${includedRecords.toLocaleString()}`);
   }
@@ -112,6 +114,7 @@ try {
     maxBatches,
     complete,
     uniqueRecords: seen.size,
+    sourceRecordsVisited,
     includedRecords,
     duplicateRecords,
     batchCount: batches.length,
