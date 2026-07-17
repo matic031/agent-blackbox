@@ -8,7 +8,6 @@ import { useThemeEpoch } from '@/hooks/use-theme-epoch'
 import { useI18n } from '@/i18n'
 import { Eye, SlidersHorizontal, ZoomIn } from '@/lib/icons'
 import { createDoubleTapDetector, isSmartZoomWheel } from '@/lib/trackpad-gestures'
-import { loadStarmapGraph } from '@/store/starmap'
 import type { StarmapGraph } from '@/types/hermes'
 
 import { computePalette, memoryInkFor, resolveRgb, rgba } from './color'
@@ -960,12 +959,11 @@ export function StarMap({
       />
 
       <NodeContextMenu
-        onChanged={() => {
+        onClose={() => setMenuTarget(null)}
+        onNodeRemoved={() => {
           setMenuTarget(null)
           setSelectedId(null)
-          void loadStarmapGraph(true)
         }}
-        onClose={() => setMenuTarget(null)}
         target={menuTarget}
       />
 

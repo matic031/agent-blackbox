@@ -8,6 +8,7 @@ __pycache__/
 .venv
 .vscode/
 .env
+.op.env
 .env.local
 .env.development.local
 .env.test.local
@@ -68,7 +69,7 @@ hermes_cli/web_dist/
 apps/desktop/build/
 apps/desktop/dist/
 apps/desktop/release/
-apps/desktop/*.tsbuildinfo
+*.tsbuildinfo
 
 # Web UI assets — synced from @nous-research/ui at build time via
 # `npm run sync-assets` (see web/package.json).
@@ -118,6 +119,9 @@ docs/superpowers/*
 # treat it as a local edit and autostash it on every run (#38529).
 .hermes-bootstrap-complete
 
+# Persistent dev sandbox dir (scripts/dev-sandbox.sh --persistent)
+.hermes-sandbox/
+
 # Interrupted-update breadcrumb + recovery lock written next to the shared venv
 # by `hermes update` / launch-time self-heal. Runtime state, never a code change
 # — ignore so `git status` stays clean and update's autostash skips them.
@@ -144,9 +148,6 @@ apps/desktop/demo/
 # pr-infographic-workflow reference (storage rule + lapse #8 / #COMMIT-1).
 infographic/
 
-# Local internal notes (not for the repo)
-document.md
-
 # Blackbox / DKG credentials — never commit (public repo)
 auth.token
 wallets.json
@@ -157,34 +158,5 @@ dkg.json
 .dkg/
 # Installer-managed OriginTrail DKG npm package.
 /dkg/
-# Preserved custom checkout created during the one-time npm migration.
+# Backup directory for installer migrations from custom DKG checkouts.
 /dkg.custom-backup-*/
-# Internal ops notes / support reports (may name infra: wallet, RPC provider, peer ids)
-ORIGINTRAIL_DKG_ISSUE_REPORT.md
-*_DKG_ISSUE_REPORT.md
-ORIGINTRAIL_ISSUE_REPORT_*.md
-FABLE_SEEDING_HANDOFF.md
-SOURCE_MENU.md
-STATUS.md
-agent-blackbox-community-outreach.md
-start-stack.sh
-
-# Blackbox threat-intel scratch/experimental seed pipeline files. These are
-# local working artifacts unless intentionally force-added for a seed-pipeline PR.
-scripts/build_blackbox_seed_bundle.py
-scripts/fetch_ioc_feeds.py
-scripts/fetch_safedep_ti.py
-scripts/fetch_scamsniffer_blacklist.py
-scripts/fetch_socket_threat_feed.py
-scripts/fetch_whitelist.py
-tests/plugins/test_blackbox_ioc.py
-tests/scripts/test_build_blackbox_seed_bundle.py
-tests/scripts/test_threat_source_fetchers.py
-
-testing.md
-
-# Accidental literal-tilde dir (unexpanded HERMES_HOME=~/... from a subprocess)
-/~/
-/.claude
-
-catalogs/

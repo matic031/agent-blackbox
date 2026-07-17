@@ -753,7 +753,7 @@ def _is_blackbox_openclaw_load_path(value: Any) -> bool:
     if normalized.endswith("/integrations/openclaw"):
         return any(
             marker in normalized
-            for marker in ("/agent-blackbox/", "/agent-guardian/", "/blackbox-", "/blackbox/")
+            for marker in ("/agent-blackbox/", "/blackbox-", "/blackbox/")
         )
     return False
 
@@ -967,7 +967,7 @@ def detach_openclaw(workspace: Path, *, dry_run: bool = False) -> Dict[str, Any]
 
 
 def load_blackbox_config_snapshot() -> Dict[str, Any]:
-    """Resolve the Blackbox config values to seed into an OpenClaw workspace.
+    """Resolve the Blackbox config values to write into an OpenClaw workspace.
 
     Uses :func:`config.load_blackbox_config` when available (honours env +
     config.yaml), else falls back to constants. Kept tiny so ``attach`` stays

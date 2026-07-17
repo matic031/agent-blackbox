@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "description": "Agent Blackbox plugin for OpenClaw — mirrors hermes blackbox detection and reports sightings to the local DKG threat graph.",
   "type": "module",
-  "license": "Apache-2.0",
+  "license": "MIT",
   "files": [
     "src",
     "openclaw.plugin.json",

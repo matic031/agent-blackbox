@@ -31,14 +31,20 @@ import {
   Finding,
   Ruleset,
   collectText,
+  commandFromArgs,
   detectAll,
   detectCustomFileAccess,
   detectInjection,
   discoverInjection,
   discoverDependencyCandidates,
+  fileAccessArg,
+  isShellTool,
+  parseDependencyInstalls,
+  parseDownloads,
+  parseShellReads,
 } from "./detection.js";
 import { DkgClient, DkgError } from "./dkgClient.js";
-import { recordFinding, type ConvTurn, type FindingContext } from "./audit.js";
+import { recordEvent, recordFinding, type ConvTurn, type FindingContext } from "./audit.js";
 import { BlackboxConfig, categoryAllows, resolveConfig } from "./config.js";
 import { RulesetCache } from "./ruleset.js";
 import { BlackboxSeverity, KIND_VULNERABILITY, SEVERITY_RANK, buildReportQuads, stableHash } from "./quads.js";
@@ -87,6 +93,26 @@ const MAX_TRACKED_SESSIONS = 256;
 function sessionIdOf(event: unknown): string {
   const sid = (event as { sessionId?: unknown } | null | undefined)?.sessionId;
   return typeof sid === "string" ? sid : "";
+}
+
+interface AuditHookContext {
+  sessionId?: string;
+  sessionKey?: string;
+  runId?: string;
+  modelProviderId?: string;
+  modelId?: string;
+  channelId?: string;
+}
+
+function sessionRefOf(event: unknown, ctx: AuditHookContext = {}): string {
+  const eventSessionKey = (event as { sessionKey?: unknown } | null | undefined)?.sessionKey;
+  return (
+    sessionIdOf(event) ||
+    ctx.sessionId ||
+    (typeof eventSessionKey === "string" ? eventSessionKey : "") ||
+    ctx.sessionKey ||
+    ""
+  );
 }
 
 /** Flatten a message's `content` (string or a list of text parts) to text. */
@@ -205,6 +231,49 @@ function scanInjection(rt: BlackboxRuntime, text: string): Finding[] {
 }
 
 /**
+ * Log routine file/download/package activity independently of whether it is a
+ * threat. This mirrors Hermes `_record_activity` and stays fail-open.
+ */
+function recordToolActivity(
+  rt: BlackboxRuntime,
+  event: PluginHookBeforeToolCallEvent,
+  ctx: AuditHookContext,
+  params: Record<string, unknown>,
+): void {
+  try {
+    const base = {
+      session_id: sessionRefOf(event, ctx),
+      run_id: event.runId ?? ctx.runId,
+      tool_call_id: event.toolCallId,
+    };
+    const access = fileAccessArg(event.toolName, params);
+    if (access) {
+      recordEvent(rt.cfg.blackboxHome, "file_access", {
+        ...base,
+        tool: access.tool,
+        path: access.path,
+        mode: access.mode,
+      });
+      return;
+    }
+    if (!isShellTool(event.toolName)) return;
+    const command = commandFromArgs(event.toolName, params);
+    if (!command) return;
+    for (const path of parseShellReads(command)) {
+      recordEvent(rt.cfg.blackboxHome, "file_access", { ...base, tool: "shell", path, mode: "read" });
+    }
+    for (const url of parseDownloads(command)) {
+      recordEvent(rt.cfg.blackboxHome, "file_access", { ...base, tool: "shell", path: url, mode: "download" });
+    }
+    for (const dep of parseDependencyInstalls(command)) {
+      recordEvent(rt.cfg.blackboxHome, "dependency_install", { ...base, ...dep, tool: "shell" });
+    }
+  } catch {
+    /* fail-open — visibility logging must never break the tool call */
+  }
+}
+
+/**
  * Resolve + cache the reporter agent address via `GET /api/agent/identity`;
  * fails open to "node". NOT derived from the auth token — the node's true agent
  * address namespaces the per-submitter report URI.
@@ -256,7 +325,7 @@ async function reportSighting(rt: BlackboxRuntime, finding: Finding): Promise<vo
   pruneRecentReports(rt, now);
   try {
     const reporter = await resolveReporter(rt);
-    // Forward candidate threat fields so a curator can promote directly. `fields`
+    // Forward privacy-safe candidate fields for independent review. `fields`
     // only ever holds signatures (pattern/category/shape/...), never raw prompts,
     // paths, or file/skill source. Mirrors Python `_share_sighting`.
     const quads = buildReportQuads({
@@ -333,10 +402,19 @@ function observe(
 function makeBeforeToolCall(rt: BlackboxRuntime) {
   return async (
     event: PluginHookBeforeToolCallEvent,
+    hookCtx: AuditHookContext = {},
   ): Promise<PluginHookBeforeToolCallResult | void> => {
     try {
       const ruleset: Ruleset = rt.ruleset.get();
       const params = (event.params ?? {}) as Record<string, unknown>;
+      recordEvent(rt.cfg.blackboxHome, "pre_tool_call", {
+        session_id: sessionRefOf(event, hookCtx),
+        run_id: event.runId ?? hookCtx.runId,
+        tool_call_id: event.toolCallId,
+        tool_name: event.toolName,
+        args: params,
+      });
+      recordToolActivity(rt, event, hookCtx, params);
       // detectAll (+ discovery layer when enabled) + custom protected-path rules,
       // then flagWorthy applies policy. Mirrors Python detect_all +
       // detect_custom_fileaccess + _flag_worthy.
@@ -385,9 +463,18 @@ function makeBeforeToolCall(rt: BlackboxRuntime) {
 }
 
 function makeAfterToolCall(rt: BlackboxRuntime) {
-  return async (event: PluginHookAfterToolCallEvent): Promise<void> => {
+  return async (event: PluginHookAfterToolCallEvent, ctx: AuditHookContext = {}): Promise<void> => {
     try {
-      // Observation only — record a redacted result summary for local audit.
+      recordEvent(rt.cfg.blackboxHome, "post_tool_call", {
+        session_id: sessionRefOf(event, ctx),
+        run_id: event.runId ?? ctx.runId,
+        tool_call_id: event.toolCallId,
+        tool_name: event.toolName,
+        args: event.params,
+        result: event.result,
+        error: event.error,
+        duration_ms: event.durationMs,
+      });
       if (event.error) {
         rt.log("debug", `blackbox: tool ${event.toolName} errored`, { error: sanitizeText(event.error, 300) });
       }
@@ -400,8 +487,16 @@ function makeAfterToolCall(rt: BlackboxRuntime) {
 function makeBeforeAgentRun(rt: BlackboxRuntime) {
   return async (
     event: PluginHookBeforeAgentRunEvent,
+    ctx: AuditHookContext = {},
   ): Promise<PluginHookBeforeAgentRunResult> => {
     try {
+      recordEvent(rt.cfg.blackboxHome, "pre_api_request", {
+        session_id: sessionRefOf(event, ctx),
+        run_id: ctx.runId,
+        provider: ctx.modelProviderId,
+        model: ctx.modelId,
+        channel: event.channelId ?? ctx.channelId,
+      });
       const text = [event.prompt ?? "", ...collectText(event.messages)].join("\n");
       const findings = scanInjection(rt, text);
 
@@ -432,11 +527,18 @@ function makeBeforeAgentRun(rt: BlackboxRuntime) {
 }
 
 function makeMessageReceived(rt: BlackboxRuntime) {
-  return async (event: PluginHookMessageReceivedEvent): Promise<void> => {
+  return async (event: PluginHookMessageReceivedEvent, ctx: AuditHookContext = {}): Promise<void> => {
     try {
       const text = event.content ?? "";
       // Record the inbound message as a user turn so a later finding can show it.
-      const sid = sessionIdOf(event);
+      const sid = sessionRefOf(event, ctx);
+      recordEvent(rt.cfg.blackboxHome, "message_received", {
+        session_id: sid,
+        run_id: event.runId ?? ctx.runId,
+        message_id: event.messageId,
+        channel: ctx.channelId,
+        content_length: text.length,
+      });
       if (text) appendTranscript(rt, sid, { role: "user", text });
       const found = scanInjection(rt, text);
       if (!found.length) return;
@@ -454,8 +556,13 @@ function makeMessageReceived(rt: BlackboxRuntime) {
 }
 
 function makeSessionStart(rt: BlackboxRuntime) {
-  return async (event: PluginHookSessionStartEvent): Promise<void> => {
+  return async (event: PluginHookSessionStartEvent, ctx: AuditHookContext = {}): Promise<void> => {
     rt.log("debug", `blackbox: session_start ${event.sessionId}`);
+    recordEvent(rt.cfg.blackboxHome, "session_start", {
+      session_id: event.sessionId,
+      session_key: event.sessionKey ?? ctx.sessionKey,
+      resumed_from: event.resumedFrom,
+    });
     // Warm the ruleset so the first tool call has fresh rules.
     try {
       await rt.ruleset.sync();
@@ -466,8 +573,17 @@ function makeSessionStart(rt: BlackboxRuntime) {
 }
 
 function makeSessionEnd(rt: BlackboxRuntime) {
-  return async (event: PluginHookSessionEndEvent): Promise<void> => {
+  return async (event: PluginHookSessionEndEvent, ctx: AuditHookContext = {}): Promise<void> => {
     rt.log("debug", `blackbox: session_end ${event.sessionId} (${event.reason ?? "unknown"})`);
+    recordEvent(rt.cfg.blackboxHome, "session_end", {
+      session_id: event.sessionId,
+      session_key: event.sessionKey ?? ctx.sessionKey,
+      message_count: event.messageCount,
+      duration_ms: event.durationMs,
+      reason: event.reason ?? "unknown",
+      next_session_id: event.nextSessionId,
+    });
+    rt.transcript.delete(event.sessionId);
   };
 }
 

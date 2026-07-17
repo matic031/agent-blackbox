@@ -109,78 +109,6 @@ def test_parse_dependency_installs_ignores_non_install():
     assert quads.parse_dependency_installs("echo hello world") == []
 
 
-def test_build_threat_quads_dependency_shape():
-    q = quads.build_threat_quads(
-        category="dependency",
-        identifier="dep:npm:event-stream@3.3.6",
-        severity="critical",
-        name="event-stream malware",
-        description="backdoored release",
-        ecosystem="npm",
-        package_name="event-stream",
-        package_version="3.3.6",
-        advisory_id="GHSA-xxx",
-    )
-    subj = quads.threat_uri("dep:npm:event-stream@3.3.6")
-    preds = {t["predicate"] for t in q}
-    assert all(t["subject"] == subj for t in q)
-    assert constants.PACKAGE_NAME_PRED in preds
-    assert constants.DEP_THREAT_TYPE_IRI in {t["object"] for t in q}
-    assert any(t["object"] == '"true"' and t["predicate"] == constants.CURATED_PRED for t in q)
-
-
-def test_legacy_minimal_builder_cannot_drop_full_vm_fields():
-    q = quads.build_minimal_threat_quads(
-        category="dependency",
-        identifier="dep:npm:legacy@1.0.0",
-        severity="critical",
-        name="legacy malware",
-        description="complete public context",
-        ecosystem="npm",
-        package_name="legacy",
-        package_version="1.0.0",
-        fixed_version="1.0.1",
-    )
-    preds = {item["predicate"] for item in q}
-    assert constants.SCHEMA_NAME_PRED in preds
-    assert constants.SCHEMA_DESCRIPTION_PRED in preds
-    assert constants.FIXED_VERSION_PRED in preds
-
-
-def test_build_threat_quads_emits_provenance_for_any_category():
-    # source (named feed), reference (URL) and contributor now emit for every
-    # category — injection references used to be dropped.
-    q = quads.build_threat_quads(
-        category="injection",
-        identifier="injection:abc",
-        severity="high",
-        name="override",
-        description="",
-        pattern="ignore previous",
-        sources=["OWASP LLM Top 10", "JailbreakHub"],
-        references=["https://owasp.org/x"],
-        contributor="Umanitek",
-    )
-    sources = [t["object"] for t in q if t["predicate"] == constants.SOURCE_PRED]
-    refs = [t["object"] for t in q if t["predicate"] == constants.REFERENCE_PRED]
-    contrib = [t["object"] for t in q if t["predicate"] == constants.SCHEMA_CONTRIBUTOR_PRED]
-    assert sources == ['"OWASP LLM Top 10"', '"JailbreakHub"']
-    assert refs == ['"https://owasp.org/x"']
-    assert contrib == ['"Umanitek"']
-
-
-def test_build_threat_quads_provenance_is_optional():
-    # Omitting provenance emits none of the provenance predicates.
-    q = quads.build_threat_quads(
-        category="skill", identifier="skill:x@1", severity="critical",
-        name="x", description="", skill_name="x", skill_version="1",
-    )
-    preds = {t["predicate"] for t in q}
-    assert constants.SOURCE_PRED not in preds
-    assert constants.SCHEMA_CONTRIBUTOR_PRED not in preds
-    assert constants.REFERENCE_PRED not in preds
-
-
 def test_build_report_quads_no_command_text_and_links_threat():
     q = quads.build_report_quads(
         identifier="injection:abc",
@@ -196,19 +124,9 @@ def test_build_report_quads_no_command_text_and_links_threat():
     assert any(t["predicate"] == constants.REPORTER_PRED and t["object"] == '"0xabc"' for t in q)
 
 
-def test_threat_and_report_literal_fields_respect_graph_limit():
+def test_report_literal_fields_respect_graph_limit():
     oversized = "x" * (quads._MAX_LITERAL_BYTES + 1234)
-    rows = quads.build_threat_quads(
-        category="injection",
-        identifier="injection:large",
-        severity="high",
-        name=oversized,
-        description=oversized,
-        pattern=oversized,
-        sources=[oversized],
-        references=[oversized],
-        contributor=oversized,
-    ) + quads.build_report_quads(
+    rows = quads.build_report_quads(
         identifier="injection:large",
         category="injection",
         severity="high",

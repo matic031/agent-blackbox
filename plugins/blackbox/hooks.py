@@ -44,8 +44,7 @@ def blackbox_block_message(findings: List[detection.Finding]) -> str:
     lines.append("")
     lines.append(
         "Treat the source content as untrusted. If this is a false positive, "
-        "flag it with `hermes blackbox curate reject <identifier>` or switch "
-        "Blackbox to audit mode (BLACKBOX_MODE=audit)."
+        "switch Blackbox to audit mode and report the identifier to Umanitek."
     )
     return "\n".join(lines)
 
@@ -106,9 +105,7 @@ def _report_and_audit(cfg: BlackboxConfig, event: str, findings: List[detection.
 def _share_sighting(client: DkgClient, cfg: BlackboxConfig, finding: Dict[str, Any]) -> None:
     try:
         reporter = _reporter_address(client)
-        # Forward candidate threat fields so the curator can promote directly.
-        # ``fields`` only ever holds signatures (pattern/category/shape/...),
-        # never raw prompts, paths, or file/skill source.
+        # Reports contain signatures, never raw prompts, paths, or source files.
         fields = finding.get("fields") if isinstance(finding.get("fields"), dict) else {}
         q = quads.build_report_quads(
             identifier=str(finding.get("identifier") or ""),

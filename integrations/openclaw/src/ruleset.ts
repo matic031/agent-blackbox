@@ -12,8 +12,7 @@
  *     already cover the identifier: matches flag but NEVER block — anyone can
  *     write to the community pool, so it must not be able to stop tool calls.
  *
- * Each tier pulls EVERY subject that carries `g:identifier` (no type/curated
- * filter — matching Python `_THREATS_SPARQL` semantics), normalized into a
+ * Each tier pulls both legacy Guardian threats and Defender signal entities, normalized into a
  * `Ruleset` and cached to a JSON file (source tags included) under the
  * OpenClaw state dir with a TTL. On an empty graph the ruleset is empty and
  * the matcher detects nothing — by design.
@@ -52,21 +51,31 @@ import {
   BLACKBOX_TOOL_NAME_PRED,
   SCHEMA_DESCRIPTION,
   SCHEMA_NAME,
+  RDF_TYPE,
   normalizeSeverity,
 } from "./quads.js";
 
 const SCHEMA_ADVISORY = "http://schema.org/identifier";
+const DEFENDER = "urn:defender:";
+const DEFENDER_P = "urn:defender:p:";
 
 /**
- * SPARQL that pulls every threat-shaped subject's fields as s/p/o rows. Any
- * subject carrying `g:identifier` qualifies — no `rdf:type`/`g:curated`
- * filter, matching Python `_THREATS_SPARQL` (the trust tier comes from WHICH
- * memory view the query ran against, not from per-row flags).
+ * SPARQL that pulls legacy threats and the current Defender signal ontology.
  */
 function rulesetQuery(): string {
   return `
 SELECT ?s ?p ?o WHERE {
-  ?s <${BLACKBOX_IDENTIFIER_PRED}> ?identifier .
+  {
+    ?s <${BLACKBOX_IDENTIFIER_PRED}> ?identifier .
+  }
+  UNION
+  {
+    ?s a ?signalType .
+    VALUES ?signalType {
+      <${DEFENDER}DependencySignal> <${DEFENDER}InjectionSignal>
+      <${DEFENDER}SkillSignal> <${DEFENDER}IocSignal>
+    }
+  }
   ?s ?p ?o .
 }`.trim();
 }
@@ -110,6 +119,8 @@ function bindingValue(v: unknown): string | undefined {
 }
 
 interface ThreatAccum {
+  subject?: string;
+  rdfType?: string;
   identifier?: string;
   severity?: string;
   name?: string;
@@ -140,21 +151,31 @@ function collectThreats(resp: unknown): ThreatAccum[] {
     const o = bindingValue(b.o);
     if (!s || !p || o === undefined) continue;
     const acc = bySubject.get(s) ?? {};
+    acc.subject = s;
     switch (p) {
+      case RDF_TYPE: acc.rdfType = o; break;
       case BLACKBOX_IDENTIFIER_PRED: acc.identifier = o; break;
-      case BLACKBOX_SEVERITY_PRED: acc.severity = o; break;
+      case BLACKBOX_SEVERITY_PRED:
+      case `${DEFENDER_P}severity`: acc.severity = o; break;
       case SCHEMA_NAME: acc.name ??= o; break;
       case SCHEMA_DESCRIPTION: acc.name ??= o; break;
-      case BLACKBOX_PATTERN_PRED: acc.pattern = o; break;
+      case BLACKBOX_PATTERN_PRED:
+      case `${DEFENDER_P}pattern`: acc.pattern = o; break;
       case BLACKBOX_OWASP_CATEGORY_PRED: acc.owaspCategory = o; break;
       case BLACKBOX_TOOL_NAME_PRED: acc.toolName = o; break;
       case BLACKBOX_ARG_SHAPE_PRED: acc.argShape = o; break;
-      case BLACKBOX_PACKAGE_NAME_PRED: acc.packageName = o; break;
-      case BLACKBOX_PACKAGE_VERSION_PRED: acc.packageVersion = o; break;
-      case BLACKBOX_PACKAGE_ECOSYSTEM_PRED: acc.packageEcosystem = o; break;
-      case BLACKBOX_KIND_PRED: acc.kind = o; break;
-      case SCHEMA_ADVISORY: acc.advisoryId = o; break;
-      case BLACKBOX_CATEGORY_PRED: acc.category = o; break;
+      case BLACKBOX_PACKAGE_NAME_PRED:
+      case `${DEFENDER_P}package`: acc.packageName = o; break;
+      case BLACKBOX_PACKAGE_VERSION_PRED:
+      case `${DEFENDER_P}version`: acc.packageVersion = o; break;
+      case BLACKBOX_PACKAGE_ECOSYSTEM_PRED:
+      case `${DEFENDER_P}ecosystem`: acc.packageEcosystem = o; break;
+      case BLACKBOX_KIND_PRED:
+      case `${DEFENDER_P}kind`: acc.kind = o; break;
+      case SCHEMA_ADVISORY:
+      case `${DEFENDER_P}advisoryId`: acc.advisoryId = o; break;
+      case BLACKBOX_CATEGORY_PRED:
+      case `${DEFENDER_P}iocType`: acc.category = o; break;
       case BLACKBOX_SKILL_NAME_PRED: acc.skillName = o; break;
       case BLACKBOX_SKILL_VERSION_PRED: acc.skillVersion = o; break;
       case BLACKBOX_DANGER_SHAPE_PRED: acc.dangerShape = o; break;
@@ -174,8 +195,19 @@ type MappedRule =
 
 /** Map one accumulated threat to `(category, key, rule)` or null. Port of Python `_row_to_rule`. */
 function accumToRule(acc: ThreatAccum, source: RuleSource): MappedRule | null {
-  if (!acc.identifier) return null;
-  const identifier = acc.identifier;
+  let identifier = acc.identifier;
+  const suffix = acc.subject?.split(":").pop() ?? "";
+  if (!identifier && acc.rdfType === `${DEFENDER}DependencySignal`) {
+    const eco = (acc.packageEcosystem || "").toLowerCase();
+    const pkg = (acc.packageName || "").toLowerCase();
+    const ver = acc.packageVersion || "";
+    if (eco && pkg && ver) identifier = `dep:${eco}:${pkg}@${ver}`;
+  } else if (!identifier && acc.rdfType === `${DEFENDER}InjectionSignal` && suffix) {
+    identifier = `injection:${suffix}`;
+  } else if (!identifier && acc.rdfType === `${DEFENDER}SkillSignal` && suffix) {
+    identifier = `skill:${suffix}`;
+  }
+  if (!identifier) return null;
   const severity = normalizeSeverity(acc.severity, "high");
   const name = acc.name || identifier;
   if (identifier.startsWith("injection:")) {
@@ -257,7 +289,7 @@ function accumToRule(acc: ThreatAccum, source: RuleSource): MappedRule | null {
       key: identifier,
       rule: {
         identifier,
-        skillName: acc.skillName ?? "",
+        skillName: acc.skillName ?? name,
         skillVersion: acc.skillVersion ?? "",
         dangerShape: acc.dangerShape ?? "",
         severity,

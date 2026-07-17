@@ -7,12 +7,14 @@
  * Fail-open — a logging error must never break the agent loop.
  */
 import { appendFileSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { homedir } from "node:os";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import type { Finding } from "./detection.js";
-import { sanitizeText } from "./redact.js";
+import { redact, sanitizeText } from "./redact.js";
 
 const FRAMEWORK = "openclaw" as const;
 const LOG_FILE = "findings.openclaw.jsonl";
+const AUDIT_LOG_FILE = "audit.openclaw.jsonl";
 const LOG_MAX_BYTES = 8 * 1024 * 1024; // trim at 8 MB (matches Python)
 const LOG_KEEP_BYTES = 4 * 1024 * 1024; // keep most-recent ~4 MB after trimming
 
@@ -37,6 +39,27 @@ export interface FindingContext {
 const CTX_MAX_TURNS = 16;
 const CTX_TURN_CHARS = 3000;
 const CTX_FIELD_CHARS = 6000;
+
+function expandHome(path: string): string {
+  if (path === "~") return homedir();
+  if (path.startsWith("~/")) return join(homedir(), path.slice(2));
+  return path;
+}
+
+/** Stable OpenClaw profile/state directory matching Python attach discovery. */
+export function currentWorkspace(): string {
+  const configPath = process.env.OPENCLAW_CONFIG_PATH?.trim();
+  if (configPath) {
+    const expanded = expandHome(configPath);
+    const absolute = isAbsolute(expanded) ? expanded : resolve(expanded);
+    return basename(absolute) === "openclaw.json" ? dirname(absolute) : absolute;
+  }
+  const stateDir = process.env.OPENCLAW_STATE_DIR?.trim();
+  if (stateDir) return resolve(expandHome(stateDir));
+  const openclawHome = process.env.OPENCLAW_HOME?.trim();
+  if (openclawHome) return resolve(expandHome(openclawHome), ".openclaw");
+  return join(homedir(), ".openclaw");
+}
 
 /**
  * Normalize, redact + bound a raw conversation context for storage. Every text
@@ -68,6 +91,34 @@ function isoNow(): string {
   return new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
 }
 
+/** Append one routine OpenClaw lifecycle/tool event to the shared audit home. */
+export function recordEvent(
+  home: string,
+  event: string,
+  detail: Record<string, unknown> = {},
+): void {
+  try {
+    if (!home) return;
+    mkdirSync(home, { recursive: true });
+    const path = join(home, AUDIT_LOG_FILE);
+    appendFileSync(
+      path,
+      JSON.stringify({
+        ts: Date.now() / 1000,
+        iso: isoNow(),
+        event,
+        framework: FRAMEWORK,
+        workspace: currentWorkspace(),
+        detail: redact(detail),
+      }) + "\n",
+      "utf8",
+    );
+    trimIfNeeded(path);
+  } catch {
+    /* fail-open — never break the agent loop over an audit write */
+  }
+}
+
 /** Append one finding to `<home>/findings.openclaw.jsonl`. Fail-open. */
 export function recordFinding(
   home: string,
@@ -90,6 +141,7 @@ export function recordFinding(
       iso: isoNow(),
       event,
       framework: FRAMEWORK,
+      workspace: currentWorkspace(),
       detail,
       // Same nested shape Python writes so read_findings lifts these fields.
       finding: {

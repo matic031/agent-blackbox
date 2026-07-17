@@ -5,10 +5,14 @@ reports sightings to the **same** local DKG node / threat graph. Same threat
 identifiers, same arg shapes, same severities — a hermes node and an OpenClaw
 node computing the same threat converge on the same subject URI.
 
-When OpenClaw is attached by `hermes blackbox attach`, it points at the
+When OpenClaw is attached by `blackbox attach`, it points at the
 Blackbox-managed DKG node (`http://127.0.0.1:9320`) and home
 (`~/.hermes/blackbox/dkg`). That keeps it separate from any user-owned DKG node
 on the DKG CLI defaults (`~/.dkg` / `9200`).
+
+The default context graph is private. The shared local node must complete the
+signed join, curator approval, subscription, and catch-up flow before VM/SWM
+rules are available; `blackbox sync --wait` reports that state.
 
 - **Detection rules come only from the threat graph.** The plugin syncs a
   ruleset from your local DKG node in two trust tiers (see below). On an empty
@@ -22,17 +26,17 @@ on the DKG CLI defaults (`~/.dkg` / `9200`).
 
 ## Three-tier trust model
 
-Every sync runs two queries against the node — the curated public graph first,
+Every sync runs two queries against the node — the verified public graph first,
 then the community pool — and every finding carries a `source`:
 
 | Tier | Memory view | `source` | Behavior |
 |------|-------------|----------|----------|
-| **Public** | `verifiable-memory` (curated Umanitek public threat graph) | `public` | The source of truth: a match is `confirmed`, and blockable in block mode. |
+| **Public** | `verifiable-memory` (Umanitek-verified public threat graph) | `public` | The source of truth: a match is `confirmed`, and blockable in block mode. |
 | **Community** | `shared-working-memory` (the pool anyone can write to) | `community` | Checked when the public graph doesn't cover the identifier: a match FLAGS (`confirmed: false`) and is re-reported to strengthen consensus, but **never** blocks. |
 | **Heuristic** | built-in discovery candidates | `heuristic` | Nominations only; flagged/reported only at/above `reportMinSeverity`. Never block. |
 
 Public wins any identifier collision — a community row can never shadow,
-escalate, or downgrade a curated public rule.
+escalate, or downgrade a verified public rule.
 
 ## What it detects
 
@@ -48,7 +52,7 @@ escalate, or downgrade a curated public rule.
 
 | Hook | Behavior |
 |------|----------|
-| `before_tool_call` | detect escalation + dependency + injection over params; **block** (block mode, ≥ `blockSeverity`) or observe + report |
+| `before_tool_call` | record the tool call plus routine file/download/package activity; detect escalation + dependency + injection over params; **block** (block mode, ≥ `blockSeverity`) or observe + report |
 | `after_tool_call` | observe result (redacted); never blocks |
 | `before_agent_run` | prompt-injection scan of the incoming prompt + history — **requires `allowConversationAccess`** |
 | `message_received` | observe inbound content for injection sightings |
@@ -78,7 +82,7 @@ Point OpenClaw at the plugin directory and set its config in
         "hooks": { "allowConversationAccess": true },
         "config": {
           "mode": "audit",
-          "contextGraphId": "umanitek/blackbox-threats-staging",
+          "contextGraphId": "0x37b1Fdfd134e2b17583bCBdD3034F91504cD9C70/agent-blackbox",
           "dkgUrl": "http://127.0.0.1:9320",
           "dkgHome": "~/.hermes/blackbox/dkg",
           "syncInterval": 300,
@@ -115,7 +119,7 @@ override (env wins).
 | Key | Default | Env | Meaning |
 |-----|---------|-----|---------|
 | `mode` | `audit` | `BLACKBOX_MODE` | `audit` \| `block` |
-| `contextGraphId` | `umanitek/blackbox-threats-staging` | `BLACKBOX_CONTEXT_GRAPH_ID` | staging curated CG id until production is seeded |
+| `contextGraphId` | `0x37b1Fdfd…/agent-blackbox` | `BLACKBOX_CONTEXT_GRAPH_ID` | Private Blackbox threat graph id |
 | `dkgUrl` | `http://127.0.0.1:9320` | `BLACKBOX_DKG_DAEMON_URL` / `BLACKBOX_DKG_URL` | Blackbox-managed local node |
 | `dkgHome` | `~/.hermes/blackbox/dkg` | `BLACKBOX_DKG_HOME` | isolated DKG config, API token, pid, and cache |
 | `syncInterval` | `300` | `BLACKBOX_SYNC_INTERVAL` | seconds between ruleset refresh |

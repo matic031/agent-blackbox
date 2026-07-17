@@ -77,6 +77,93 @@ def test_build_from_rows_community_only_rows_are_tagged_community():
     assert rs.escalation[0]["source"] == "community"
 
 
+def test_defender_entities_are_expanded_into_individual_rules():
+    rows = []
+    for i in range(865):
+        rows.append({
+            "threat": f"urn:defender:signal:d{i:023x}",
+            "rdfType": "urn:defender:DependencySignal",
+            "packageEcosystem": "npm",
+            "packageName": f"package-{i}",
+            "packageVersion": "1.0.0",
+            "severity": "critical",
+            "name": f"package-{i}@1.0.0",
+        })
+    for i in range(103):
+        rows.append({
+            "threat": f"urn:defender:signal:i{i:023x}",
+            "rdfType": "urn:defender:InjectionSignal",
+            "pattern": f"attack-{i}",
+            "severity": "high",
+            "name": f"Injection {i}",
+        })
+    for i in range(32):
+        rows.append({
+            "threat": f"urn:defender:signal:s{i:023x}",
+            "rdfType": "urn:defender:SkillSignal",
+            "severity": "high",
+            "name": f"Skill {i}",
+        })
+
+    rs = ruleset_mod.build_from_rows(rows, source="public")
+
+    assert rs.counts()["dependency"] == 865
+    assert rs.counts()["injection"] == 103
+    assert rs.counts()["skill"] == 32
+    assert rs.source_count("public") == 1000
+    assert rs.graph_count("public") == 1000
+    assert len({rule["identifier"] for _category, rule in rs.iter_rules()}) == 1000
+    sparql = ruleset_mod._threats_sparql(1000, 0)
+    assert "defender:DependencySignal" in sparql
+    split_sparql = "\n".join(ruleset_mod._defender_threats_sparql(1000, 0))
+    assert "defender:InjectionSignal" in split_sparql
+    assert "defender:SkillSignal" in split_sparql
+    assert "UNION" not in sparql
+
+
+def test_graph_schemas_are_queried_separately_and_merged():
+    queries = []
+
+    class _Client:
+        def query(self, sparql, cg_id, **kwargs):
+            queries.append(sparql)
+            if "defender:DependencySignal" in sparql:
+                return [{
+                    "threat": {"value": "urn:defender:signal:1"},
+                    "rdfType": {"value": "urn:defender:DependencySignal"},
+                }]
+            if "urn:defender:" in sparql:
+                return []
+            return [{
+                "threat": {"value": "urn:guardian:threat:1"},
+                "identifier": {"value": "dep:npm:legacy@1.0.0"},
+            }]
+
+    rows = ruleset_mod._fetch_tier(_Client(), "cg", "verifiable-memory")
+
+    assert len(rows) == 2
+    assert len(queries) == 5
+    assert all("UNION" not in query for query in queries)
+
+
+def test_graph_keeps_threat_with_invalid_detection_pattern():
+    rows = [{
+        "threat": "urn:defender:signal:invalid",
+        "rdfType": "urn:defender:InjectionSignal",
+        "pattern": "[invalid",
+        "severity": "high",
+        "name": "Invalid detection pattern",
+    }]
+
+    rs = ruleset_mod.build_from_rows(rows, source="public")
+
+    assert rs.counts()["injection"] == 0
+    assert rs.graph_count("public") == 1
+    assert rs.graph_entries("public")[0]["category"] == "injection"
+    restored = ruleset_mod._deserialize(ruleset_mod._serialize(rs))
+    assert restored.graph_count("public") == 1
+
+
 # --- detection: community flags, public confirms ------------------------------
 
 
@@ -278,39 +365,3 @@ def test_build_candidate_skill_missing_flags_raises():
         cli._build_candidate(_ns(type="skill", skill_name="x"))  # no version, no shape
     with pytest.raises(ValueError):
         cli._build_candidate(_ns(type="skill", skill_version="1.0.0"))  # no name
-
-
-# --- cli._threat_fields_from_reports identifier-parse fallbacks -----------------
-
-
-class _EmptyQueryClient:
-    """DkgClient stand-in whose SPARQL query returns no report rows."""
-
-    def query(self, sparql, cg_id, view=None):
-        return []
-
-
-def test_threat_fields_fallback_fileaccess():
-    cfg = config_mod.BlackboxConfig()
-    category, fields = cli._threat_fields_from_reports(
-        _EmptyQueryClient(), cfg, "fileaccess:read_file:ssh-private-key"
-    )
-    assert category == "fileaccess"
-    assert fields["tool_name"] == "read_file"
-    assert fields["file_category"] == "ssh-private-key"
-
-
-def test_threat_fields_fallback_skill_version():
-    cfg = config_mod.BlackboxConfig()
-    category, fields = cli._threat_fields_from_reports(_EmptyQueryClient(), cfg, "skill:evil@1.2.3")
-    assert category == "skill"
-    assert fields["skill_name"] == "evil"
-    assert fields["skill_version"] == "1.2.3"
-
-
-def test_threat_fields_fallback_skill_danger_shape():
-    cfg = config_mod.BlackboxConfig()
-    category, fields = cli._threat_fields_from_reports(_EmptyQueryClient(), cfg, "skill:evil:shell-exec")
-    assert category == "skill"
-    assert fields["skill_name"] == "evil"
-    assert fields["danger_shape"] == "shell-exec"

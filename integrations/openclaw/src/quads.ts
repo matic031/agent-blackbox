@@ -292,7 +292,7 @@ export interface ReportInput {
   reporter: string;
   framework: "hermes" | "openclaw";
   ts?: number;
-  /** Present only for NEW candidate threats so a curator can promote directly. */
+  /** Present only for new candidates so they can be reviewed independently. */
   candidate?: {
     pattern?: string;
     toolName?: string;
@@ -316,7 +316,7 @@ export interface ReportInput {
  * `build_report_quads`. Reports NEVER carry observed prompt/command text (privacy
  * split — that stays in the private WM audit). `g:reportsThreat` links to the
  * curated threat URI; for a NEW candidate the category-conditional threat fields
- * are carried inline so the curator can promote it directly.
+ * are carried inline so the report is independently reviewable.
  *
  * IRIs (the rdf:type object and reportsThreat object) are emitted BARE — Python
  * `iri()` returns the value with no angle brackets.

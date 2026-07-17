@@ -3,7 +3,7 @@
 The :class:`Ruleset` is built entirely from DKG query results, merged from two
 tiers with strict precedence:
 
-* ``verifiable-memory`` (the curated public threat graph) → rules tagged
+* ``verifiable-memory`` (the verified public threat graph) → rules tagged
   ``source: "public"``. The source of truth: matches are CONFIRMED and, in
   block mode, blockable.
 * ``shared-working-memory`` (the community pool) → rules tagged
@@ -36,38 +36,112 @@ from .dkg_client import DkgClient, extract_binding
 
 logger = logging.getLogger(__name__)
 
-# SPARQL that pulls every threat's queryable fields. Paginated (never a fixed
-# cap) so the local detector loads the WHOLE curated graph — spam is controlled
-# by curator approvals, not by truncating detection. ``ORDER BY`` gives a stable
-# order so LIMIT/OFFSET pages don't overlap or skip rows.
-_THREATS_HEAD = """PREFIX g: <http://umanitek.ai/ontology/guardian/>
+_SELECT_COLUMNS = """?threat ?rdfType ?identifier ?severity ?name ?description
+       ?pattern ?toolName ?argShape ?packageName ?packageVersion
+       ?packageEcosystem ?advisoryId ?curated ?category ?skillName
+       ?skillVersion ?dangerShape ?kind ?iocValue"""
+
+_GUARDIAN_THREATS_SELECT = f"""PREFIX g: <http://umanitek.ai/ontology/guardian/>
 PREFIX schema: <http://schema.org/>
-SELECT ?identifier ?severity ?name ?pattern ?toolName ?argShape
-       ?packageName ?packageVersion ?packageEcosystem ?advisoryId ?curated
-       ?category ?skillName ?skillVersion ?dangerShape ?kind
+SELECT DISTINCT {_SELECT_COLUMNS}
+WHERE {{
+  ?threat g:identifier ?identifier .
+  OPTIONAL {{ ?threat a ?rdfType . }}
+  OPTIONAL {{ ?threat g:kind ?kind . }}
+  OPTIONAL {{ ?threat g:severity ?severity . }}
+  OPTIONAL {{ ?threat schema:name ?name . }}
+  OPTIONAL {{ ?threat schema:description ?description . }}
+  OPTIONAL {{ ?threat g:pattern ?pattern . }}
+  OPTIONAL {{ ?threat g:toolName ?toolName . }}
+  OPTIONAL {{ ?threat g:argShape ?argShape . }}
+  OPTIONAL {{ ?threat g:packageName ?packageName . }}
+  OPTIONAL {{ ?threat g:packageVersion ?packageVersion . }}
+  OPTIONAL {{ ?threat g:packageEcosystem ?packageEcosystem . }}
+  OPTIONAL {{ ?threat schema:identifier ?advisoryId . }}
+  OPTIONAL {{ ?threat g:curated ?curated . }}
+  OPTIONAL {{ ?threat g:category ?category . }}
+  OPTIONAL {{ ?threat g:skillName ?skillName . }}
+  OPTIONAL {{ ?threat g:skillVersion ?skillVersion . }}
+  OPTIONAL {{ ?threat g:dangerShape ?dangerShape . }}
+}}
+ORDER BY ?threat
 """
 
-# Threat-matching graph patterns, shared by the plain query (VM view) and the
-# shared-memory-scoped community query.
-_THREATS_BODY = """  ?threat g:identifier ?identifier .
-  OPTIONAL { ?threat g:kind ?kind . }
-  OPTIONAL { ?threat g:severity ?severity . }
-  OPTIONAL { ?threat schema:name ?name . }
-  OPTIONAL { ?threat g:pattern ?pattern . }
-  OPTIONAL { ?threat g:toolName ?toolName . }
-  OPTIONAL { ?threat g:argShape ?argShape . }
-  OPTIONAL { ?threat g:packageName ?packageName . }
-  OPTIONAL { ?threat g:packageVersion ?packageVersion . }
-  OPTIONAL { ?threat g:packageEcosystem ?packageEcosystem . }
-  OPTIONAL { ?threat schema:identifier ?advisoryId . }
-  OPTIONAL { ?threat g:curated ?curated . }
-  OPTIONAL { ?threat g:category ?category . }
-  OPTIONAL { ?threat g:skillName ?skillName . }
-  OPTIONAL { ?threat g:skillVersion ?skillVersion . }
-  OPTIONAL { ?threat g:dangerShape ?dangerShape . }
+_DEFENDER_PREFIXES = """PREFIX defender: <urn:defender:>
+PREFIX dp: <urn:defender:p:>
+PREFIX schema: <http://schema.org/>
 """
 
-_THREATS_SELECT = f"{_THREATS_HEAD}WHERE {{\n{_THREATS_BODY}}}\nORDER BY ?identifier\n"
+_DEFENDER_DEPENDENCY_SELECT = f"""{_DEFENDER_PREFIXES}
+SELECT DISTINCT ?threat ?rdfType ?identifier ?severity ?name ?description
+       ?pattern ?toolName ?argShape ?packageName ?packageVersion
+       ?packageEcosystem ?advisoryId ?curated ?category ?skillName
+       ?skillVersion ?dangerShape ?kind ?iocValue
+WHERE {{
+    ?threat a defender:DependencySignal .
+    BIND(defender:DependencySignal AS ?rdfType)
+    OPTIONAL {{ ?threat dp:kind ?kind . }}
+    OPTIONAL {{ ?threat dp:severity ?severity . }}
+    OPTIONAL {{ ?threat schema:name ?name . }}
+    OPTIONAL {{ ?threat schema:description ?description . }}
+    OPTIONAL {{ ?threat dp:package ?packageName . }}
+    OPTIONAL {{ ?threat dp:version ?packageVersion . }}
+    OPTIONAL {{ ?threat dp:ecosystem ?packageEcosystem . }}
+    OPTIONAL {{ ?threat dp:advisoryId ?advisoryId . }}
+}}
+ORDER BY ?threat
+"""
+
+_DEFENDER_INJECTION_SELECT = f"""{_DEFENDER_PREFIXES}
+SELECT DISTINCT ?threat ?rdfType ?identifier ?severity ?name ?description
+       ?pattern ?toolName ?argShape ?packageName ?packageVersion
+       ?packageEcosystem ?advisoryId ?curated ?category ?skillName
+       ?skillVersion ?dangerShape ?kind ?iocValue
+WHERE {{
+    ?threat a defender:InjectionSignal .
+    BIND(defender:InjectionSignal AS ?rdfType)
+    OPTIONAL {{ ?threat dp:kind ?kind . }}
+    OPTIONAL {{ ?threat dp:severity ?severity . }}
+    OPTIONAL {{ ?threat schema:name ?name . }}
+    OPTIONAL {{ ?threat schema:description ?description . }}
+    OPTIONAL {{ ?threat dp:pattern ?pattern . }}
+}}
+ORDER BY ?threat
+"""
+
+_DEFENDER_SKILL_SELECT = f"""{_DEFENDER_PREFIXES}
+SELECT DISTINCT ?threat ?rdfType ?identifier ?severity ?name ?description
+       ?pattern ?toolName ?argShape ?packageName ?packageVersion
+       ?packageEcosystem ?advisoryId ?curated ?category ?skillName
+       ?skillVersion ?dangerShape ?kind ?iocValue
+WHERE {{
+    ?threat a defender:SkillSignal .
+    BIND(defender:SkillSignal AS ?rdfType)
+    OPTIONAL {{ ?threat dp:kind ?kind . }}
+    OPTIONAL {{ ?threat dp:severity ?severity . }}
+    OPTIONAL {{ ?threat schema:name ?name . }}
+    OPTIONAL {{ ?threat schema:description ?description . }}
+}}
+ORDER BY ?threat
+"""
+
+_DEFENDER_IOC_SELECT = f"""{_DEFENDER_PREFIXES}
+SELECT DISTINCT ?threat ?rdfType ?identifier ?severity ?name ?description
+       ?pattern ?toolName ?argShape ?packageName ?packageVersion
+       ?packageEcosystem ?advisoryId ?curated ?category ?skillName
+       ?skillVersion ?dangerShape ?kind ?iocValue
+WHERE {{
+    ?threat a defender:IocSignal .
+    BIND(defender:IocSignal AS ?rdfType)
+    OPTIONAL {{ ?threat dp:kind ?kind . }}
+    OPTIONAL {{ ?threat dp:severity ?severity . }}
+    OPTIONAL {{ ?threat schema:name ?name . }}
+    OPTIONAL {{ ?threat schema:description ?description . }}
+    OPTIONAL {{ ?threat dp:iocType ?category . }}
+    OPTIONAL {{ ?threat dp:value ?iocValue . }}
+}}
+ORDER BY ?threat
+"""
 
 # Rows fetched per page when syncing a tier. One SPARQL round-trip each.
 _PAGE_SIZE = 5000
@@ -76,56 +150,36 @@ _MAX_ROWS = 1_000_000
 
 
 def _threats_sparql(limit: int, offset: int) -> str:
-    return f"{_THREATS_SELECT}LIMIT {int(limit)} OFFSET {int(offset)}"
+    return f"{_DEFENDER_DEPENDENCY_SELECT}LIMIT {int(limit)} OFFSET {int(offset)}"
 
 
-# Lean field set for the community tier: only the fields ``_row_to_rule`` can't
-# derive from the identifier. dep/skill/fileaccess parse their details from the
-# id; injection needs ``pattern`` and escalation ``toolName``/``argShape``.
-# Fewer OPTIONAL joins keep the scoped read a few seconds vs the full query's ~11s.
-_COMMUNITY_SELECT = """PREFIX g: <http://umanitek.ai/ontology/guardian/>
-PREFIX schema: <http://schema.org/>
-SELECT ?threat ?identifier ?severity ?kind ?name ?pattern ?toolName ?argShape ?curated
-"""
-_COMMUNITY_BODY = """  ?threat g:identifier ?identifier .
-  OPTIONAL { ?threat g:severity ?severity . }
-  OPTIONAL { ?threat g:kind ?kind . }
-  OPTIONAL { ?threat schema:name ?name . }
-  OPTIONAL { ?threat g:pattern ?pattern . }
-  OPTIONAL { ?threat g:toolName ?toolName . }
-  OPTIONAL { ?threat g:argShape ?argShape . }
-  OPTIONAL { ?threat g:curated ?curated . }
-"""
-# Read in a single scoped query — no OFFSET paging, which would re-scan every
-# slice per page. A cap hit is logged, never silently truncated; production
-# scale needs the node's SWM view indexed (see the seed runbook).
-_COMMUNITY_MAX_ROWS = 50_000
-
-
-def _shared_memory_sparql(cg_id: str, limit: int) -> str:
-    """The lean threats query scoped to a context graph's shared-memory slices.
-
-    Run against the local store via :meth:`DkgClient.query_store` for the
-    community tier (see there for why). No ORDER BY — a single read, no paging.
-    """
-    prefix = f"did:dkg:context-graph:{cg_id}/_shared_memory"
+def _defender_threats_sparql(limit: int, offset: int) -> tuple:
+    limit = int(limit)
+    offset = int(offset)
     return (
-        f"{_COMMUNITY_SELECT}WHERE {{\n  GRAPH ?g {{\n{_COMMUNITY_BODY}  }}\n"
-        f'  FILTER(STRSTARTS(STR(?g), "{prefix}"))\n}}\n'
-        f"LIMIT {int(limit)}"
+        f"{_DEFENDER_DEPENDENCY_SELECT}LIMIT {limit} OFFSET {offset}",
+        f"{_DEFENDER_INJECTION_SELECT}LIMIT {limit} OFFSET {offset}",
+        f"{_DEFENDER_SKILL_SELECT}LIMIT {limit} OFFSET {offset}",
+        f"{_DEFENDER_IOC_SELECT}LIMIT {limit} OFFSET {offset}",
     )
+
+
+def _guardian_threats_sparql(limit: int, offset: int) -> str:
+    return f"{_GUARDIAN_THREATS_SELECT}LIMIT {int(limit)} OFFSET {int(offset)}"
 
 
 def community_report_count(client: DkgClient, cfg: BlackboxConfig) -> int:
-    """Fast count of outbound sightings (``ThreatReport``s) in the community
-    pool, via a scoped store read (not the view). Fail-open to 0."""
-    prefix = f"did:dkg:context-graph:{cfg.context_graph_id}/_shared_memory"
+    """Count outbound sightings in the official SWM view."""
     sparql = (
-        "SELECT (COUNT(DISTINCT ?r) AS ?n) WHERE { GRAPH ?g { "
-        "?r a <http://umanitek.ai/ontology/guardian/ThreatReport> } "
-        f'FILTER(STRSTARTS(STR(?g), "{prefix}")) }}'
+        "SELECT (COUNT(DISTINCT ?r) AS ?n) WHERE { "
+        "?r a <http://umanitek.ai/ontology/guardian/ThreatReport> }"
     )
-    rows = client.query_store(sparql, on_error=None)
+    rows = client.query(
+        sparql,
+        cfg.context_graph_id,
+        view=constants.VIEW_SHARED_WORKING_MEMORY,
+        on_error=None,
+    )
     if not rows:
         return 0
     try:
@@ -135,12 +189,10 @@ def community_report_count(client: DkgClient, cfg: BlackboxConfig) -> int:
 
 
 # ---------------------------------------------------------------------------
-# Legacy curation-proof verification (backward compatibility)
+# Legacy proof verification (backward compatibility)
 # ---------------------------------------------------------------------------
 
-# Proof-era graphs already contain these anchors. New curator commands publish
-# full threat rows directly to VM; this fallback keeps old anchors effective
-# until those rows are migrated.
+# This fallback keeps already-published proof-era rows effective.
 _PROOFS_SPARQL = """PREFIX g: <http://umanitek.ai/ontology/guardian/>
 SELECT ?proof ?root ?member WHERE {
   ?proof a g:CurationProof .
@@ -150,7 +202,7 @@ SELECT ?proof ?root ?member WHERE {
 
 
 def _fetch_proofs(client: DkgClient, cg_id: str) -> Dict[str, Dict[str, Any]]:
-    """Curation proofs from the VM view: subject -> {root, members}. Fail-open
+    """Legacy proofs from the VM view: subject -> {root, members}. Fail-open
     to {} — no proofs simply means no community row can be promoted."""
     try:
         rows = client.query(_PROOFS_SPARQL, cg_id, view=constants.VIEW_VERIFIABLE_MEMORY, on_error=None)
@@ -210,6 +262,7 @@ class Ruleset:
     skill: List[Dict[str, Any]] = field(default_factory=list)
     # IOC rules keyed by full identifier (``ioc:{type}:{value}``) for O(1) lookup.
     ioc: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    graph_threats: List[Dict[str, Any]] = field(default_factory=list)
     synced_at: float = 0.0
 
     def counts(self) -> Dict[str, int]:
@@ -243,10 +296,77 @@ class Ruleset:
         """How many rules are tagged with *source* (``public`` | ``community``)."""
         return sum(1 for _cat, r in self.iter_rules() if r.get("source") == source)
 
+    def graph_entries(self, source: str) -> List[Dict[str, Any]]:
+        entries = [item for item in self.graph_threats if item.get("source") == source]
+        seen = {item.get("identifier") for item in entries}
+        for category, rule in self.iter_rules():
+            identifier = rule.get("identifier")
+            if rule.get("source") != source or identifier in seen:
+                continue
+            seen.add(identifier)
+            entries.append({
+                "identifier": identifier,
+                "category": category,
+                "severity": str(rule.get("severity") or "info").lower(),
+                "name": rule.get("name") or "",
+                "subject": rule.get("subject") or "",
+                "source": source,
+            })
+        return entries
+
+    def graph_count(self, source: str) -> int:
+        return len(self.graph_entries(source))
+
 
 # ---------------------------------------------------------------------------
 # Build from query bindings
 # ---------------------------------------------------------------------------
+
+
+def _row_identity(row: Dict[str, Any]) -> tuple:
+    subject = extract_binding(row.get("threat"))
+    rdf_type = extract_binding(row.get("rdfType"))
+    identifier = extract_binding(row.get("identifier"))
+    suffix = subject.rsplit(":", 1)[-1] if subject else ""
+    if not identifier and rdf_type == "urn:defender:DependencySignal":
+        eco = extract_binding(row.get("packageEcosystem")).lower()
+        pkg = extract_binding(row.get("packageName")).lower()
+        ver = extract_binding(row.get("packageVersion"))
+        if eco and pkg and ver:
+            identifier = f"dep:{eco}:{pkg}@{ver}"
+    elif not identifier and rdf_type == "urn:defender:InjectionSignal" and suffix:
+        identifier = f"injection:{suffix}"
+    elif not identifier and rdf_type == "urn:defender:SkillSignal" and suffix:
+        identifier = f"skill:{suffix}"
+    elif not identifier and rdf_type == "urn:defender:IocSignal":
+        ioc_type = extract_binding(row.get("category")).strip().lower()
+        ioc_value = extract_binding(row.get("iocValue"))
+        if ioc_type and ioc_value:
+            identifier = f"ioc:{ioc_type}:{ioc_value}"
+    return subject, rdf_type, identifier
+
+
+def _row_to_graph_entry(row: Dict[str, Any], source: str) -> Optional[Dict[str, Any]]:
+    subject, _rdf_type, identifier = _row_identity(row)
+    if not identifier:
+        return None
+    prefix = identifier.split(":", 1)[0].lower()
+    category = {
+        "dep": "dependency",
+        "injection": "injection",
+        "escalation": "escalation",
+        "fileaccess": "fileaccess",
+        "skill": "skill",
+        "ioc": "ioc",
+    }.get(prefix, "other")
+    return {
+        "identifier": identifier,
+        "category": category,
+        "severity": constants.normalize_severity(extract_binding(row.get("severity")), "high"),
+        "name": extract_binding(row.get("name")) or identifier,
+        "subject": subject,
+        "source": source,
+    }
 
 
 def _row_to_rule(row: Dict[str, Any], source: str = "public") -> Optional[tuple]:
@@ -255,11 +375,19 @@ def _row_to_rule(row: Dict[str, Any], source: str = "public") -> Optional[tuple]
     *source* tags the rule's trust tier: ``"public"`` (verifiable-memory, the
     curated source of truth) or ``"community"`` (shared-working-memory).
     """
-    identifier = extract_binding(row.get("identifier"))
+    subject, rdf_type, identifier = _row_identity(row)
     if not identifier:
         return None
     severity = constants.normalize_severity(extract_binding(row.get("severity")), "high")
     name = extract_binding(row.get("name")) or identifier
+    common = {
+        "identifier": identifier,
+        "subject": subject,
+        "description": extract_binding(row.get("description")),
+        "severity": severity,
+        "name": name,
+        "source": source,
+    }
     if identifier.startswith("injection:"):
         pattern_src = extract_binding(row.get("pattern"))
         if not pattern_src:
@@ -270,12 +398,9 @@ def _row_to_rule(row: Dict[str, Any], source: str = "public") -> Optional[tuple]
             logger.debug("blackbox: skipping bad injection pattern %s: %s", identifier, exc)
             return None
         return ("injection", identifier, {
-            "identifier": identifier,
+            **common,
             "pattern": compiled,
             "pattern_src": pattern_src,
-            "severity": severity,
-            "name": name,
-            "source": source,
         })
     if identifier.startswith("escalation:"):
         tool_name = extract_binding(row.get("toolName"))
@@ -283,12 +408,9 @@ def _row_to_rule(row: Dict[str, Any], source: str = "public") -> Optional[tuple]
         if not tool_name or not arg_shape:
             return None
         return ("escalation", identifier, {
-            "identifier": identifier,
+            **common,
             "toolName": tool_name,
             "argShape": arg_shape,
-            "severity": severity,
-            "name": name,
-            "source": source,
         })
     if identifier.startswith("dep:"):
         eco = extract_binding(row.get("packageEcosystem")).lower()
@@ -305,15 +427,12 @@ def _row_to_rule(row: Dict[str, Any], source: str = "public") -> Optional[tuple]
                 return None
         key = quads.dependency_key(eco, pkg, ver)
         return ("dependency", key, {
-            "identifier": identifier,
+            **common,
             "ecosystem": eco,
             "packageName": pkg,
             "packageVersion": ver,
             "advisoryId": extract_binding(row.get("advisoryId")),
             "kind": extract_binding(row.get("kind")) or None,
-            "severity": severity,
-            "name": name,
-            "source": source,
         })
     if identifier.startswith("fileaccess:"):
         tool_name = extract_binding(row.get("toolName"))
@@ -325,22 +444,16 @@ def _row_to_rule(row: Dict[str, Any], source: str = "public") -> Optional[tuple]
             except ValueError:
                 return None
         return ("fileaccess", identifier, {
-            "identifier": identifier,
+            **common,
             "toolName": tool_name.strip().lower(),
             "category": category.strip().lower(),
-            "severity": severity,
-            "name": name,
-            "source": source,
         })
     if identifier.startswith("skill:"):
         rule = {
-            "identifier": identifier,
-            "skillName": extract_binding(row.get("skillName")),
+            **common,
+            "skillName": extract_binding(row.get("skillName")) or name,
             "skillVersion": extract_binding(row.get("skillVersion")),
             "dangerShape": extract_binding(row.get("dangerShape")),
-            "severity": severity,
-            "name": name,
-            "source": source,
         }
         return ("skill", identifier, rule)
     if identifier.startswith("ioc:"):
@@ -350,12 +463,10 @@ def _row_to_rule(row: Dict[str, Any], source: str = "public") -> Optional[tuple]
         if not ioc_type and len(parts) == 3:
             ioc_type = parts[1].strip().lower()
         return ("ioc", identifier, {
-            "identifier": identifier,
+            **common,
             "iocType": ioc_type,
+            "value": extract_binding(row.get("iocValue")) or (parts[2] if len(parts) == 3 else ""),
             "kind": extract_binding(row.get("kind")) or None,
-            "severity": severity,
-            "name": name,
-            "source": source,
         })
     return None
 
@@ -373,11 +484,18 @@ def build_from_rows(rows: List[Dict[str, Any]], source: str = "public") -> Rules
     esc_seen: set = set()
     fa_seen: set = set()
     skill_seen: set = set()
+    graph_seen: set = set()
     for item in rows:
         if isinstance(item, tuple):
             row, row_source = item
         else:
             row, row_source = item, source
+        graph_entry = _row_to_graph_entry(row, row_source)
+        if graph_entry:
+            graph_key = (row_source, graph_entry["identifier"])
+            if graph_key not in graph_seen:
+                graph_seen.add(graph_key)
+                rs.graph_threats.append(graph_entry)
         mapped = _row_to_rule(row, row_source)
         if not mapped:
             continue
@@ -439,6 +557,7 @@ def _serialize(rs: Ruleset) -> Dict[str, Any]:
         "fileaccess": rs.fileaccess,
         "skill": rs.skill,
         "ioc": rs.ioc,
+        "graph_threats": rs.graph_threats,
     }
 
 
@@ -458,6 +577,7 @@ def _deserialize(data: Dict[str, Any]) -> Ruleset:
     rs.fileaccess = list(data.get("fileaccess", []))
     rs.skill = list(data.get("skill", []))
     rs.ioc = dict(data.get("ioc", {}))
+    rs.graph_threats = list(data.get("graph_threats", []))
     return rs
 
 
@@ -495,41 +615,39 @@ _refreshing = False
 _QUERY_ERROR = object()  # sentinel: distinguishes a tier failure from an empty tier
 
 
-def _fetch_tier(client: DkgClient, cg_id: str, view: str) -> Optional[List[Dict[str, Any]]]:
+def _fetch_tier(
+    client: DkgClient,
+    cg_id: str,
+    view: str,
+    agent_address: Optional[str] = None,
+) -> Optional[List[Dict[str, Any]]]:
     """Fully paginate one tier. Returns all rows, or ``None`` if the node errored.
 
     ``None`` (error) is distinct from ``[]`` (the tier is genuinely empty) so
     the caller can preserve a tier's last-good rules through a transient failure
     instead of wiping them.
     """
-    # Community tier: one scoped store read (see ``query_store``). No OFFSET
-    # paging, which would re-scan every slice; a cap hit is logged, not truncated.
-    if view == constants.VIEW_SHARED_WORKING_MEMORY:
-        rows = client.query_store(
-            _shared_memory_sparql(cg_id, _COMMUNITY_MAX_ROWS), on_error=_QUERY_ERROR
-        )
-        if rows is _QUERY_ERROR:
-            return None
-        if len(rows) >= _COMMUNITY_MAX_ROWS:
-            logger.warning(
-                "blackbox: community read hit the %d-row cap; some shared-memory "
-                "threats may be missing until the node's SWM view is indexed",
-                _COMMUNITY_MAX_ROWS,
-            )
-        return rows
-
     rows: List[Dict[str, Any]] = []
-    offset = 0
-    while offset < _MAX_ROWS:
-        page = client.query(
-            _threats_sparql(_PAGE_SIZE, offset), cg_id, view=view, on_error=_QUERY_ERROR
-        )
-        if page is _QUERY_ERROR:
-            return None
-        rows.extend(page)
-        if len(page) < _PAGE_SIZE:
-            break
-        offset += _PAGE_SIZE
+    query_groups = (
+        lambda limit, offset: (_guardian_threats_sparql(limit, offset),),
+        _defender_threats_sparql,
+    )
+    for query_group in query_groups:
+        offset = 0
+        while offset < _MAX_ROWS:
+            kwargs: Dict[str, Any] = {"view": view, "on_error": _QUERY_ERROR}
+            if agent_address:
+                kwargs["agent_address"] = agent_address
+            pages = []
+            for query in query_group(_PAGE_SIZE, offset):
+                page = client.query(query, cg_id, **kwargs)
+                if page is _QUERY_ERROR:
+                    return None
+                pages.append(page)
+                rows.extend(page)
+            if all(len(page) < _PAGE_SIZE for page in pages):
+                break
+            offset += _PAGE_SIZE
     return rows
 
 
@@ -539,7 +657,7 @@ _EMPTY_RULESET_RETRY_S = 30.0
 def refresh(config: Optional[BlackboxConfig] = None, client: Optional[DkgClient] = None) -> Ruleset:
     """Query the node, rebuild the ruleset, and persist it. Fail-open.
 
-    Merges the curated public graph (VM) with the community pool (SWM), fully
+    Merges the verified public graph (VM) with the community pool (SWM), fully
     paginated (no cap). Fail-open is *per tier*: if one tier's query fails, that
     tier's last-good rules are preserved instead of being wiped, so a transient
     public-graph error can never silently drop every blockable rule. On total
@@ -548,7 +666,7 @@ def refresh(config: Optional[BlackboxConfig] = None, client: Optional[DkgClient]
     global _memory_cache
     config = config or load_blackbox_config()
     client = client or DkgClient(url=config.dkg_url, dkg_home=config.dkg_home)
-    # Public curated graph first (source of truth), then the community pool.
+    # Verified public graph first, then the community pool.
     tiers = (
         (constants.VIEW_VERIFIABLE_MEMORY, "public"),
         (constants.VIEW_SHARED_WORKING_MEMORY, "community"),
@@ -570,7 +688,7 @@ def refresh(config: Optional[BlackboxConfig] = None, client: Optional[DkgClient]
                 _memory_cache = existing
             return existing
 
-    # Backward compatibility: proof-era curated SWM rows whose batch root
+    # Backward compatibility: proof-era SWM rows whose batch root
     # matches an old on-chain anchor are promoted to the blockable public tier.
     # New rows arrive directly from the VM tier as complete threat assets.
     # Fail-open — verification errors leave community rows flag-only.
@@ -621,6 +739,12 @@ def _restore_tiers(rs: Ruleset, prior: Ruleset, tiers: List[str]) -> None:
     :func:`build_from_rows` precedence.
     """
     keep = set(tiers)
+    graph_seen = {(item.get("source"), item.get("identifier")) for item in rs.graph_threats}
+    for item in prior.graph_threats:
+        key = (item.get("source"), item.get("identifier"))
+        if item.get("source") in keep and key not in graph_seen:
+            graph_seen.add(key)
+            rs.graph_threats.append(item)
     for attr in ("injection", "escalation", "fileaccess", "skill"):
         seen = {r.get("identifier") for r in getattr(rs, attr)}
         for rule in getattr(prior, attr):
@@ -645,7 +769,7 @@ def _background_refresh(config: BlackboxConfig) -> None:
 
         home = constants.blackbox_home()
         home.mkdir(parents=True, exist_ok=True)
-        lock_fh = open(_lock_path(), "w")
+        lock_fh = open(_lock_path(), "w", encoding="utf-8")
         try:
             fcntl.flock(lock_fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except (OSError, BlockingIOError):

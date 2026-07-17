@@ -98,7 +98,7 @@ class BlackboxConfig:
 
     mode: str = "audit"
     context_graph_id: str = constants.DEFAULT_CONTEXT_GRAPH_ID
-    curator_peer_id: str = constants.DEFAULT_CURATOR_PEER_ID
+    graph_peer_id: str = constants.DEFAULT_GRAPH_PEER_ID
     dkg_url: str = constants.DEFAULT_DKG_URL
     dkg_home: str = field(default_factory=lambda: str(constants.blackbox_dkg_home()))
     dkg_bin: str = field(default_factory=lambda: str(constants.blackbox_dkg_bin()))
@@ -259,7 +259,7 @@ def load_blackbox_config() -> BlackboxConfig:
     dkg_home_env = _first_env("BLACKBOX_DKG_HOME")
     configured_dkg_home = entry.get("dkg_home") or entry.get("dkgHome")
     configured_dkg_url = entry.get("dkg_url") or entry.get("dkgUrl")
-    if not dkg_home_env and not configured_dkg_url and _is_default_dkg_home(configured_dkg_home):
+    if _is_default_dkg_home(configured_dkg_home):
         logger.info(
             "blackbox: switching shared default dkg_home %s -> %s",
             configured_dkg_home,
@@ -267,48 +267,46 @@ def load_blackbox_config() -> BlackboxConfig:
         )
         configured_dkg_home = ""
     dkg_home = str(
-        dkg_home_env
-        or configured_dkg_home
+        configured_dkg_home
+        or dkg_home_env
         or default_dkg_home
     ).strip()
     dkg_bin = str(
-        _first_env("BLACKBOX_DKG_BIN")
-        or entry.get("dkg_bin")
+        entry.get("dkg_bin")
         or entry.get("dkgBin")
+        or _first_env("BLACKBOX_DKG_BIN")
         or constants.blackbox_dkg_bin()
     ).strip()
     dkg_url_env = _first_env("BLACKBOX_DKG_DAEMON_URL", "BLACKBOX_DKG_URL")
     dkg_url = str(
-        dkg_url_env
-        or configured_dkg_url
+        configured_dkg_url
+        or dkg_url_env
         or _default_dkg_url()
     ).rstrip("/")
     legacy_dkg_urls = {"http://127.0.0.1:9200", "http://localhost:9200"}
     has_configured_dkg_home = bool(configured_dkg_home)
-    if not dkg_url_env and not has_configured_dkg_home and dkg_url in legacy_dkg_urls:
+    if not has_configured_dkg_home and dkg_url in legacy_dkg_urls:
         dkg_url = _default_dkg_url()
-    curator_peer_id = str(
+    graph_peer_id = str(
         _env_or(
             entry,
-            env="BLACKBOX_CURATOR_PEER_ID",
-            key="curator_peer_id",
-            default=constants.DEFAULT_CURATOR_PEER_ID,
+            env="BLACKBOX_GRAPH_PEER_ID",
+            key="graph_peer_id",
+            default=constants.DEFAULT_GRAPH_PEER_ID,
         )
     ).strip()
-    # Auto-correct an install pointed at a known-wrong curator peer (a member
-    # node that is not the graph owner) so join requests always reach the real
-    # curator and SWM sync is authorised. A genuinely custom peer is untouched.
-    if curator_peer_id in constants.LEGACY_CURATOR_PEER_IDS:
+    # Replace bootstrap peers from previous releases; custom peers are untouched.
+    if graph_peer_id in constants.LEGACY_GRAPH_PEER_IDS:
         logger.info(
-            "blackbox: switching stale curator_peer_id %s -> %s",
-            curator_peer_id,
-            constants.DEFAULT_CURATOR_PEER_ID,
+            "blackbox: switching stale graph_peer_id %s -> %s",
+            graph_peer_id,
+            constants.DEFAULT_GRAPH_PEER_ID,
         )
-        curator_peer_id = constants.DEFAULT_CURATOR_PEER_ID
+        graph_peer_id = constants.DEFAULT_GRAPH_PEER_ID
     return BlackboxConfig(
         mode=mode,
         context_graph_id=context_graph_id,
-        curator_peer_id=curator_peer_id,
+        graph_peer_id=graph_peer_id,
         dkg_url=dkg_url,
         dkg_home=dkg_home,
         dkg_bin=dkg_bin,

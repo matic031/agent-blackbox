@@ -29,10 +29,7 @@ _TIMEOUT = 3.0
 # Read path: a large graph can take a few seconds to evaluate. Only the
 # background refresh and the dashboard hit it, never the cached hot hook path.
 _QUERY_TIMEOUT = 30.0
-# Community tier reads scale with the pool, so a longer ceiling than the node API.
 _STORE_TIMEOUT = 150.0
-# On-chain ops (CG register, VM publish) wait for block confirmation.
-_ONCHAIN_TIMEOUT = 180.0
 Quad = Dict[str, str]
 
 
@@ -41,7 +38,7 @@ class DkgError(RuntimeError):
 
 
 def _validate_quads_literal_sizes(quads: List[Quad]) -> None:
-    """Mirror DKG's writable-literal preflight before sending seed/write payloads."""
+    """Mirror DKG's writable-literal preflight before sending write payloads."""
     try:
         from . import quads as quad_terms
 
@@ -72,21 +69,6 @@ def _is_wm_merkle_conflict(exc: DkgError) -> bool:
     )
 
 
-def _is_already_published(exc: DkgError) -> bool:
-    """True when ``vm/publish`` failed only because the KA is already on-chain.
-
-    Re-publishing a KA we already minted — e.g. the local seeded ledger was lost,
-    or a prior publish confirmed on-chain *after* our client hit its timeout — is
-    a no-op we can treat as success rather than a paid retry or a hard error.
-    """
-    msg = str(exc).lower()
-    return (
-        "already published" in msg
-        or "already on chain" in msg
-        or "already exists on chain" in msg
-    )
-
-
 def _job_id_from_error(exc: DkgError) -> Optional[str]:
     """Extract a daemon-returned job id from an HTTP error body if present."""
     msg = str(exc)
@@ -94,19 +76,6 @@ def _job_id_from_error(exc: DkgError) -> Optional[str]:
         m = re.search(rf'"{key}"\s*:\s*"([^"]+)"', msg)
         if m:
             return m.group(1)
-    return None
-
-
-def _coerce_chain_id(value: Any) -> Optional[int]:
-    """Parse a chain id from an int or a ``"base:8453"``-style string."""
-    if isinstance(value, bool):  # bool is an int subclass — reject it explicitly
-        return None
-    if isinstance(value, int):
-        return value
-    if isinstance(value, str):
-        m = re.search(r"(\d{2,7})", value)  # "base:8453" -> 8453
-        if m:
-            return int(m.group(1))
     return None
 
 
@@ -223,48 +192,6 @@ class DkgClient:
         """
         return self._request("GET", "/api/agent/identity")
 
-    def chain_info(self) -> Dict[str, Any]:
-        """Best-effort network identity from ``/api/status``.
-
-        DKG v10 reports its chain a few ways across builds — a bare ``chainId``
-        (int, or a ``"base:8453"`` string), a nested ``chain`` object, and/or the
-        human ``networkName``/``networkConfig`` strings. We parse whatever's
-        present into ``{chain_id, network, is_mainnet, is_testnet}`` so callers
-        can verify the node is on a supported MAINNET before spending TRAC.
-
-        Never raises: unresolved fields come back ``None`` and callers decide
-        policy (the seed preflight blocks a *positively-identified* testnet and
-        only warns when the chain can't be determined).
-        """
-        try:
-            st = self.status()
-        except DkgError:
-            return {"chain_id": None, "network": "", "is_mainnet": None, "is_testnet": None}
-        chain = st.get("chain") if isinstance(st.get("chain"), dict) else {}
-        chain_id = None
-        for src in (st.get("chainId"), st.get("chain_id"), chain.get("chainId"), chain.get("chain_id"), chain.get("id")):
-            chain_id = _coerce_chain_id(src)
-            if chain_id is not None:
-                break
-        network = str(
-            st.get("networkConfig") or st.get("networkName") or chain.get("name") or ""
-        ).strip()
-        is_mainnet: Optional[bool]
-        is_testnet: Optional[bool]
-        if chain_id is not None:
-            is_mainnet = chain_id in constants.DKG_MAINNET_CHAINS
-            is_testnet = chain_id in constants.DKG_TESTNET_CHAINS
-        else:
-            # No numeric id — fall back to keyword-matching the network string.
-            low = network.lower()
-            if any(t in low for t in ("testnet", "sepolia", "chiado", "lofar")):
-                is_mainnet, is_testnet = False, True
-            elif "mainnet" in low:
-                is_mainnet, is_testnet = True, False
-            else:
-                is_mainnet = is_testnet = None
-        return {"chain_id": chain_id, "network": network, "is_mainnet": is_mainnet, "is_testnet": is_testnet}
-
     def reachable(self, timeout: Optional[float] = None) -> bool:
         try:
             self.status(timeout=timeout)
@@ -273,43 +200,6 @@ class DkgClient:
             return False
 
     # -- context graph -----------------------------------------------------
-
-    def create_context_graph(
-        self,
-        cg_id: str,
-        name: str,
-        description: str = "",
-        access_policy: Optional[int] = None,
-        allowed_agents: Optional[List[str]] = None,
-    ) -> Dict[str, Any]:
-        """Create a local context graph (free, off-chain).
-
-        Blackbox uses ``access_policy=1`` with the curator in
-        ``allowed_agents``. The DKG's per-graph auto-approval setting admits
-        every valid joiner, preserving private relay-backed replication while
-        making membership open in practice.
-        """
-        body: Dict[str, Any] = {"id": cg_id, "name": name}
-        if description:
-            body["description"] = description
-        if access_policy is not None:
-            body["accessPolicy"] = access_policy
-        if allowed_agents:
-            body["allowedAgents"] = allowed_agents
-        return self._request("POST", "/api/context-graph/create", body)
-
-    def register_context_graph(self, cg_id: str, access_policy: int, publish_policy: int) -> Dict[str, Any]:
-        """Register a CG on-chain with explicit access/publish policies.
-
-        Blackbox uses ``access_policy=1`` (private member transport/read) and
-        ``publish_policy=0`` (only the curator wallet promotes to VM).
-        """
-        return self._request(
-            "POST",
-            "/api/context-graph/register",
-            {"id": cg_id, "accessPolicy": access_policy, "publishPolicy": publish_policy},
-            timeout=_ONCHAIN_TIMEOUT,
-        )
 
     def subscribe_context_graph(self, cg_id: str, *, include_shared_memory: bool = True) -> Dict[str, Any]:
         """Subscribe the node to a context graph + catch up its data.
@@ -326,6 +216,24 @@ class DkgClient:
             timeout=_STORE_TIMEOUT,
         )
 
+    def restart_context_graph_catchup(
+        self,
+        cg_id: str,
+        *,
+        include_shared_memory: bool = True,
+    ) -> Dict[str, Any]:
+        """Force a fresh official catch-up without deleting local graph data."""
+        self._request(
+            "POST",
+            "/api/context-graph/unsubscribe",
+            {"contextGraphId": cg_id},
+            timeout=_STORE_TIMEOUT,
+        )
+        return self.subscribe_context_graph(
+            cg_id,
+            include_shared_memory=include_shared_memory,
+        )
+
     def catchup_status(self, cg_id: str) -> Dict[str, Any]:
         """Return the latest asynchronous catch-up job for ``cg_id``.
 
@@ -339,22 +247,81 @@ class DkgClient:
             f"/api/sync/catchup-status?contextGraphId={encoded}",
         )
 
-    def request_join(self, cg_id: str, curator_peer_id: str,
-                     agent_name: str = "agent-blackbox") -> Dict[str, Any]:
-        """Consumer-side: sign a join request and forward it to the curator.
+    def catchup_from_peer(
+        self,
+        cg_id: str,
+        peer_id: str,
+        *,
+        budget_ms: int = 3_600_000,
+    ) -> Dict[str, Any]:
+        """Atomically recover the private graph's SWM from its curator.
 
-        Two local HTTP calls (``sign-join`` → ``request-join``) — no ``dkg`` CLI
-        dependency, so a fresh install auto-joins reliably. Idempotent: a repeat
-        request or an already-member is a no-op. Returns the request-join result
-        (``delivered`` count / ``alreadyMember``).
+        VM reconciliation depends on a complete SWM snapshot.  The generic
+        multi-peer catch-up can return a useful partial transfer, while this
+        endpoint pins the configured curator and reports an explicit verified
+        ``completed`` result before replacing the local snapshot.
         """
+        bounded_budget = max(1_000, min(3_600_000, int(budget_ms)))
+        return self._request(
+            "POST",
+            "/api/context-graph/recover-shared-memory",
+            {
+                "contextGraphId": cg_id,
+                "remotePeerId": peer_id,
+            },
+            timeout=(bounded_budget / 1_000) + 10,
+        )
+
+    def context_graph_participants(self, cg_id: str) -> Dict[str, Any]:
+        encoded = urllib.parse.quote(cg_id, safe="")
+        return self._request(
+            "GET",
+            f"/api/context-graph/{encoded}/participants",
+        )
+
+    def context_graph_has_agent(self, cg_id: str, agent_address: str) -> bool:
+        if not agent_address:
+            return False
+        result = self.context_graph_participants(cg_id)
+        allowed = result.get("allowedAgents") if isinstance(result, dict) else None
+        if not isinstance(allowed, list):
+            return False
+        expected = agent_address.lower()
+        return any(str(address).lower() == expected for address in allowed)
+
+    def publish_agent_profile(self) -> Dict[str, Any]:
+        """Publish this node's default agent profile and encryption keys."""
+        return self._request(
+            "POST",
+            "/api/agent/publish-profile",
+            {},
+            timeout=_STORE_TIMEOUT,
+        )
+
+    def request_join(self, cg_id: str, graph_peer_id: str,
+                     agent_name: str = "agent-blackbox") -> Dict[str, Any]:
+        """Sign a join request and forward it to the graph's bootstrap peer.
+
+        Publish the default profile first so the curator has the requester's
+        workspace encryption key before it admits the node, then perform the
+        signed join flow. Profile publication is best-effort for compatibility
+        with older daemons that do not expose the endpoint; the curator keeps
+        such requests pending instead of admitting a member that would break
+        SWM encryption. Idempotent: a repeat request or an already-member is a
+        no-op. Returns the request-join result (``delivered`` count /
+        ``alreadyMember``).
+        """
+        try:
+            self.publish_agent_profile()
+        except DkgError as exc:
+            logger.warning("Could not publish DKG agent profile before join: %s", exc)
         enc = urllib.parse.quote(cg_id, safe="")
         signed = self._request("POST", f"/api/context-graph/{enc}/sign-join", {}, timeout=_STORE_TIMEOUT)
         delegation = signed.get("delegation") if isinstance(signed, dict) else None
         if not delegation:
             raise DkgError("sign-join returned no delegation")
         return self._request("POST", f"/api/context-graph/{enc}/request-join",
-                             {"delegation": delegation, "curatorPeerId": curator_peer_id,
+                             {"delegation": delegation, "curatorPeerId": graph_peer_id,
                               "agentName": agent_name}, timeout=_STORE_TIMEOUT)
 
     # -- knowledge assets --------------------------------------------------
@@ -365,7 +332,7 @@ class DkgClient:
 
         Private/agent-gated context graphs require the node's sender-key SWM
         envelope. DKG's old one-shot ``alsoShareSwm:true`` path can leave assets
-        without a publish-ready share intent, so Blackbox uses the explicit v10
+        without a usable share intent, so Blackbox uses the explicit v10
         lifecycle: write/seal to WM, then enqueue ``/swm/share-async`` and poll
         the share job.
 
@@ -511,119 +478,6 @@ class DkgClient:
             timeout=_STORE_TIMEOUT,
         )
 
-    def publish_async(self, cg_id: str, name: str, epochs: int = 1) -> Dict[str, Any]:
-        """Queue an async VM publish job for an already SWM-shared sealed KA."""
-        try:
-            result = self._request(
-                "POST",
-                self._ka_path(name, "/vm/publish-async"),
-                {"contextGraphId": cg_id, "options": {"publishEpochs": max(1, int(epochs))}},
-                timeout=_STORE_TIMEOUT,
-            )
-        except DkgError as exc:
-            if _is_already_published(exc):
-                return {"name": name, "idempotent": True}
-            raise
-        if isinstance(result, dict) and result.get("contextGraphError"):
-            raise DkgError(
-                f"vm/publish-async {name}: context-graph binding failed: "
-                f"{result.get('contextGraphError')}"
-            )
-        return result
-
-    def publisher_job(self, job_id: str) -> Dict[str, Any]:
-        """Fetch one async publisher job by id."""
-        query = urllib.parse.urlencode({"id": job_id})
-        resp = self._request("GET", f"/api/publisher/job?{query}", timeout=_STORE_TIMEOUT)
-        if isinstance(resp.get("job"), dict):
-            return resp["job"]
-        return resp
-
-    @staticmethod
-    def _publisher_job_id(result: Dict[str, Any]) -> Optional[str]:
-        if not isinstance(result, dict):
-            return None
-        job = result.get("job") if isinstance(result.get("job"), dict) else result
-        for key in ("id", "jobId", "job_id", "publisherJobId"):
-            value = job.get(key)
-            if value:
-                return str(value)
-        return None
-
-    def wait_for_publish_job(
-        self,
-        job_id: str,
-        *,
-        timeout_s: float = 600.0,
-        poll_s: float = 5.0,
-    ) -> Dict[str, Any]:
-        """Poll an async VM publisher job until it finalizes or fails."""
-        deadline = time.monotonic() + max(1.0, float(timeout_s))
-        last_status = "unknown"
-        last_job: Dict[str, Any] = {}
-        while True:
-            job = self.publisher_job(job_id)
-            last_job = job if isinstance(job, dict) else {}
-            last_status = str(
-                last_job.get("status") or last_job.get("state") or last_job.get("phase") or "unknown"
-            ).lower()
-            if last_job.get("contextGraphError"):
-                raise DkgError(
-                    f"publisher job {job_id}: context-graph binding failed: "
-                    f"{last_job.get('contextGraphError')}"
-                )
-            if last_status in {"finalized", "succeeded", "success", "completed", "complete", "published"}:
-                return last_job
-            if last_status in {"failed", "error", "cancelled", "canceled"}:
-                detail = json.dumps(last_job, sort_keys=True)[:1000]
-                raise DkgError(f"publisher job {job_id} failed: {detail}")
-            if time.monotonic() >= deadline:
-                detail = json.dumps(last_job, sort_keys=True)[:1000]
-                raise DkgError(
-                    f"publisher job {job_id} timed out after {int(timeout_s)}s "
-                    f"(last status={last_status}, job={detail})"
-                )
-            time.sleep(max(1.0, float(poll_s)))
-
-    def publish_async_and_wait(
-        self,
-        cg_id: str,
-        name: str,
-        epochs: int = 1,
-        *,
-        timeout_s: float = 600.0,
-        poll_s: float = 5.0,
-    ) -> Dict[str, Any]:
-        """Queue async VM publish and poll the publisher job to finality."""
-        result = self.publish_async(cg_id, name, epochs=epochs)
-        if result.get("idempotent"):
-            return result
-        job_id = self._publisher_job_id(result)
-        if not job_id:
-            return result
-        return self.wait_for_publish_job(job_id, timeout_s=timeout_s, poll_s=poll_s)
-
-    def publish(self, cg_id: str, name: str, epochs: int = 1) -> Dict[str, Any]:
-        """Mint a sealed KA on-chain (VM) via async job polling.
-
-        Idempotent on re-publish: if the KA is already on-chain (lost ledger, or
-        a prior publish that confirmed after our client hit its timeout), we
-        treat it as success instead of paying for a retry.
-        """
-        result = self.publish_async_and_wait(
-            cg_id,
-            name,
-            epochs=epochs,
-            timeout_s=_ONCHAIN_TIMEOUT,
-            poll_s=5.0,
-        )
-        if isinstance(result, dict) and result.get("contextGraphError"):
-            raise DkgError(
-                f"vm/publish {name}: context-graph binding failed: "
-                f"{result.get('contextGraphError')} — not recording as published"
-            )
-        return result
-
     # -- query -------------------------------------------------------------
 
     def query(
@@ -632,6 +486,7 @@ class DkgClient:
         cg_id: str,
         view: str = constants.VIEW_SHARED_WORKING_MEMORY,
         on_error: Any = None,
+        agent_address: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """Run a SPARQL SELECT and return normalized bindings.
 
@@ -639,77 +494,22 @@ class DkgClient:
         IRIs already unwrapped — see :func:`extract_binding`). On transport
         error it returns *on_error* (default ``[]``) rather than raising, since
         read paths fail open. A caller that must tell a genuine *empty* result
-        (``[]``) apart from a *failure* passes a sentinel (e.g. ``on_error=None``
-        won't collide with a successful empty ``[]``).
+        (``[]``) apart from a *failure* passes a unique sentinel.
         """
+        payload = {"sparql": sparql, "contextGraphId": cg_id, "view": view}
+        if agent_address:
+            payload["agentAddress"] = agent_address
         try:
             result = self._request(
                 "POST",
                 "/api/query",
-                {"sparql": sparql, "contextGraphId": cg_id, "view": view},
+                payload,
                 timeout=_QUERY_TIMEOUT,
             )
         except DkgError as exc:
             logger.debug("blackbox: query failed: %s", exc)
             return [] if on_error is None else on_error
         return normalize_bindings(result)
-
-    def query_store(self, sparql: str, on_error: Any = None) -> Any:
-        """Run a SPARQL SELECT against the node's local triple store directly,
-        bypassing the ``/api/query`` view layer. Fail-open like :meth:`query`.
-
-        The ``shared-working-memory`` view does per-slice trust work that times
-        out (HTTP 500) once the pool holds thousands of slices; the raw store
-        answers the same scoped query in milliseconds. Used only for the
-        community tier, which is flag-only and doesn't need the view's
-        verification. Workaround for a node-side view-scaling limit — see the
-        seed runbook.
-        """
-        store_url = self._store_url()
-        if not store_url:
-            return on_error
-        data = urllib.parse.urlencode({"query": sparql}).encode("utf-8")
-        last_exc: Optional[Exception] = None
-        # Retry with backoff: a heavy scoped read can blip when many agents hit
-        # the store at once, and a short pause lets it drain.
-        for attempt in range(3):
-            if attempt:
-                time.sleep(attempt)
-            try:
-                req = urllib.request.Request(
-                    store_url,
-                    data=data,
-                    headers={
-                        "Accept": "application/sparql-results+json",
-                        "Content-Type": "application/x-www-form-urlencoded",
-                    },
-                    method="POST",
-                )
-                with urllib.request.urlopen(req, timeout=_STORE_TIMEOUT) as resp:
-                    return normalize_bindings(json.loads(resp.read().decode("utf-8")))
-            except Exception as exc:  # noqa: BLE001 — reads fail open, same as query()
-                last_exc = exc
-        logger.debug("blackbox: store query failed after 3 attempts: %s", last_exc)
-        return on_error
-
-    def _store_url(self) -> Optional[str]:
-        """The node's local SPARQL query endpoint (``storeUrl`` from status).
-
-        Only a resolved URL is cached — never a transient status failure, which
-        would otherwise poison the client for its lifetime and silently empty
-        the community tier. Returns ``None`` (callers fail open) when unresolved.
-        """
-        url = getattr(self, "_store_url_cache", None)
-        if url:
-            return url
-        try:
-            resolved = self.status().get("storeUrl")
-        except DkgError:
-            resolved = None
-        if isinstance(resolved, str) and resolved:
-            self._store_url_cache = resolved
-            return resolved
-        return None
 
     def register_agent(self, name: str, framework: str = "hermes") -> Dict[str, Any]:
         """Register a new agent on the node → ``{agentAddress, authToken, ...}``."""

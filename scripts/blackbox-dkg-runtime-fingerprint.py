@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -20,16 +21,113 @@ import urllib.request
 from pathlib import Path
 
 
-RUNTIME_ENV_DEFAULTS = {
-    "DKG_CATCHUP_MAX_CONCURRENT_PEERS": "1",
-    "DKG_SYNC_PAGE_TIMEOUT_MS": "180000",
-    "DKG_SYNC_TOTAL_TIMEOUT_MS": "1200000",
-    "DKG_SYNC_MIN_GRAPH_BUDGET_MS": "120000",
-}
-
-
 class FingerprintError(RuntimeError):
     """Raised when the installed runtime cannot be fingerprinted safely."""
+
+
+_CGROUP_MEMORY_LIMIT_PATHS = (
+    Path("/sys/fs/cgroup/memory.max"),
+    Path("/sys/fs/cgroup/memory/memory.limit_in_bytes"),
+)
+_UNLIMITED_MEMORY_THRESHOLD = 1 << 50
+_V8_HEAP_OPTION_RE = re.compile(
+    r"(?:^|\s)--max[-_]old[-_]space[-_]size(?:=|\s)",
+    re.IGNORECASE,
+)
+
+
+def read_cgroup_memory_limit() -> int | None:
+    """Return the active cgroup memory ceiling, if it is finite."""
+    for path in _CGROUP_MEMORY_LIMIT_PATHS:
+        try:
+            raw = path.read_text(encoding="utf-8").strip()
+        except (OSError, UnicodeError):
+            continue
+        if raw == "max":
+            return None
+        if not raw:
+            continue
+        try:
+            limit = int(raw)
+        except ValueError:
+            continue
+        if limit >= _UNLIMITED_MEMORY_THRESHOLD:
+            return None
+        if limit > 0:
+            return limit
+    return None
+
+
+def read_physical_memory() -> int | None:
+    """Return physical RAM in bytes using only the standard library."""
+    try:
+        pages = int(os.sysconf("SC_PHYS_PAGES"))
+        page_size = int(os.sysconf("SC_PAGE_SIZE"))
+        if pages > 0 and page_size > 0:
+            return pages * page_size
+    except (AttributeError, OSError, TypeError, ValueError):
+        pass
+
+    if sys.platform == "win32":
+        try:
+            import ctypes
+
+            class MemoryStatus(ctypes.Structure):
+                _fields_ = [
+                    ("length", ctypes.c_ulong),
+                    ("memory_load", ctypes.c_ulong),
+                    ("total_physical", ctypes.c_ulonglong),
+                    ("available_physical", ctypes.c_ulonglong),
+                    ("total_page_file", ctypes.c_ulonglong),
+                    ("available_page_file", ctypes.c_ulonglong),
+                    ("total_virtual", ctypes.c_ulonglong),
+                    ("available_virtual", ctypes.c_ulonglong),
+                    ("available_extended_virtual", ctypes.c_ulonglong),
+                ]
+
+            status = MemoryStatus()
+            status.length = ctypes.sizeof(status)
+            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+                return int(status.total_physical)
+        except (AttributeError, OSError, TypeError, ValueError):
+            pass
+    return None
+
+
+def resolve_dkg_heap_mb(default_mb: int = 8192) -> int:
+    """Choose a V8 heap cap that fits both the host and its cgroup.
+
+    DKG snapshot recovery retains complete RDF phases in memory.  Node's
+    roughly 4 GiB default old-space cap is too small for the Blackbox graph,
+    while an unconditional 8 GiB cap is unsafe in a smaller container.  Use at
+    most 75% of the effective memory ceiling and never exceed ``default_mb``.
+    """
+    if default_mb <= 0:
+        raise FingerprintError("default DKG heap must be positive")
+    limits = [
+        value
+        for value in (read_cgroup_memory_limit(), read_physical_memory())
+        if value and 0 < value < _UNLIMITED_MEMORY_THRESHOLD
+    ]
+    if not limits:
+        return default_mb
+    limit_mb = min(limits) // (1024 * 1024)
+    sized = int(limit_mb * 0.75)
+    if sized <= 0:
+        raise FingerprintError("effective memory limit is too small for DKG")
+    return min(default_mb, sized)
+
+
+def merge_node_options(node_options: str, heap_mb: int) -> str:
+    """Add a DKG heap cap while preserving explicit Node options."""
+    existing = str(node_options or "").strip()
+    if _V8_HEAP_OPTION_RE.search(existing):
+        return existing
+    heap = int(heap_mb)
+    if heap <= 0:
+        raise FingerprintError("DKG heap must be positive")
+    option = f"--max-old-space-size={heap}"
+    return f"{existing} {option}".strip()
 
 
 def _add_bytes(digest: "hashlib._Hash", label: str, data: bytes) -> None:
@@ -77,6 +175,10 @@ def compute_fingerprint(
     dkg_home: Path,
     node_bin: Path,
     dkg_bin: Path,
+    store_queue_limit: str = "512",
+    list_context_graphs_projection: str = "1",
+    sync_global_max_inflight: str = "1",
+    node_options: str = "--max-old-space-size=8192",
 ) -> str:
     cli_dir = cli_dir.expanduser().resolve()
     dkg_home = dkg_home.expanduser().resolve()
@@ -98,12 +200,21 @@ def compute_fingerprint(
         raise FingerprintError("Node.js returned an empty version")
 
     digest = hashlib.sha256()
-    _add_bytes(digest, "format", b"blackbox-dkg-runtime-v1")
+    _add_bytes(digest, "format", b"blackbox-dkg-runtime-v3")
     _add_bytes(digest, "node-path", str(node_bin).encode("utf-8"))
     _add_bytes(digest, "node-version", node_version.encode("utf-8"))
-    for name, default in sorted(RUNTIME_ENV_DEFAULTS.items()):
-        value = os.environ.get(name) or default
-        _add_bytes(digest, f"env:{name}", value.encode("utf-8"))
+    _add_bytes(digest, "store-queue-limit", str(store_queue_limit).encode("utf-8"))
+    _add_bytes(
+        digest,
+        "list-context-graphs-projection",
+        str(list_context_graphs_projection).encode("utf-8"),
+    )
+    _add_bytes(
+        digest,
+        "sync-global-max-inflight",
+        str(sync_global_max_inflight).encode("utf-8"),
+    )
+    _add_bytes(digest, "node-options", str(node_options).encode("utf-8"))
     for path in _runtime_files(cli_dir, dkg_home, dkg_bin):
         _add_bytes(digest, f"file:{path.resolve()}", path.read_bytes())
     return digest.hexdigest()
@@ -197,8 +308,17 @@ def wait_for_runtime(
 def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     try:
-        if len(args) == 5 and args[0] == "compute":
-            print(compute_fingerprint(*(Path(value) for value in args[1:])))
+        if len(args) in (5, 7, 9) and args[0] == "compute":
+            paths = [Path(value) for value in args[1:5]]
+            print(compute_fingerprint(*paths, *args[5:]))
+            return 0
+        if len(args) in (1, 2) and args[0] == "heap":
+            default_mb = int(args[1]) if len(args) == 2 else 8192
+            print(resolve_dkg_heap_mb(default_mb))
+            return 0
+        if len(args) in (2, 3) and args[0] == "node-options":
+            existing = args[2] if len(args) == 3 else ""
+            print(merge_node_options(existing, int(args[1])))
             return 0
         if len(args) == 2 and args[0] == "commit":
             print(installed_commit(Path(args[1])))
@@ -216,7 +336,10 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     print(
         f"usage: {Path(sys.argv[0]).name} compute <dkg-cli-dir> <dkg-home> "
-        "<node-bin> <dkg-bin>\n"
+        "<node-bin> <dkg-bin> [<store-queue-limit> <list-context-graphs-projection> "
+        "[<sync-global-max-inflight> <node-options>]]\n"
+        f"       {Path(sys.argv[0]).name} heap [<default-mb>]\n"
+        f"       {Path(sys.argv[0]).name} node-options <heap-mb> [<existing-options>]\n"
         f"       {Path(sys.argv[0]).name} commit <dkg-cli-dir>\n"
         f"       {Path(sys.argv[0]).name} record <marker> <sha256>\n"
         f"       {Path(sys.argv[0]).name} wait <daemon-url> <expected-commit> <timeout-seconds>",

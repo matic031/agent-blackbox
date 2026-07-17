@@ -18,6 +18,19 @@ quads = load_blackbox("quads")
 cli_mod = load_blackbox("cli")
 
 
+def test_release_defaults_target_agent_blackbox_graph():
+    assert constants.DEFAULT_CONTEXT_GRAPH_ID == (
+        "0x37b1Fdfd134e2b17583bCBdD3034F91504cD9C70/agent-blackbox"
+    )
+    assert constants.DEFAULT_GRAPH_PEER_ID == (
+        "12D3KooWBJskzr2unXQG9mR3LRZFUJoxWr1PN6hTbyWyKndHXjZM"
+    )
+    assert (
+        "12D3KooWBJskzr2unXQG9mR3LRZFUJoxWr1PN6hTbyWyKndHXjZM"
+        in constants.LEGACY_GRAPH_PEER_IDS
+    )
+
+
 def test_register_wires_hooks_and_cli():
     calls = []
     cli = []
@@ -93,7 +106,7 @@ def test_blackbox_sync_require_rules_fails_empty_ruleset(monkeypatch, capsys):
 
     args = argparse.Namespace(wait=False, timeout=180, require_rules=True)
     assert cli_mod._cmd_sync(args) == 2
-    assert "Required ruleset sync failed" in capsys.readouterr().out
+    assert "Required ruleset sync is incomplete" in capsys.readouterr().out
 
 
 def test_blackbox_sync_public_graph_subscribes_without_join(monkeypatch):
@@ -130,7 +143,332 @@ def test_blackbox_sync_public_graph_subscribes_without_join(monkeypatch):
     assert join_calls == []
 
 
-def test_blackbox_sync_private_retries_join_delivery_without_resubscribing(monkeypatch):
+def test_blackbox_sync_waits_for_public_vm_when_community_arrives_first(monkeypatch, capsys):
+    refreshes = []
+    events = []
+
+    class FakeClient:
+        def __init__(self, url, **_kwargs):
+            self.url = url
+
+        def subscribe_context_graph(self, cg_id):
+            events.append(("subscribe", cg_id))
+            return {"catchup": {"jobId": "old", "status": "done"}}
+
+        def catchup_status(self, cg_id):
+            events.append(("status", cg_id))
+            return {"jobId": "old", "status": "done"}
+
+        def restart_context_graph_catchup(self, cg_id):
+            events.append(("restart", cg_id))
+
+    class FakeRuleset:
+        def __init__(self, public):
+            self.public = public
+
+        def counts(self):
+            return {
+                "injection": 0,
+                "escalation": 0,
+                "dependency": 5,
+                "fileaccess": 0,
+                "skill": 0,
+            }
+
+        def graph_count(self, source):
+            return self.public if source == "public" else 5
+
+    def fake_refresh(cfg, client):
+        refreshes.append((cfg, client))
+        return FakeRuleset(public=2 if len(refreshes) > 1 else 0)
+
+    monkeypatch.setattr(cli_mod, "DkgClient", FakeClient)
+    monkeypatch.setattr(cli_mod, "_request_join", lambda *args: ("already approved", True))
+    monkeypatch.setattr(
+        cli_mod,
+        "load_blackbox_config",
+        lambda: config_mod.BlackboxConfig(
+            context_graph_id=constants.DEFAULT_CONTEXT_GRAPH_ID,
+            dkg_url=constants.DEFAULT_DKG_URL,
+            graph_peer_id=constants.DEFAULT_GRAPH_PEER_ID,
+        ),
+    )
+    monkeypatch.setattr(cli_mod.ruleset, "refresh", fake_refresh)
+
+    args = argparse.Namespace(wait=True, timeout=30, require_rules=True)
+    assert cli_mod._cmd_sync(args) == 0
+    assert len(refreshes) == 2
+    assert events == [
+        ("status", constants.DEFAULT_CONTEXT_GRAPH_ID),
+        ("subscribe", constants.DEFAULT_CONTEXT_GRAPH_ID),
+        ("status", constants.DEFAULT_CONTEXT_GRAPH_ID),
+        ("restart", constants.DEFAULT_CONTEXT_GRAPH_ID),
+        ("status", constants.DEFAULT_CONTEXT_GRAPH_ID),
+    ]
+    assert "2 public VM, 5 community SWM" in capsys.readouterr().out
+
+
+def test_blackbox_sync_recovers_curator_snapshot_then_waits_for_vm(monkeypatch, capsys):
+    events = []
+    public_counts = iter([6_875, 6_875, 23_001])
+
+    class FakeClient:
+        def __init__(self, url, **_kwargs):
+            self.url = url
+
+        def catchup_status(self, cg_id):
+            events.append(("status", cg_id))
+            job_id = "old" if len([e for e in events if e[0] == "status"]) == 1 else "fresh"
+            return {"jobId": job_id, "status": "done"}
+
+        def subscribe_context_graph(self, cg_id):
+            events.append(("subscribe", cg_id))
+            return {"catchup": {"jobId": "fresh", "status": "done"}}
+
+        def catchup_from_peer(self, cg_id, peer_id, *, budget_ms):
+            events.append(("curator", cg_id, peer_id, budget_ms))
+            return {
+                "completed": True,
+                "replacedRoots": 18,
+                "insertedDataQuads": 244_842,
+                "insertedMetaQuads": 1_234,
+            }
+
+    class FakeRuleset:
+        def __init__(self, public):
+            self.public = public
+
+        def counts(self):
+            return {
+                "injection": 0,
+                "escalation": 0,
+                "dependency": self.public,
+                "fileaccess": 0,
+                "skill": 0,
+            }
+
+        def graph_count(self, source):
+            return self.public if source == "public" else 17_747
+
+        def graph_entries(self, source):
+            if source == "public":
+                return [{"identifier": f"dep:{i}"} for i in range(self.public)]
+            return [{"identifier": f"dep:{i}"} for i in range(5_254, 23_001)]
+
+    states = []
+    monkeypatch.setattr(cli_mod, "DkgClient", FakeClient)
+    monkeypatch.setattr(cli_mod, "_request_join", lambda *args: ("already approved", True))
+    monkeypatch.setattr(cli_mod.sync_state, "write", lambda status, **data: states.append((status, data)))
+    monkeypatch.setattr(
+        cli_mod,
+        "load_blackbox_config",
+        lambda: config_mod.BlackboxConfig(
+            context_graph_id=constants.DEFAULT_CONTEXT_GRAPH_ID,
+            dkg_url=constants.DEFAULT_DKG_URL,
+            graph_peer_id=constants.DEFAULT_GRAPH_PEER_ID,
+        ),
+    )
+    last_public = {"value": 6_875}
+
+    def refresh(_cfg, _client):
+        try:
+            last_public["value"] = next(public_counts)
+        except StopIteration:
+            pass
+        return FakeRuleset(last_public["value"])
+
+    monkeypatch.setattr(cli_mod.ruleset, "refresh", refresh)
+    monkeypatch.setattr(cli_mod.time, "sleep", lambda _seconds: None)
+
+    args = argparse.Namespace(wait=True, timeout=30, require_rules=True)
+    assert cli_mod._cmd_sync(args) == 0
+    curator_events = [event for event in events if event[0] == "curator"]
+    assert len(curator_events) == 1
+    assert states[-1][0] == "done"
+    assert states[-1][1]["public_entries"] == 23_001
+    assert states[-1][1]["expected_public_entries"] == 23_001
+    out = capsys.readouterr().out
+    assert "Recovering the complete curator snapshot needed for public VM sync" in out
+    assert "curator snapshot verified" in out
+    assert "23,001 public VM" in out
+
+
+def test_authoritative_recovery_waits_for_dkg_backpressure(monkeypatch, capsys):
+    attempts = []
+    states = []
+
+    class FakeClient:
+        def catchup_from_peer(self, cg_id, peer_id, *, budget_ms):
+            attempts.append((cg_id, peer_id, budget_ms))
+            if len(attempts) == 1:
+                raise cli_mod.DkgError(
+                    "Sync backpressure rejected swm-recovery:curator "
+                    "(global inflight=1/1, queued=2/2)"
+                )
+            return {"completed": True, "replacedRoots": 4}
+
+    monkeypatch.setattr(cli_mod.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        cli_mod.sync_state,
+        "write",
+        lambda status, **details: states.append((status, details)) or details,
+    )
+
+    assert cli_mod._catchup_authoritative_vm(
+        FakeClient(),
+        "owner/private",
+        "curator",
+        cli_mod.time.monotonic() + 60,
+    )
+    assert len(attempts) == 2
+    assert any(
+        status == "running" and details.get("phase") == "waiting-for-dkg-capacity"
+        for status, details in states
+    )
+    assert not any(status == "failed" for status, _details in states)
+    assert "waiting for safe recovery capacity" in capsys.readouterr().out
+
+
+def test_blackbox_sync_does_not_accept_stale_public_rows_after_fresh_catchup_failure(
+    monkeypatch, capsys
+):
+    statuses = iter([
+        {"jobId": "old", "status": "done"},
+        {"jobId": "old", "status": "done"},
+        {"jobId": "fresh", "status": "failed", "error": "protocol negotiation failed"},
+    ])
+
+    class FakeClient:
+        def __init__(self, url, **_kwargs):
+            self.url = url
+
+        def subscribe_context_graph(self, cg_id):
+            return {"catchup": {"jobId": "old", "status": "done"}}
+
+        def catchup_status(self, cg_id):
+            return next(statuses)
+
+        def restart_context_graph_catchup(self, cg_id):
+            return {"catchup": {"status": "queued"}}
+
+    class FakeRuleset:
+        def counts(self):
+            return {
+                "injection": 0,
+                "escalation": 0,
+                "dependency": 2,
+                "fileaccess": 0,
+                "skill": 0,
+            }
+
+        def graph_count(self, source):
+            return 2 if source == "public" else 0
+
+    monkeypatch.setattr(cli_mod, "DkgClient", FakeClient)
+    monkeypatch.setattr(cli_mod, "_request_join", lambda *args: ("already approved", True))
+    monkeypatch.setattr(
+        cli_mod,
+        "load_blackbox_config",
+        lambda: config_mod.BlackboxConfig(
+            context_graph_id=constants.DEFAULT_CONTEXT_GRAPH_ID,
+            dkg_url=constants.DEFAULT_DKG_URL,
+            graph_peer_id=constants.DEFAULT_GRAPH_PEER_ID,
+        ),
+    )
+    monkeypatch.setattr(cli_mod.ruleset, "refresh", lambda cfg, client: FakeRuleset())
+
+    args = argparse.Namespace(wait=True, timeout=30, require_rules=True)
+    assert cli_mod._cmd_sync(args) == 2
+    out = capsys.readouterr().out
+    assert "2 public VM" in out
+    assert "Fresh DKG catch-up failed: protocol negotiation failed" in out
+
+
+def test_blackbox_sync_uses_curator_when_generic_catchup_peer_fails(monkeypatch, capsys):
+    public_counts = iter([2, 3])
+    events = []
+
+    class FakeClient:
+        def __init__(self, url, **_kwargs):
+            self.url = url
+
+        def subscribe_context_graph(self, cg_id):
+            return {"catchup": {"jobId": "fresh", "status": "queued"}}
+
+        def catchup_status(self, cg_id):
+            return {
+                "jobId": "fresh",
+                "status": "failed",
+                "error": "legacy peer protocol negotiation failed",
+            }
+
+        def catchup_from_peer(self, cg_id, peer_id, *, budget_ms):
+            events.append((cg_id, peer_id, budget_ms))
+            return {"completed": True, "replacedRoots": 1}
+
+    class FakeRuleset:
+        def __init__(self, public):
+            self.public = public
+
+        def counts(self):
+            return {
+                "injection": 0,
+                "escalation": 0,
+                "dependency": self.public,
+                "fileaccess": 0,
+                "skill": 0,
+            }
+
+        def graph_count(self, source):
+            return self.public if source == "public" else 1
+
+        def graph_entries(self, source):
+            if source == "public":
+                return [{"identifier": f"dep:{index}"} for index in range(self.public)]
+            return [{"identifier": "dep:2"}]
+
+    monkeypatch.setattr(cli_mod, "DkgClient", FakeClient)
+    monkeypatch.setattr(cli_mod, "_request_join", lambda *args: ("already approved", True))
+    monkeypatch.setattr(
+        cli_mod,
+        "load_blackbox_config",
+        lambda: config_mod.BlackboxConfig(
+            context_graph_id=constants.DEFAULT_CONTEXT_GRAPH_ID,
+            dkg_url=constants.DEFAULT_DKG_URL,
+            graph_peer_id=constants.DEFAULT_GRAPH_PEER_ID,
+        ),
+    )
+    last_public = {"value": 2}
+
+    def refresh(_cfg, _client):
+        try:
+            last_public["value"] = next(public_counts)
+        except StopIteration:
+            pass
+        return FakeRuleset(last_public["value"])
+
+    monkeypatch.setattr(cli_mod.ruleset, "refresh", refresh)
+
+    args = argparse.Namespace(wait=True, timeout=30, require_rules=True)
+    assert cli_mod._cmd_sync(args) == 0
+    assert len(events) == 1
+    assert "curator snapshot verified" in capsys.readouterr().out
+
+
+def test_blackbox_request_join_does_not_treat_delivery_as_approval():
+    class FakeClient:
+        def request_join(self, cg_id, graph_peer_id):
+            assert cg_id == "cg"
+            assert graph_peer_id == "peer"
+            return {"delivered": "local"}
+
+    message, delivered = cli_mod._request_join(FakeClient(), "cg", "peer")
+
+    assert delivered is False
+    assert "delivered to 1 curator host" in message
+
+
+def test_blackbox_sync_private_waits_for_approval_then_subscribes(monkeypatch):
     join_calls = []
     refresh_calls = []
     subscribe_calls = []
@@ -140,8 +478,20 @@ def test_blackbox_sync_private_retries_join_delivery_without_resubscribing(monke
         def __init__(self, url, **_kwargs):
             self.url = url
 
+        def agent_identity(self):
+            return {"agentAddress": "0xabc"}
+
+        def context_graph_has_agent(self, cg_id, agent_address):
+            raise AssertionError("local participant state must not authorize private catch-up")
+
         def subscribe_context_graph(self, cg_id):
+            assert len(join_calls) >= 2, "must not subscribe before a join reaches the curator"
             subscribe_calls.append(cg_id)
+            if len(subscribe_calls) < 3:
+                raise cli_mod.DkgError("POST /api/context-graph/subscribe -> 403: approval required")
+
+        def catchup_status(self, cg_id):
+            return {"status": "running"}
 
     class FakeRuleset:
         def counts(self):
@@ -155,8 +505,7 @@ def test_blackbox_sync_private_retries_join_delivery_without_resubscribing(monke
 
     def fake_join(*args, **kwargs):
         join_calls.append((args, kwargs))
-        delivered = len(join_calls) >= 2
-        return ("join attempted", delivered)
+        return ("join delivered; approval pending", len(join_calls) >= 2)
 
     def fake_refresh(cfg, client):
         refresh_calls.append((cfg, client))
@@ -176,7 +525,7 @@ def test_blackbox_sync_private_retries_join_delivery_without_resubscribing(monke
         lambda: config_mod.BlackboxConfig(
             context_graph_id=constants.DEFAULT_CONTEXT_GRAPH_ID,
             dkg_url=constants.DEFAULT_DKG_URL,
-            curator_peer_id=constants.DEFAULT_CURATOR_PEER_ID,
+            graph_peer_id=constants.DEFAULT_GRAPH_PEER_ID,
         ),
     )
     monkeypatch.setattr(cli_mod.time, "monotonic", lambda: clock[0])
@@ -187,7 +536,187 @@ def test_blackbox_sync_private_retries_join_delivery_without_resubscribing(monke
     assert cli_mod._cmd_sync(args) == 0
     assert len(join_calls) == 2
     assert len(refresh_calls) == 4
-    assert subscribe_calls == []
+    assert len(subscribe_calls) == 3
+
+
+def test_blackbox_sync_restarts_stale_empty_catchup_after_approval(monkeypatch, capsys):
+    events = []
+
+    class FakeClient:
+        def __init__(self, url, **_kwargs):
+            self.url = url
+
+        def agent_identity(self):
+            return {"agentAddress": "0xabc"}
+
+        def request_join(self, cg_id, graph_peer_id):
+            events.append(("join", cg_id, graph_peer_id))
+            return {"alreadyMember": True}
+
+        def subscribe_context_graph(self, cg_id):
+            events.append(("subscribe", cg_id))
+            return {"catchup": {"jobId": "old", "status": "done"}}
+
+        def catchup_status(self, cg_id):
+            events.append(("status", cg_id))
+            return {"jobId": "old", "status": "done"}
+
+        def restart_context_graph_catchup(self, cg_id):
+            events.append(("restart", cg_id))
+            return {"catchup": {"status": "queued"}}
+
+    class FakeRuleset:
+        def counts(self):
+            return {
+                "injection": 0,
+                "escalation": 0,
+                "dependency": 0,
+                "fileaccess": 0,
+                "skill": 0,
+                "ioc": 0,
+            }
+
+    monkeypatch.setattr(cli_mod, "DkgClient", FakeClient)
+    monkeypatch.setattr(
+        cli_mod,
+        "load_blackbox_config",
+        lambda: config_mod.BlackboxConfig(
+            context_graph_id=constants.DEFAULT_CONTEXT_GRAPH_ID,
+            dkg_url=constants.DEFAULT_DKG_URL,
+            graph_peer_id=constants.DEFAULT_GRAPH_PEER_ID,
+        ),
+    )
+    monkeypatch.setattr(cli_mod.ruleset, "refresh", lambda cfg, client: FakeRuleset())
+
+    args = argparse.Namespace(wait=False, timeout=180, require_rules=True)
+    assert cli_mod._cmd_sync(args) == 2
+    assert events == [
+        ("status", constants.DEFAULT_CONTEXT_GRAPH_ID),
+        ("join", constants.DEFAULT_CONTEXT_GRAPH_ID, constants.DEFAULT_GRAPH_PEER_ID),
+        ("subscribe", constants.DEFAULT_CONTEXT_GRAPH_ID),
+        ("status", constants.DEFAULT_CONTEXT_GRAPH_ID),
+        ("restart", constants.DEFAULT_CONTEXT_GRAPH_ID),
+    ]
+    assert "Restarted DKG catch-up after approval" in capsys.readouterr().out
+
+
+def test_blackbox_sync_waits_for_fresh_dkg_catchup_without_restarting(monkeypatch):
+    events = []
+    statuses = iter([
+        {"jobId": "old", "status": "done"},
+        {"jobId": "fresh", "status": "running"},
+        {"jobId": "fresh", "status": "done"},
+    ])
+    refreshes = []
+
+    class FakeClient:
+        def __init__(self, url, **_kwargs):
+            self.url = url
+
+        def subscribe_context_graph(self, cg_id):
+            events.append(("subscribe", cg_id))
+            return {"catchup": {"jobId": "fresh", "status": "running"}}
+
+        def catchup_status(self, cg_id):
+            events.append(("status", cg_id))
+            return next(statuses)
+
+        def restart_context_graph_catchup(self, cg_id):
+            events.append(("restart", cg_id))
+
+    class FakeRuleset:
+        def __init__(self, public):
+            self.public = public
+
+        def counts(self):
+            return {
+                "injection": 0,
+                "escalation": 0,
+                "dependency": self.public,
+                "fileaccess": 0,
+                "skill": 0,
+            }
+
+        def graph_count(self, source):
+            return self.public if source == "public" else 0
+
+    def fake_refresh(cfg, client):
+        refreshes.append((cfg, client))
+        return FakeRuleset(public=2 if len(refreshes) > 1 else 0)
+
+    monkeypatch.setattr(cli_mod, "DkgClient", FakeClient)
+    monkeypatch.setattr(cli_mod, "_request_join", lambda *args: ("already approved", True))
+    monkeypatch.setattr(
+        cli_mod,
+        "load_blackbox_config",
+        lambda: config_mod.BlackboxConfig(
+            context_graph_id=constants.DEFAULT_CONTEXT_GRAPH_ID,
+            dkg_url=constants.DEFAULT_DKG_URL,
+            graph_peer_id=constants.DEFAULT_GRAPH_PEER_ID,
+        ),
+    )
+    monkeypatch.setattr(cli_mod.ruleset, "refresh", fake_refresh)
+    monkeypatch.setattr(cli_mod.time, "sleep", lambda _seconds: None)
+
+    args = argparse.Namespace(wait=True, timeout=30, require_rules=True)
+    assert cli_mod._cmd_sync(args) == 0
+    assert ("restart", constants.DEFAULT_CONTEXT_GRAPH_ID) not in events
+
+
+def test_blackbox_sync_reports_pending_approval_when_catchup_is_denied(monkeypatch, capsys):
+    class FakeClient:
+        def __init__(self, url, **_kwargs):
+            self.url = url
+
+        def agent_identity(self):
+            return {"agentAddress": "0xfresh"}
+
+        def subscribe_context_graph(self, cg_id):
+            return {"catchup": {"status": "running"}}
+
+        def catchup_status(self, cg_id):
+            return {
+                "status": "denied",
+                "result": {"denied": True},
+                "error": "Shared memory query denied for unauthorized or unconfirmed context graph",
+            }
+
+    class FakeRuleset:
+        def counts(self):
+            return {
+                "injection": 0,
+                "escalation": 0,
+                "dependency": 0,
+                "fileaccess": 0,
+                "skill": 0,
+            }
+
+    monkeypatch.setattr(cli_mod, "DkgClient", FakeClient)
+    monkeypatch.setattr(
+        cli_mod,
+        "load_blackbox_config",
+        lambda: config_mod.BlackboxConfig(
+            context_graph_id=constants.DEFAULT_CONTEXT_GRAPH_ID,
+            dkg_url=constants.DEFAULT_DKG_URL,
+            graph_peer_id=constants.DEFAULT_GRAPH_PEER_ID,
+        ),
+    )
+    monkeypatch.setattr(
+        cli_mod,
+        "_request_join",
+        lambda *args, **kwargs: ("Join request sent; approval is pending.", False),
+    )
+    monkeypatch.setattr(cli_mod.ruleset, "refresh", lambda cfg, client: FakeRuleset())
+
+    args = argparse.Namespace(wait=False, timeout=180, require_rules=True)
+    assert cli_mod._cmd_sync(args) == 2
+    out = capsys.readouterr().out
+    assert "Requested subscription to" in out
+    assert "verifying private-graph catch-up authorization" in out
+    assert "Subscribed to" not in out
+    assert "Pending curator approval" in out
+    assert "Ask the curator to approve agent address: 0xfresh" in out
+    assert "DKG catch-up is denied until the curator confirms this node." in out
 
 
 def test_blackbox_chat_wraps_bare_prompt(monkeypatch):
@@ -195,7 +724,7 @@ def test_blackbox_chat_wraps_bare_prompt(monkeypatch):
     assert cli_mod._blackbox_chat_argv(["who", "are", "you?"]) == [
         "hermes",
         "--profile",
-        "blackbox",
+        "guardian",
         "chat",
         "--query",
         "who are you?",
@@ -203,14 +732,14 @@ def test_blackbox_chat_wraps_bare_prompt(monkeypatch):
     assert cli_mod._blackbox_chat_argv(["--tui"]) == [
         "hermes",
         "--profile",
-        "blackbox",
+        "guardian",
         "chat",
         "--tui",
     ]
 
 
 def test_blackbox_chat_profile_writes_identity_and_attaches(tmp_path, monkeypatch):
-    profile_dir = tmp_path / "blackbox"
+    profile_dir = tmp_path / "guardian"
     calls = []
 
     monkeypatch.setattr(cli_mod.attach, "attach_hermes", lambda path: calls.append(path))
@@ -227,7 +756,7 @@ def test_blackbox_chat_profile_writes_identity_and_attaches(tmp_path, monkeypatc
     monkeypatch.setattr(profiles, "create_profile", fake_create_profile)
     monkeypatch.setattr(profiles, "get_profile_dir", lambda name: profile_dir)
 
-    assert cli_mod._ensure_blackbox_chat_profile() == "blackbox"
+    assert cli_mod._ensure_blackbox_chat_profile() == "guardian"
     soul = (profile_dir / "SOUL.md").read_text(encoding="utf-8")
     assert "You are Blackbox" in soul
     assert "connected agents" in soul
@@ -338,16 +867,6 @@ def test_vulnerability_kind_never_blocks(monkeypatch):
     assert out is None
 
 
-def test_kind_round_trips_through_quads(monkeypatch):
-    q = quads.build_threat_quads(
-        category="dependency", identifier="dep:npm:evil-pkg@1.0.0", severity="critical",
-        name="evil-pkg", description="", kind="malware",
-        ecosystem="npm", package_name="evil-pkg", package_version="1.0.0",
-    )
-    kind_pred = load_blackbox("constants").KIND_PRED
-    assert any(t.get("predicate") == kind_pred and "malware" in str(t.get("object")) for t in q)
-
-
 def test_pre_tool_call_fails_open_on_error(monkeypatch):
     def boom(cfg=None):
         raise RuntimeError("kaboom")
@@ -428,7 +947,7 @@ def test_pre_tool_call_records_file_access_visibility(monkeypatch):
 
 def test_share_sighting_forwards_candidate_fields(monkeypatch):
     # A candidate finding's privacy-safe fields must reach build_report_quads so
-    # a curator can promote it — and nothing more (no raw content) is carried.
+    # it can be reviewed — and nothing more (no raw content) is carried.
     shared = {}
 
     class FakeClient:

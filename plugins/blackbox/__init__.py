@@ -1,6 +1,6 @@
 """Agent Blackbox — graph-driven agent security for Hermes.
 
-Blackbox syncs a threat ruleset from the local OriginTrail DKG node (curated
+Blackbox syncs a threat ruleset from the local OriginTrail DKG node (verified
 threats from the public graph + the node's local graph) and matches every tool
 call and model request against it. In audit mode (default) it records findings
 and shares anonymized sightings; in block mode it refuses tool calls that match

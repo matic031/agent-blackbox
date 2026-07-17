@@ -7,6 +7,7 @@ import json
 import os
 import sys
 import threading
+from unittest import mock
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -59,7 +60,7 @@ def _make_runtime(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
     return cli_dir, dkg_home, node_bin, dkg_bin
 
 
-def test_fingerprint_is_stable_and_tracks_runtime_inputs(tmp_path, monkeypatch):
+def test_fingerprint_is_stable_and_tracks_runtime_inputs(tmp_path):
     runtime = _make_runtime(tmp_path)
     first = FINGERPRINTER.compute_fingerprint(*runtime)
     second = FINGERPRINTER.compute_fingerprint(*runtime)
@@ -72,10 +73,71 @@ def test_fingerprint_is_stable_and_tracks_runtime_inputs(tmp_path, monkeypatch):
     config_changed = FINGERPRINTER.compute_fingerprint(*runtime)
     assert config_changed != first
 
-    monkeypatch.setenv("DKG_SYNC_TOTAL_TIMEOUT_MS", "2400000")
-    environment_changed = FINGERPRINTER.compute_fingerprint(*runtime)
-    assert environment_changed != config_changed
+    queue_changed = FINGERPRINTER.compute_fingerprint(*runtime, "1024", "1")
+    assert queue_changed != config_changed
 
+    concurrent_sync = FINGERPRINTER.compute_fingerprint(
+        *runtime,
+        "1024",
+        "1",
+        "2",
+        "--max-old-space-size=8192",
+    )
+    assert concurrent_sync != queue_changed
+
+    heap_changed = FINGERPRINTER.compute_fingerprint(
+        *runtime,
+        "1024",
+        "1",
+        "1",
+        "--max-old-space-size=6144",
+    )
+    assert heap_changed != concurrent_sync
+
+
+def test_fingerprint_forces_restart_when_store_backend_changes(tmp_path):
+    runtime = _make_runtime(tmp_path)
+    config = runtime[1] / "config.json"
+
+    config.write_text(
+        '{"store":{"backend":"blazegraph","options":{"url":"http://store"}}}\n',
+        encoding="utf-8",
+    )
+    blazegraph = FINGERPRINTER.compute_fingerprint(*runtime)
+    config.write_text(
+        '{"store":{"backend":"oxigraph-server"}}\n',
+        encoding="utf-8",
+    )
+    oxigraph = FINGERPRINTER.compute_fingerprint(*runtime)
+
+    assert blazegraph != oxigraph
+
+
+def test_dkg_heap_uses_smallest_host_or_cgroup_limit():
+    gb = 1024**3
+    with (
+        mock.patch.object(FINGERPRINTER, "read_cgroup_memory_limit", return_value=4 * gb),
+        mock.patch.object(FINGERPRINTER, "read_physical_memory", return_value=48 * gb),
+    ):
+        assert FINGERPRINTER.resolve_dkg_heap_mb() == 3072
+
+    with (
+        mock.patch.object(FINGERPRINTER, "read_cgroup_memory_limit", return_value=None),
+        mock.patch.object(FINGERPRINTER, "read_physical_memory", return_value=48 * gb),
+    ):
+        assert FINGERPRINTER.resolve_dkg_heap_mb() == 8192
+
+
+def test_node_options_merge_preserves_flags_and_explicit_heap():
+    assert FINGERPRINTER.merge_node_options("--enable-source-maps", 8192) == (
+        "--enable-source-maps --max-old-space-size=8192"
+    )
+    assert FINGERPRINTER.merge_node_options("--max-old-space-size=12288", 8192) == (
+        "--max-old-space-size=12288"
+    )
+    assert FINGERPRINTER.merge_node_options("--max_old_space_size 6144", 8192) == (
+        "--max_old_space_size 6144"
+    )
 
 def test_interrupted_restart_stays_stale_across_next_invocation(tmp_path):
     runtime = _make_runtime(tmp_path)
@@ -108,6 +170,24 @@ def test_cli_compute_and_atomic_record(tmp_path, capsys):
 
     assert FINGERPRINTER.main(["record", str(marker), fingerprint]) == 0
     assert marker.read_text(encoding="utf-8") == fingerprint + "\n"
+
+
+def test_cli_heap_reports_resolved_limit(capsys):
+    with (
+        mock.patch.object(FINGERPRINTER, "read_cgroup_memory_limit", return_value=None),
+        mock.patch.object(FINGERPRINTER, "read_physical_memory", return_value=None),
+    ):
+        assert FINGERPRINTER.main(["heap", "6144"]) == 0
+    assert capsys.readouterr().out.strip() == "6144"
+
+
+def test_cli_node_options_preserves_an_explicit_heap(capsys):
+    assert FINGERPRINTER.main(
+        ["node-options", "8192", "--enable-source-maps --max-old-space-size=12288"]
+    ) == 0
+    assert capsys.readouterr().out.strip() == (
+        "--enable-source-maps --max-old-space-size=12288"
+    )
 
 
 def test_installed_commit_reads_published_npm_build_metadata(tmp_path, capsys):

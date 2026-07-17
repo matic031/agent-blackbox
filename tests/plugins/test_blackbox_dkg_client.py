@@ -151,15 +151,6 @@ def test_share_rejects_oversized_literal_before_http(monkeypatch):
         client.share_knowledge_asset("cg", "notes", rows)
 
 
-def test_register_context_graph_sends_policies(monkeypatch):
-    cap = _capture(monkeypatch)
-    client = dkg_client.DkgClient(url="http://node", token=None)
-    client.register_context_graph("cg", access_policy=0, publish_policy=0)
-    body = json.loads(cap["body"])
-    assert body == {"id": "cg", "accessPolicy": 0, "publishPolicy": 0}
-    assert cap["url"].endswith("/api/context-graph/register")
-
-
 def test_catchup_status_encodes_context_graph_id(monkeypatch):
     cap = _capture(monkeypatch, '{"status":"running"}')
     client = dkg_client.DkgClient(url="http://node", token="tok")
@@ -174,34 +165,108 @@ def test_catchup_status_encodes_context_graph_id(monkeypatch):
     )
 
 
-def test_create_context_graph_can_seed_allowed_agents(monkeypatch):
-    cap = _capture(monkeypatch)
-    client = dkg_client.DkgClient(url="http://node", token=None)
-    client.create_context_graph(
-        "cg",
-        "Threat Graph",
-        description="desc",
-        access_policy=1,
-        allowed_agents=["0x0000000000000000000000000000000000000001"],
+def test_authoritative_catchup_pins_curator_for_atomic_swm_recovery(monkeypatch):
+    cap = _capture(monkeypatch, '{"completed":true,"replacedRoots":23}')
+    client = dkg_client.DkgClient(url="http://node", token="tok")
+
+    result = client.catchup_from_peer("owner/private", "curator-peer", budget_ms=9_999_999)
+
+    assert result == {"completed": True, "replacedRoots": 23}
+    assert cap["method"] == "POST"
+    assert cap["url"] == "http://node/api/context-graph/recover-shared-memory"
+    assert json.loads(cap["body"]) == {
+        "contextGraphId": "owner/private",
+        "remotePeerId": "curator-peer",
+    }
+    assert cap["timeout"] == 3610
+
+
+def test_context_graph_has_agent_uses_local_participants_metadata(monkeypatch):
+    cap = _capture(
+        monkeypatch,
+        '{"allowedAgents":["0xAbC0000000000000000000000000000000000000"]}',
     )
-    body = json.loads(cap["body"])
-    assert body == {
-        "id": "cg",
-        "name": "Threat Graph",
-        "description": "desc",
-        "accessPolicy": 1,
-        "allowedAgents": ["0x0000000000000000000000000000000000000001"],
+    client = dkg_client.DkgClient(url="http://node", token="tok")
+
+    assert client.context_graph_has_agent(
+        "owner/private graph",
+        "0xabc0000000000000000000000000000000000000",
+    ) is True
+    assert cap["url"] == (
+        "http://node/api/context-graph/owner%2Fprivate%20graph/participants"
+    )
+
+
+def test_request_join_publishes_encryption_profile_before_signing(monkeypatch):
+    cap = _capture_sequence(
+        monkeypatch,
+        [
+            '{"ok":true}',
+            '{"delegation":{"agentAddress":"0xabc","signature":"sig"}}',
+            '{"delivered":1}',
+        ],
+    )
+    client = dkg_client.DkgClient(url="http://node", token="tok")
+
+    result = client.request_join("owner/private graph", "curator-peer")
+
+    assert result == {"delivered": 1}
+    assert [call["url"] for call in cap["calls"]] == [
+        "http://node/api/agent/publish-profile",
+        "http://node/api/context-graph/owner%2Fprivate%20graph/sign-join",
+        "http://node/api/context-graph/owner%2Fprivate%20graph/request-join",
+    ]
+    assert json.loads(cap["calls"][0]["body"]) == {}
+    assert json.loads(cap["calls"][2]["body"]) == {
+        "delegation": {"agentAddress": "0xabc", "signature": "sig"},
+        "curatorPeerId": "curator-peer",
+        "agentName": "agent-blackbox",
     }
 
 
-def test_publish_payload(monkeypatch):
-    cap = _capture(monkeypatch, body='{"ual":"did:dkg:1/2/3","txHash":"0xabc"}')
-    client = dkg_client.DkgClient(url="http://node", token="t")
-    out = client.publish("cg", "threat-x", epochs=3)
-    assert out["ual"] == "did:dkg:1/2/3"
-    assert cap["url"].endswith("/api/knowledge-assets/threat-x/vm/publish-async")
-    body = json.loads(cap["body"])
-    assert body["options"]["publishEpochs"] == 3
+def test_request_join_tolerates_older_daemon_without_profile_endpoint(monkeypatch, caplog):
+    calls = []
+
+    def fake_urlopen(req, timeout=None):
+        calls.append(req.full_url)
+        if req.full_url.endswith("/api/agent/publish-profile"):
+            raise urllib.error.HTTPError(
+                req.full_url,
+                404,
+                "not found",
+                {},
+                io.BytesIO(b'{"error":"not found"}'),
+            )
+        if req.full_url.endswith("/sign-join"):
+            return _FakeResponse('{"delegation":{"agentAddress":"0xabc"}}')
+        return _FakeResponse('{"delivered":1}')
+
+    monkeypatch.setattr(dkg_client.urllib.request, "urlopen", fake_urlopen)
+    client = dkg_client.DkgClient(url="http://node", token="tok")
+
+    assert client.request_join("cg", "peer") == {"delivered": 1}
+    assert len(calls) == 3
+    assert "Could not publish DKG agent profile before join" in caplog.text
+
+
+def test_restart_context_graph_catchup_uses_official_unsubscribe_then_subscribe(monkeypatch):
+    cap = _capture_sequence(
+        monkeypatch,
+        ['{"unsubscribed":"cg"}', '{"catchup":{"status":"queued"}}'],
+    )
+    client = dkg_client.DkgClient(url="http://node", token="tok")
+
+    result = client.restart_context_graph_catchup("cg")
+
+    assert result == {"catchup": {"status": "queued"}}
+    assert [call["url"] for call in cap["calls"]] == [
+        "http://node/api/context-graph/unsubscribe",
+        "http://node/api/context-graph/subscribe",
+    ]
+    assert [json.loads(call["body"]) for call in cap["calls"]] == [
+        {"contextGraphId": "cg"},
+        {"contextGraphId": "cg", "includeSharedMemory": True},
+    ]
 
 
 def test_query_normalizes_bindings(monkeypatch):
@@ -210,6 +275,25 @@ def test_query_normalizes_bindings(monkeypatch):
     client = dkg_client.DkgClient(url="http://node", token="t")
     rows = client.query("SELECT * WHERE {?s ?p ?o}", "cg")
     assert rows == [{"identifier": '"dep:npm:x@1"'}]
+
+
+def test_working_memory_query_sends_agent_address(monkeypatch):
+    cap = _capture(monkeypatch, '{"bindings": []}')
+    client = dkg_client.DkgClient(url="http://node", token="t")
+
+    client.query(
+        "SELECT * WHERE {?s ?p ?o}",
+        "cg",
+        view="working-memory",
+        agent_address="0xabc",
+    )
+
+    assert json.loads(cap["body"]) == {
+        "sparql": "SELECT * WHERE {?s ?p ?o}",
+        "contextGraphId": "cg",
+        "view": "working-memory",
+        "agentAddress": "0xabc",
+    }
 
 
 def test_query_fails_open_on_http_error(monkeypatch):
@@ -274,28 +358,6 @@ def test_share_repairs_wm_merkle_conflict(monkeypatch):
     }
 
 
-def test_register_context_graph_uses_long_timeout(monkeypatch):
-    # Register is on-chain and must not use the 3s read timeout.
-    seen = {}
-
-    def capture(req, timeout=None):
-        seen["timeout"] = timeout
-        return _FakeResponse('{"ok":true}')
-
-    monkeypatch.setattr(dkg_client.urllib.request, "urlopen", capture)
-    client = dkg_client.DkgClient(url="http://node", token="t")
-    client.register_context_graph("cg", 0, 0)
-    assert seen["timeout"] == dkg_client._ONCHAIN_TIMEOUT
-
-
-def test_publish_async_queues_with_store_timeout(monkeypatch):
-    cap = _capture(monkeypatch, body='{"jobId":"job-1"}')
-    client = dkg_client.DkgClient(url="http://node", token="t")
-    client.publish_async("cg", "n")
-    assert cap["url"].endswith("/api/knowledge-assets/n/vm/publish-async")
-    assert cap["timeout"] == dkg_client._STORE_TIMEOUT
-
-
 def test_share_async_wait_raises_failed_job(monkeypatch):
     _capture_sequence(
         monkeypatch,
@@ -320,64 +382,3 @@ def test_extract_binding_shapes():
 def test_normalize_bindings_nested_shape():
     result = {"results": {"bindings": [{"n": {"value": "3"}}]}}
     assert dkg_client.normalize_bindings(result) == [{"n": {"value": "3"}}]
-
-
-def test_chain_info_parses_base_mainnet(monkeypatch):
-    # /api/status reports the chain as a "base:8453" string on some builds.
-    _capture(monkeypatch, body='{"chainId":"base:8453","networkName":"DKG V10 Base Mainnet"}')
-    client = dkg_client.DkgClient(url="http://node", token="t")
-    info = client.chain_info()
-    assert info["chain_id"] == 8453
-    assert info["is_mainnet"] is True
-    assert info["is_testnet"] is False
-
-
-def test_chain_info_flags_testnet(monkeypatch):
-    _capture(monkeypatch, body='{"chainId":"base:84532","networkName":"Base Sepolia"}')
-    client = dkg_client.DkgClient(url="http://node", token="t")
-    info = client.chain_info()
-    assert info["chain_id"] == 84532
-    assert info["is_testnet"] is True
-    assert info["is_mainnet"] is False
-
-
-def test_chain_info_gnosis_is_mainnet_but_not_base(monkeypatch):
-    # Nested chain object with an int id; Gnosis is a valid mainnet, not Base.
-    _capture(monkeypatch, body='{"chain":{"chainId":100,"name":"gnosis"}}')
-    client = dkg_client.DkgClient(url="http://node", token="t")
-    info = client.chain_info()
-    assert info["chain_id"] == 100
-    assert info["is_mainnet"] is True
-    assert info["chain_id"] != dkg_client.constants.DEFAULT_DKG_CHAIN_ID
-
-
-def test_chain_info_unparseable_returns_none(monkeypatch):
-    # An unrecognized status shape must not falsely claim mainnet/testnet.
-    _capture(monkeypatch, body='{"foo":"bar"}')
-    client = dkg_client.DkgClient(url="http://node", token="t")
-    info = client.chain_info()
-    assert info["chain_id"] is None
-    assert info["is_mainnet"] is None
-    assert info["is_testnet"] is None
-
-
-def test_publish_idempotent_on_already_published(monkeypatch):
-    # Re-publishing an already-minted KA (lost ledger / post-timeout confirm) is a
-    # no-op success, never a paid retry or hard error.
-    body = b'{"error":"knowledge asset is already published on chain"}'
-
-    def raise_pub(req, timeout=None):
-        raise urllib.error.HTTPError(req.full_url, 409, "err", {}, io.BytesIO(body))
-
-    monkeypatch.setattr(dkg_client.urllib.request, "urlopen", raise_pub)
-    client = dkg_client.DkgClient(url="http://node", token="t")
-    assert client.publish("cg", "threat-x").get("idempotent") is True
-
-
-def test_publish_raises_on_context_graph_bind_failure(monkeypatch):
-    # HTTP 207: minted (UAL valid) but CG binding failed — must surface as an
-    # error, or the caller would ledger a threat that isn't queryable in the graph.
-    _capture(monkeypatch, body='{"ual":"did:dkg:8453/0xabc/1","contextGraphError":"binding timed out"}')
-    client = dkg_client.DkgClient(url="http://node", token="t")
-    with pytest.raises(dkg_client.DkgError):
-        client.publish("cg", "threat-x")

@@ -6,11 +6,8 @@ This is the single source of truth for:
   two independent nodes compute identically so they converge on the same
   Threat knowledge asset.
 * **arg-shape normalization** — the deterministic ``normalize_arg_shape``
-  heuristic that turns a tool call into an escalation signature. Detection
-  (matching observed calls) and the CLI (authoring curated escalation threats)
-  both import it from here, so client and curator shapes always agree.
-* **N-Triples term escaping** and the quad builders
-  (:func:`build_threat_quads`, :func:`build_report_quads`).
+  heuristic that turns a tool call into an escalation signature.
+* **N-Triples term escaping** and the report quad builder.
 
 The identifier scheme and ontology are kept byte-for-byte compatible with the
 original TypeScript ``node-ui`` builders.
@@ -95,7 +92,7 @@ def canonical_package_name(ecosystem: str, name: str) -> str:
 def dependency_key(ecosystem: str, name: str, version: str) -> str:
     """The ruleset lookup key ``{ecosystem}:{canonical-name}@{version}``.
 
-    Shared by the detector and the ruleset builder so a seeded id and a live
+    Shared by the detector and the ruleset builder so a graph id and a live
     lookup are byte-identical for any spelling of the same package.
     """
     return f"{ecosystem.strip().lower()}:{canonical_package_name(ecosystem, name)}@{version.strip()}"
@@ -117,7 +114,7 @@ def escalation_identifier(tool_name: str, arg_shape: str) -> str:
     The shape is kept literal (not hashed) so the id is legible, e.g.
     ``escalation:shell:remote-script-pipe``. The detector emits lowercase
     hyphenated slugs, so both tool and shape are lowercased here — a
-    curator-authored rule that differs only in case still matches.
+    graph rule that differs only in case still matches.
     """
     return f"escalation:{tool_name.strip().lower()}:{arg_shape.strip().lower()}"
 
@@ -154,7 +151,7 @@ _EVM_ADDR_RE = re.compile(r"0x[a-fA-F0-9]{40}")
 
 
 def normalize_ioc_value(ioc_type: str, value: str) -> str:
-    """Canonicalize an IOC value so a seeded id and a live match are identical.
+    """Canonicalize an IOC value so a graph id and a live match are identical.
 
     Domains/URLs/IPs/EVM-addresses/hashes lower-case (the network + EVM name
     spaces are case-insensitive); base58 crypto addresses (BTC/Solana) are
@@ -190,7 +187,7 @@ def ioc_identifier(ioc_type: str, value: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Arg-shape normalization (shared by detection + curator)
+# Arg-shape normalization
 # ---------------------------------------------------------------------------
 
 # A remote-download-piped-to-interpreter shape: `curl ... | sh`, `wget ... | bash`.
@@ -260,7 +257,7 @@ _SHELL_SHAPE_RULES = (
 # auto-nominates as heuristic candidates. `remote-script-pipe` (`curl … | bash`)
 # is the canonical install idiom for rustup, nvm, Homebrew, oh-my-zsh, etc., so
 # firing + reporting on the shape alone would flag routine agent behaviour and
-# flood the community graph. A curator can still curate a known-bad
+# flood the community graph. A known-bad
 # `curl|bash` into the graph and Blackbox will match it.
 NO_AUTO_NOMINATE_SHAPES = frozenset({"remote-script-pipe"})
 
@@ -293,7 +290,7 @@ def normalize_arg_shape(tool_name: str, args: Any) -> Optional[str]:
 
     Returns a stable slug (e.g. ``remote-script-pipe``) or ``None`` when the
     call does not match any known dangerous shape. Deterministic and pure so
-    the client detector and the curator authoring flow agree on identifiers.
+    independent clients agree on identifiers.
     """
     command = _command_from_args(tool_name, args)
     if not command:
@@ -349,7 +346,7 @@ _INJECTION_HEURISTICS = (
     ("high", "LLM06", re.compile(r"\b(?:leak|upload|steal|send|post)(?:s|ing|ed)?\s+(?:the\s+|my\s+|our\s+|your\s+|all\s+(?:the\s+)?)?(?:api\s*key|secret|token|credentials|password|env(?:ironment)?\s+variables?|\.env)", re.IGNORECASE)),
 )
 
-#: Truncation cap for the matched dangerous phrase carried on a candidate.
+#: Truncation cap for the matched dangerous phrase kept as local evidence.
 _INJECTION_PHRASE_CAP = 120
 _MAX_INJECTION_SCAN = 50_000
 
@@ -655,7 +652,7 @@ def scan_skill_dangers(code: str, permissions: str) -> List[Dict[str, str]]:
 
 
 # ---------------------------------------------------------------------------
-# Dependency install parsing (shared by detection + curator import)
+# Dependency install parsing
 # ---------------------------------------------------------------------------
 
 _SHELL_INSTALL_PATTERNS = (
@@ -771,7 +768,7 @@ def parse_downloads(command: str) -> List[str]:
 
 # IOC extraction — pull indicators out of arbitrary tool-call text so a match
 # against a synced ``ioc:`` rule can fire. Only KNOWN-BAD values (already in the
-# ruleset) ever match, so broad extraction is safe: a token that isn't a seeded
+# ruleset) ever match, so broad extraction is safe: a token that isn't a known
 # threat is a cheap dict miss, not a false positive.
 _URL_RE = re.compile(r"https?://[^\s'\"<>|\\)}\]]+", re.IGNORECASE)
 _IPV4_RE = re.compile(r"\b(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)\b")
@@ -786,10 +783,10 @@ _MAX_IOC_CANDIDATES = 4000
 
 
 def _host_suffixes(host: str) -> List[str]:
-    """A host plus the parent domains a ``domain:`` rule might be seeded as.
+    """A host plus the parent domains a ``domain:`` rule might use.
 
     ``login.evil.co.uk`` yields ``login.evil.co.uk``, ``evil.co.uk``, ``co.uk``
-    and a ``www.``-stripped variant, so a rule seeded on the registrable domain
+    and a ``www.``-stripped variant, so a rule on the registrable domain
     still fires on a subdomain. No public-suffix list (kept dependency-free):
     the parent walk stops at two labels and every candidate is an O(1) lookup.
     """
@@ -811,7 +808,7 @@ def iter_ioc_candidates(text: str) -> List[str]:
     Extracts URLs (+ their hosts), bare domains, IPv4s, sha256/md5 hashes, and
     EVM/BTC/Solana crypto addresses. An EVM/base58 address is emitted as BOTH a
     ``wallet:`` and a ``contract:`` candidate (the address alone doesn't say
-    which), so whichever the curator seeded matches.
+    which), so either representation matches.
     """
     if not text:
         return []
@@ -1027,11 +1024,11 @@ def _q(subject: str, predicate: str, obj: str) -> Quad:
 
 
 # ---------------------------------------------------------------------------
-# Legacy curation-proof anchors (read/migration compatibility only)
+# Legacy proof anchors (read compatibility only)
 # ---------------------------------------------------------------------------
 
 #: Detection-relevant fields covered by a threat's anchor hash, in canonical
-#: order. Curator and consumers hash the SAME SPARQL binding values, so
+#: order. Producers and consumers hash the same SPARQL binding values, so
 #: tampering with any field the detector consumes breaks the batch root.
 ANCHOR_FIELDS = ("identifier", "kind", "severity", "name", "pattern", "toolName", "argShape")
 
@@ -1046,7 +1043,7 @@ def anchor_hashes_from_rows(rows: Iterable[Dict[str, Any]]) -> Dict[str, str]:
     """Map identifier -> anchor hash from plain-string binding rows.
 
     A re-published threat can yield several rows per identifier; keeping the
-    lexicographically greatest hash makes curator and consumers converge on
+    lexicographically greatest hash makes independent clients converge on
     the same value without coordinating row order.
     """
     out: Dict[str, str] = {}
@@ -1066,170 +1063,9 @@ def anchor_root(pairs: Iterable[tuple]) -> str:
     return hashlib.sha256("\n".join(lines).encode("utf-8")).hexdigest()
 
 
-def proof_uri(root: str) -> str:
-    return f"urn:guardian:proof:{root[:16]}"
-
-
-def build_curation_proof_quads(
-    *,
-    root: str,
-    members: Iterable[str],
-    ts: Optional[datetime] = None,
-) -> List[Quad]:
-    """Build a legacy compact anchor for proof-reader compatibility tests.
-
-    Active curator flows must publish :func:`build_threat_quads` output itself;
-    a proof is not a complete public threat knowledge asset.
-    """
-    member_list = sorted(set(members))
-    subj = proof_uri(root)
-    out: List[Quad] = [
-        _q(subj, constants.RDF_TYPE, iri(constants.CURATION_PROOF_TYPE_IRI)),
-        _q(subj, constants.ANCHOR_ROOT_PRED, literal(root)),
-        _q(subj, constants.ANCHOR_COUNT_PRED, literal(str(len(member_list)))),
-        _q(subj, constants.SCHEMA_DATE_MODIFIED_PRED, datetime_literal(ts)),
-    ]
-    for member in member_list:
-        out.append(_q(subj, constants.ANCHOR_MEMBER_PRED, literal(member)))
-    return out
-
-
 # ---------------------------------------------------------------------------
 # Threat / report quad builders
 # ---------------------------------------------------------------------------
-
-
-def build_threat_quads(
-    *,
-    category: str,
-    identifier: str,
-    severity: str,
-    name: str,
-    description: str,
-    curated: bool = True,
-    kind: Optional[str] = None,
-    ts: Optional[datetime] = None,
-    # provenance — applies to every category
-    sources: Optional[Iterable[str]] = None,
-    references: Optional[Iterable[str]] = None,
-    contributor: Optional[str] = None,
-    # injection
-    pattern: Optional[str] = None,
-    owasp_category: Optional[str] = None,
-    # escalation
-    tool_name: Optional[str] = None,
-    arg_shape: Optional[str] = None,
-    # dependency
-    ecosystem: Optional[str] = None,
-    package_name: Optional[str] = None,
-    package_version: Optional[str] = None,
-    advisory_id: Optional[str] = None,
-    fixed_version: Optional[str] = None,
-    # fileaccess
-    file_category: Optional[str] = None,
-    # skill
-    skill_name: Optional[str] = None,
-    skill_version: Optional[str] = None,
-    danger_shape: Optional[str] = None,
-    # ioc — the concrete indicator type (domain|url|ip|hash|wallet|contract)
-    ioc_type: Optional[str] = None,
-    minimal: bool = False,
-) -> List[Quad]:
-    """Build curated Threat quads for one of the threat categories.
-
-    *category* ∈ ``{"injection", "escalation", "dependency", "fileaccess",
-    "skill"}``. The subject URI is :func:`threat_uri` of *identifier*, so
-    re-authoring the same threat targets the same KA.
-
-    *sources*, *references* and *contributor* are provenance, emitted for every
-    category so the dashboard can show a threat's origin.
-
-    ``minimal`` is accepted only for source compatibility with proof-era code
-    and is intentionally ignored. Every threat builder now returns the complete
-    shape so no caller can accidentally mint another reduced VM record.
-    """
-    subj = threat_uri(identifier)
-    type_iri = {
-        "injection": constants.INJECTION_THREAT_TYPE_IRI,
-        "escalation": constants.ESCALATION_THREAT_TYPE_IRI,
-        "dependency": constants.DEP_THREAT_TYPE_IRI,
-        "fileaccess": constants.FILE_ACCESS_THREAT_TYPE_IRI,
-        "skill": constants.SUSPICIOUS_SKILL_THREAT_TYPE_IRI,
-        "ioc": constants.IOC_THREAT_TYPE_IRI,
-    }.get(category)
-    if type_iri is None:
-        raise ValueError(f"unknown threat category: {category!r}")
-
-    out: List[Quad] = [
-        _q(subj, constants.RDF_TYPE, iri(type_iri)),
-        _q(subj, constants.RDF_TYPE, iri(constants.THREAT_TYPE_IRI)),
-        _q(subj, constants.IDENTIFIER_PRED, literal(identifier)),
-        _q(subj, constants.CURATED_PRED, literal("true" if curated else "false")),
-        _q(subj, constants.SEVERITY_PRED, literal(constants.normalize_severity(severity))),
-        _q(subj, constants.SCHEMA_DATE_MODIFIED_PRED, datetime_literal(ts)),
-    ]
-    out.extend([
-        _q(subj, constants.SCHEMA_NAME_PRED, literal(name)),
-        _q(subj, constants.SCHEMA_DESCRIPTION_PRED, literal(description)),
-    ])
-    if kind:
-        out.append(_q(subj, constants.KIND_PRED, literal(kind)))
-
-    # Provenance (every category): source(s), reference URL(s), contributor.
-    for src in list(sources or [])[:20]:
-        if src:
-            out.append(_q(subj, constants.SOURCE_PRED, literal(str(src))))
-    for ref in list(references or [])[:20]:
-        if ref:
-            out.append(_q(subj, constants.REFERENCE_PRED, literal(str(ref))))
-    if contributor:
-        out.append(_q(subj, constants.SCHEMA_CONTRIBUTOR_PRED, literal(str(contributor))))
-
-    if category == "injection":
-        if pattern:
-            out.append(_q(subj, constants.PATTERN_PRED, literal(pattern)))
-        if owasp_category:
-            out.append(_q(subj, constants.OWASP_CATEGORY_PRED, literal(owasp_category)))
-    elif category == "escalation":
-        if tool_name:
-            out.append(_q(subj, constants.TOOL_NAME_PRED, literal(tool_name)))
-        if arg_shape:
-            out.append(_q(subj, constants.ARG_SHAPE_PRED, literal(arg_shape)))
-    elif category == "dependency":
-        if package_name:
-            out.append(_q(subj, constants.PACKAGE_NAME_PRED, literal(package_name)))
-        if package_version:
-            out.append(_q(subj, constants.PACKAGE_VERSION_PRED, literal(package_version)))
-        if ecosystem:
-            out.append(_q(subj, constants.PACKAGE_ECOSYSTEM_PRED, literal(ecosystem)))
-        if advisory_id:
-            out.append(_q(subj, constants.SCHEMA_IDENTIFIER_PRED, literal(advisory_id)))
-        if fixed_version:
-            out.append(_q(subj, constants.FIXED_VERSION_PRED, literal(fixed_version)))
-    elif category == "fileaccess":
-        if tool_name:
-            out.append(_q(subj, constants.TOOL_NAME_PRED, literal(tool_name)))
-        if file_category:
-            out.append(_q(subj, constants.CATEGORY_PRED, literal(file_category)))
-    elif category == "skill":
-        if skill_name:
-            out.append(_q(subj, constants.SKILL_NAME_PRED, literal(skill_name)))
-        if skill_version:
-            out.append(_q(subj, constants.SKILL_VERSION_PRED, literal(skill_version)))
-        if danger_shape:
-            out.append(_q(subj, constants.DANGER_SHAPE_PRED, literal(danger_shape)))
-    elif category == "ioc":
-        # The indicator value lives in the identifier; g:category carries its type.
-        if ioc_type:
-            out.append(_q(subj, constants.CATEGORY_PRED, literal(ioc_type)))
-
-    return out
-
-
-def build_minimal_threat_quads(**kwargs: Any) -> List[Quad]:
-    """Compatibility alias that now returns the required complete threat KA."""
-    kwargs["minimal"] = False
-    return build_threat_quads(**kwargs)
 
 
 def build_report_quads(
@@ -1260,7 +1096,7 @@ def build_report_quads(
     The subject is per-submitter namespaced (:func:`report_uri`). A report
     NEVER carries observed prompt/command text (privacy split — that stays in
     the private WM audit). For a NEW candidate threat, the caller may pass the
-    threat fields so the curator can promote it directly.
+    threat fields needed for independent review.
     """
     subj = report_uri(identifier, reporter_address)
     threat = threat_uri(identifier)
@@ -1291,8 +1127,7 @@ def build_report_quads(
             out.append(_q(subj, constants.PACKAGE_ECOSYSTEM_PRED, literal(ecosystem)))
         if advisory_id:
             out.append(_q(subj, constants.SCHEMA_IDENTIFIER_PRED, literal(advisory_id)))
-        # kind (malware|vulnerability) must survive to SWM so a curator can
-        # promote the candidate with its block policy intact.
+        # Keep the dependency kind intact in the community report.
         if kind:
             out.append(_q(subj, constants.KIND_PRED, literal(kind)))
     elif category == "fileaccess":

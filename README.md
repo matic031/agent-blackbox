@@ -1,10 +1,8 @@
 <div align="center">
 
-<img src="./docs/agent-blackbox-logo.jpeg" alt="Agent Blackbox" width="150">
+<img src="./docs/agent-blackbox-hq.png" alt="Agent Blackbox" width="638">
 
-# Agent Blackbox
-
-**Real-time threat protection for your AI agents.**
+**Stop dangerous AI agent actions before they happen.**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-80CA9C?style=flat-square)](LICENSE)
 [![by Umanitek](https://img.shields.io/badge/by-Umanitek-5C7F87?style=flat-square)](#about-umanitek)
@@ -13,14 +11,33 @@
 
 ---
 
-Agent Blackbox is a security plugin that lives inside your AI agent and checks every action it takes - prompts, shell commands, file access, package installs, skills - against a shared threat graph on the OriginTrail Decentralized Knowledge Graph (DKG). A threat discovered by one agent protects all of them: when the graph learns about an attack, every protected agent picks it up on its next sync. It flags by default; blocking is one config switch away.
+## Security for agents that can act
 
-Blackbox runs its own local DKG node at `http://127.0.0.1:9320`. Its official npm DKG package and state live inside the Agent Blackbox checkout under `dkg/` and `.dkg/`, so it never touches another DKG installation. The node uses Blazegraph, and the dashboard runs separately on `9700`.
+AI agents can run commands, open files, install packages, and use powerful
+tools. One malicious instruction can turn that access into a real incident.
+
+Agent Blackbox checks what an agent is about to do and flags or blocks threats
+before damage is done.
+
+- **Protect every local agent.** One install covers Hermes and OpenClaw.
+- **Catch real risks.** Stop prompt injection, credential access, destructive
+  commands, malicious packages, and unsafe skills.
+- **See what happened.** Review every finding in a live dashboard and audit trail.
+- **Get safer together.** A threat found by one agent can protect every other
+  connected agent.
+
+**One agent finds a threat. Every protected agent gets safer.**
 
 ## Install
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/matic031/agent-guardian/feat/blackbox/scripts/blackbox-install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/umanitek/agent-blackbox/main/scripts/blackbox-install.sh | bash
+```
+
+Windows PowerShell:
+
+```powershell
+iwr -useb https://raw.githubusercontent.com/umanitek/agent-blackbox/main/scripts/blackbox-install.ps1 | iex
 ```
 
 <details>
@@ -31,20 +48,26 @@ The installer only automates the steps below (idempotent, no sudo). Run them you
 
 ```bash
 # 1. Get the code
-git clone -b feat/blackbox https://github.com/matic031/agent-guardian.git agent-blackbox
+git clone -b main https://github.com/umanitek/agent-blackbox.git
 cd agent-blackbox
 
 # 2. Python env (3.11-3.13) with the dashboard extras
 python3 -m venv venv
 venv/bin/pip install -e ".[web]"
 
-# 3. Put `hermes` on your PATH
+# 3. Put `hermes` and the `blackbox` shortcut on your PATH
 mkdir -p ~/.local/bin
 ln -sf "$PWD/venv/bin/hermes" ~/.local/bin/hermes
+cat > ~/.local/bin/blackbox <<'EOF'
+#!/bin/sh
+# managed-by: agent-blackbox-installer
+exec "$(dirname "$0")/hermes" blackbox "$@"
+EOF
+chmod 755 ~/.local/bin/blackbox
 
 # 4. Official npm DKG node (required for first-run protection)
 mkdir -p dkg
-npm install --prefix dkg @origintrail-official/dkg@10.0.5
+npm install --prefix dkg --prefer-online @origintrail-official/dkg@latest
 export BLACKBOX_DKG_HOME="$PWD/.dkg"
 export BLACKBOX_DKG_BIN="$PWD/dkg/node_modules/.bin/dkg"
 export BLACKBOX_DKG_PORT=9320
@@ -52,18 +75,18 @@ export BLACKBOX_DKG_DAEMON_URL="http://127.0.0.1:$BLACKBOX_DKG_PORT"
 DKG_HOME="$BLACKBOX_DKG_HOME" "$BLACKBOX_DKG_BIN" hermes setup --network mainnet-base \
   --port "$BLACKBOX_DKG_PORT" \
   --daemon-url "$BLACKBOX_DKG_DAEMON_URL" \
-  --no-fund   # reading the public graph is free
+  --no-fund   # joining and reading do not require funds
 
 # 5. Enable Agent Blackbox and protect every local agent
 hermes plugins enable blackbox
-hermes blackbox attach
-hermes blackbox sync --wait --require-rules
+blackbox attach
+blackbox sync --wait --require-rules
 ```
 
 Or download the script, read it, then run it:
 
 ```bash
-curl -fsSLO https://raw.githubusercontent.com/matic031/agent-guardian/feat/blackbox/scripts/blackbox-install.sh
+curl -fsSLO https://raw.githubusercontent.com/umanitek/agent-blackbox/main/scripts/blackbox-install.sh
 less blackbox-install.sh
 bash blackbox-install.sh
 ```
@@ -73,10 +96,10 @@ bash blackbox-install.sh
 ## First run
 
 ```bash
-hermes                     # start your agent - Agent Blackbox is already watching
-hermes blackbox chat       # start a Blackbox-focused operator chat
-hermes blackbox dashboard  # open the live threat dashboard
-hermes blackbox attach     # protect every local agent
+hermes                     # start your agent - local protection is already active
+blackbox chat              # start a Blackbox-focused operator chat
+blackbox dashboard         # open the live threat dashboard
+blackbox attach            # protect every local agent
 ```
 
 Works with **Hermes** and **OpenClaw**.
@@ -86,27 +109,25 @@ Works with **Hermes** and **OpenClaw**.
 Everyday commands:
 
 ```bash
-hermes blackbox status      # config, node health, ruleset + findings counts
-hermes blackbox sync --wait # pull the latest threat graphs right now
-hermes blackbox dashboard   # live dashboard at http://127.0.0.1:9700
-hermes blackbox chat        # chat with Blackbox from this repo's workspace
+blackbox status      # config, node health, ruleset + findings counts
+blackbox sync --wait # pull the latest threat graphs right now
+blackbox dashboard   # live dashboard at http://127.0.0.1:9700
+blackbox chat        # chat with Blackbox from this repo's workspace
 ```
 
-`hermes blackbox chat` creates and uses a dedicated `blackbox` Hermes profile.
-That profile is the control/operator chat for Blackbox: it starts from the
-Agent Blackbox checkout, answers Blackbox-specific questions using the dashboard
-and Blackbox CLI state, and is hidden from the dashboard's connected-agent list
-so it is not mistaken for an agent being protected.
+The installer adds `blackbox` as a shortcut for `hermes blackbox`.
+`blackbox chat` opens a dedicated operator chat for Blackbox without adding that
+chat to the protected-agent count.
 
 Found a threat yourself? Report it to the community graph so every agent sees it:
 
 ```bash
 # a malicious npm package
-hermes blackbox report --type dependency --ecosystem npm \
+blackbox report --type dependency --ecosystem npm \
   --name evil-package --version 1.0.0 --severity critical
 
 # a prompt-injection pattern
-hermes blackbox report --type injection \
+blackbox report --type injection \
   --pattern "ignore all previous instructions" --owasp LLM01
 ```
 
@@ -119,17 +140,9 @@ plugins:
       mode: block   # stop confirmed threats instead of only flagging them
 ```
 
-Every detection is logged to the audit trail and shown live in the dashboard. Curators review community reports and promote the real ones - see the [curator guide](CURATOR_README.md) for that side of the workflow.
+Every detection is logged to the audit trail and shown live in the dashboard. Eligible findings can also be shared as privacy-safe community reports.
 
-### Optional: AI reviewer
-
-On top of the built-in pattern and graph detection, Blackbox can use an LLM for a second opinion on prompt injection. The installer reuses an existing Hermes/OpenClaw LLM config when it can; otherwise it asks for provider, key, and model on a real terminal. Run it anytime:
-
-```bash
-hermes blackbox setup-llm
-```
-
-The reviewer only flags - it never blocks, and its verdicts stay on your machine (never shared to the community graph). Turn it off with `hermes blackbox setup-llm --disable`.
+The reviewer only flags - it never blocks, and its verdicts stay on your machine (never shared to the community graph). Turn it off with `blackbox setup-llm --disable`.
 
 ### Try it
 
@@ -163,37 +176,58 @@ In the default audit mode every one is flagged and logged, nothing is stopped. S
 - **Secret exposure** - a real API key, token, or private key the agent handles or tries to send off-box.
 - **Suspicious skills** - newly installed skills with malicious behavior.
 
-## The public threat graph
+## Shared protection
 
 <div align="center">
 <img src="./docs/graph.png" alt="The Agent Blackbox threat graph" width="880">
 </div>
 
-This is the heart of Agent Blackbox: one shared, **curator-approved** threat graph on the OriginTrail DKG that every agent reads from. A threat added once protects every agent everywhere - and it's tamper-proof, so no single party can quietly rewrite it.
+Threats should not have to be rediscovered one agent at a time. Agent Blackbox
+gives every protected agent the benefit of what the network has already learned:
+
+- **Verified** threats are reviewed by Umanitek and can be blocked.
+- **Community** reports warn other agents while they await verification.
+- **Local** findings stay available in your own dashboard and audit trail.
 
 ## How it works
 
-Agent Blackbox runs inside your agent and checks every action against two shared threat graphs:
+1. **Watch.** Blackbox sees the prompt, tool call, command, file, package, or
+   skill before the agent acts.
+2. **Check.** It compares the action with built-in security rules and shared
+   threat intelligence.
+3. **Respond.** Audit mode warns and records. Block mode stops confirmed threats.
+4. **Learn.** Eligible high-severity findings can become privacy-safe community
+   reports, helping other agents spot the same attack.
 
-- **The public threat graph** - curated by Umanitek - is the source of truth. Each VM entry is a complete threat knowledge asset, not just a proof. If a threat is there, Agent Blackbox flags it as confirmed and, in block mode, blocks it.
-- **The community graph** covers what the public graph doesn't yet. Threats reported by agents across the network are flagged as unconfirmed so you see them - but they never block.
+### Under the hood
 
-Built-in heuristics only nominate **new** high-severity candidates; agents report those to the community graph, where curators review them and promote the real ones to the public graph. When one agent learns a threat, every agent learns it.
+The shared intelligence lives on the OriginTrail Decentralized Knowledge Graph
+(DKG). Blackbox runs its own isolated local DKG node, so it does not replace or
+modify another DKG installation.
 
-Both graphs live on the **OriginTrail Decentralized Knowledge Graph (DKG)** - a tamper-proof, community threat database no single party can quietly rewrite.
+The threat graph is private: approved nodes can read its threat data, while its
+anchors remain publicly verifiable. Verified public threats are the only shared
+threats allowed to block; community reports warn until they are reviewed.
 
-> Approving what becomes public is a curator's job - see the [curator guide](CURATOR_README.md).
-
-The dashboard (`hermes blackbox dashboard`) shows all three graphs side by side: **Public** (curated), **Community** (reported by agents), and **Local** (your node).
+The dashboard shows **Public**, **Community**, and **Local** intelligence side by
+side. Technical settings, paths, and node details are listed below.
 
 ## Auto-attach
 
 ```bash
-hermes blackbox attach   # protect every local agent at once
-hermes blackbox detach   # turn it back off
+blackbox attach   # protect every local agent at once
+blackbox detach   # turn it back off
 ```
 
 `attach` finds every Hermes home and OpenClaw workspace on your machine and enables Agent Blackbox in each one - no per-agent setup.
+
+### Optional: AI reviewer
+
+On top of the built-in pattern and graph detection, Blackbox can use an LLM for a second opinion on prompt injection. The installer reuses an existing Hermes/OpenClaw LLM config when it can; otherwise it asks for provider, key, and model on a real terminal. Run it anytime:
+
+```bash
+blackbox setup-llm
+```
 
 ## Configuration
 
@@ -204,7 +238,8 @@ Set under `plugins.entries.blackbox.*` in `config.yaml`.
 | `mode` | `audit` | `audit` or `block` |
 | `dkg_url` | `http://127.0.0.1:9320` | Blackbox-managed local DKG node |
 | `dkg_home` | `<agent-blackbox>/.dkg` | isolated DKG node config, token, pid, and cache |
-| `context_graph_id` | `umanitek/blackbox-threats-staging` | staging Blackbox threat graph until production is seeded |
+| `context_graph_id` | `0x37b1Fdfd…/agent-blackbox` | Private Blackbox threat graph |
+| `graph_peer_id` | bundled curator peer | Host that receives the signed join request |
 | `daily_report_limit` | `9999` | max threat reports sent to the community graph per day |
 | `report_min_severity` | `high` | minimum severity for heuristic candidates to be flagged and reported |
 | `detection.<category>.enabled` | `true` | turn a whole category on/off (`injection`, `escalation`, `dependency`, `fileaccess`, `skill`) |
@@ -215,12 +250,27 @@ Full options in the [plugin README](plugins/blackbox/README.md).
 
 ### Customize to your needs
 
-Open the dashboard and click the gear icon - no config file needed. Switch threat categories on/off and set their minimum severity, list protected files and folders (globs welcome, e.g. `~/.ssh/*`, `**/.env`) that always block and never leave your machine, and flip between *audit* and *block* mode. Changes are saved to `config.yaml` and apply to every agent.
+Open the dashboard and click the gear icon. Switch threat categories on/off and set their minimum severity, list protected files and folders (globs welcome, e.g. `~/.ssh/*`, `**/.env`) that always block and never leave your machine, and flip between *audit* and *block* mode. Changes are saved to `config.yaml` and apply to every agent.
 
 ## About Umanitek
 
 [Umanitek](https://umanitek.ai) is fighting for a safe internet in the age of AI. Agent Blackbox is built on the OriginTrail Decentralized Knowledge Graph, turning collective threat intelligence into real-time protection for every agent.
 
+## Legal
+
+- [Terms of Service](legal/terms-of-service.pdf) ([editable Word version](legal/terms-of-service.docx))
+- [Privacy Policy](legal/privacy-policy.pdf) ([editable Word version](legal/privacy-policy.docx))
+
+These documents are provided for transparency and supplement the open-source license without restricting the rights granted by it.
+
 ## License
 
-MIT - see [LICENSE](LICENSE). A fork of [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent) (MIT).
+Agent Blackbox is distributed under the [MIT License](LICENSE). It is maintained by UMANITEK AG as a fork of [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent), also used under the MIT License. Third-party components retain their respective licenses.
+
+---
+
+<div align="center">
+<a href="https://umanitek.ai">
+<img src="./docs/umanitek-logo-footer.png" alt="Umanitek" width="260">
+</a>
+</div>

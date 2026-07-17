@@ -141,6 +141,20 @@ def _findings_files() -> List["tuple[Path, str]"]:
     return out
 
 
+def _audit_files() -> List["tuple[Path, str]"]:
+    """Return routine audit logs for Hermes and every attached framework."""
+    home = _home()
+    out: List["tuple[Path, str]"] = [(home / "audit.jsonl", "hermes")]
+    try:
+        for extra in sorted(home.glob("audit.*.jsonl")):
+            parts = extra.name.split(".")
+            fw = parts[1] if len(parts) == 3 else "unknown"
+            out.append((extra, fw))
+    except Exception:  # pragma: no cover - defensive
+        pass
+    return out
+
+
 # Read-path caps for the conversation context on a finding row, so a huge log
 # line can't bloat the ``/api/findings`` response.
 _CONTEXT_MAX_TURNS = 16
@@ -201,6 +215,7 @@ def _flatten_finding_row(rec: Dict[str, Any], default_fw: str) -> Dict[str, Any]
         "severity": finding.get("severity"),
         "title": finding.get("title"),
         "framework": finding.get("framework") or rec.get("framework") or default_fw,
+        "workspace": finding.get("workspace") or rec.get("workspace") or detail.get("workspace"),
         "tool_name": finding.get("tool_name") or detail.get("tool_name"),
         "evidence": finding.get("evidence") or finding.get("title"),
         "confirmed": bool(finding.get("confirmed", True)),
@@ -218,6 +233,7 @@ def _dedupe_finding_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         scope = row.get("turn_id") or row.get("task_id") or row.get("session_id") or row.get("time")
         key = (
             row.get("framework"),
+            row.get("workspace"),
             row.get("event"),
             scope,
             row.get("identifier"),
@@ -279,16 +295,19 @@ def local_frameworks() -> List[str]:
 def local_active_frameworks() -> List[str]:
     """Frameworks with observed local Blackbox activity.
 
-    Findings identify their framework explicitly through ``findings*.jsonl``.
-    Routine Hermes hooks write only ``audit.jsonl``; when that exists, Hermes is
-    active even if no threat has been found yet.
+    Findings identify their framework explicitly through ``findings*.jsonl``;
+    routine activity lives in ``audit.jsonl`` / ``audit.<framework>.jsonl``.
     """
     out = local_frameworks()
-    audit_path = _home() / "audit.jsonl"
-    if "hermes" not in out and audit_path.exists():
+    for audit_path, framework in _audit_files():
+        if framework in out or not audit_path.exists():
+            continue
         try:
             if any(line.strip() for line in audit_path.read_text(encoding="utf-8").splitlines()):
-                out.insert(0, "hermes")
+                if framework == "hermes":
+                    out.insert(0, framework)
+                else:
+                    out.append(framework)
         except Exception:
             pass
     return out
@@ -316,6 +335,9 @@ def record(
             "ts": now,
             "iso": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now)),
             "event": event,
+            # Profile-level identity is local-only and lets the dashboard keep
+            # separate Hermes homes from inheriting each other's activity.
+            "workspace": str(constants.hermes_home()),
         }
         if detail:
             # Redact the detail normally, but rebuild ``detail.context`` via
@@ -375,6 +397,7 @@ def record_file_access(tool: str, path: str, mode: str) -> None:
             "tool": str(tool or "")[:120],
             "path": str(path or "")[:1000],
             "mode": str(mode or "")[:16],
+            "workspace": str(constants.hermes_home()),
         })
     except Exception as exc:  # pragma: no cover - fail open
         logger.debug("blackbox: file access record failed: %s", exc)
@@ -396,6 +419,7 @@ def record_dependency(ecosystem: str, name: str, version: str, tool: str = "") -
             "name": str(name or "")[:200],
             "version": str(version or "")[:80],
             "tool": str(tool or "")[:120],
+            "workspace": str(constants.hermes_home()),
         })
     except Exception as exc:  # pragma: no cover - fail open
         logger.debug("blackbox: dependency record failed: %s", exc)
@@ -487,6 +511,7 @@ def _finding_event_rows() -> List[Dict[str, Any]]:
                 "iso": rec.get("iso") or "",
                 "event": "flagged",
                 "framework": finding.get("framework") or rec.get("framework") or default_fw,
+                "workspace": finding.get("workspace") or rec.get("workspace") or (rec.get("detail") or {}).get("workspace"),
                 "severity": finding.get("severity") or "warning",
                 "finding": finding,
                 "detail": rec.get("detail") or {},
@@ -509,9 +534,10 @@ def _tag_events(rows: List[Dict[str, Any]], default_event: str, framework: str =
 def read_audit(limit: int = 100, offset: int = 0) -> List[Dict[str, Any]]:
     """Return the unified agent-activity feed, newest first, paged.
 
-    Merges five local sources into one timestamped, severity-tagged, framework-
+    Merges local sources into one timestamped, severity-tagged, framework-
     aware view for the dashboard's Audit trail:
-      * ``audit.jsonl``            — session lifecycle + tool/API events (hermes)
+      * ``audit.jsonl``            — session lifecycle + tool/API events (Hermes)
+      * ``audit.<fw>.jsonl``       — routine events from other local agents
       * ``file_access.jsonl``      — sensitive-path reads (hermes, info)
       * ``dependencies.jsonl``     — install visibility (hermes, info)
       * ``findings.jsonl``         — threats detected by hermes (severity from finding)
@@ -521,7 +547,8 @@ def read_audit(limit: int = 100, offset: int = 0) -> List[Dict[str, Any]]:
     """
     home = _home()
     merged: List[Dict[str, Any]] = []
-    merged.extend(_tag_events(_load_jsonl(home / "audit.jsonl", "event"), "event"))
+    for path, framework in _audit_files():
+        merged.extend(_tag_events(_load_jsonl(path, "event"), "event", framework))
     merged.extend(_tag_events(_load_jsonl(home / "file_access.jsonl", "file_access"), "file_access"))
     merged.extend(_tag_events(_load_jsonl(home / "dependencies.jsonl", "dependency_install"), "dependency_install"))
     merged.extend(_finding_event_rows())
@@ -532,8 +559,9 @@ def read_audit(limit: int = 100, offset: int = 0) -> List[Dict[str, Any]]:
 def count_audit() -> int:
     """Total merged activity rows on disk (fail-open: returns 0 on any error)."""
     total = 0
-    for name in ("audit.jsonl", "file_access.jsonl", "dependencies.jsonl"):
-        path = _home() / name
+    paths = [path for path, _ in _audit_files()]
+    paths.extend(_home() / name for name in ("file_access.jsonl", "dependencies.jsonl"))
+    for path in paths:
         if not path.exists():
             continue
         try:
@@ -612,13 +640,14 @@ def read_local_activity(max_sessions: int = 60) -> Dict[str, Any]:
     """Reconstruct the user's LOCAL threat activity as sessions → events → threats.
 
     The local graph's data source, built entirely from this machine's own logs
-    (``audit.jsonl``, ``file_access.jsonl``, ``dependencies.jsonl``, findings) —
+    (``audit*.jsonl``, ``file_access.jsonl``, ``dependencies.jsonl``, findings) —
     never the DKG node. Each session carries its ordered events; each tool call
     carries the threats it triggered (matched by ``tool_call_id``). Newest first.
     """
     home = _home()
     raw: List[Dict[str, Any]] = []
-    raw.extend(_tag_events(_load_jsonl(home / "audit.jsonl", "event"), "event"))
+    for path, framework in _audit_files():
+        raw.extend(_tag_events(_load_jsonl(path, "event"), "event", framework))
     raw.extend(_tag_events(_load_jsonl(home / "file_access.jsonl", "file_access"), "file_access"))
     raw.extend(_tag_events(_load_jsonl(home / "dependencies.jsonl", "dependency_install"), "dependency_install"))
     findings = _finding_event_rows()
@@ -676,7 +705,13 @@ def read_local_activity(max_sessions: int = 60) -> Dict[str, Any]:
 
         if ev == "session_end":
             s["ended"] = True
-            s["status"] = "interrupted" if det.get("interrupted") else ("completed" if det.get("completed") else "ended")
+            reason = str(det.get("reason") or "").lower()
+            if det.get("interrupted") or reason in ("shutdown", "restart"):
+                s["status"] = "interrupted"
+            elif det.get("completed") or reason in ("new", "reset", "idle", "daily", "compaction", "deleted"):
+                s["status"] = "completed"
+            else:
+                s["status"] = "ended"
         elif ev == "pre_api_request":
             if det.get("model"):
                 s["model"] = det.get("model")
@@ -705,9 +740,22 @@ def read_local_activity(max_sessions: int = 60) -> Dict[str, Any]:
                     "threats": list(threats_by_call.get((sid, tcid), [])),
                 })
         elif ev == "file_access":
-            s["events"].append({"type": "file", "ts": ts, "path": e.get("path"), "mode": e.get("mode"), "tool": e.get("tool"), "threats": []})
+            s["events"].append({
+                "type": "file", "ts": ts,
+                "path": e.get("path") if "path" in e else det.get("path"),
+                "mode": e.get("mode") if "mode" in e else det.get("mode"),
+                "tool": e.get("tool") if "tool" in e else det.get("tool"),
+                "threats": [],
+            })
         elif ev == "dependency_install":
-            s["events"].append({"type": "dependency", "ts": ts, "ecosystem": e.get("ecosystem"), "name": e.get("name"), "version": e.get("version"), "tool": e.get("tool"), "threats": []})
+            s["events"].append({
+                "type": "dependency", "ts": ts,
+                "ecosystem": e.get("ecosystem") if "ecosystem" in e else det.get("ecosystem"),
+                "name": e.get("name") if "name" in e else det.get("name"),
+                "version": e.get("version") if "version" in e else det.get("version"),
+                "tool": e.get("tool") if "tool" in e else det.get("tool"),
+                "threats": [],
+            })
 
     out: List[Dict[str, Any]] = []
     for sid, s in sessions.items():

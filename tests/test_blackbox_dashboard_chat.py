@@ -88,14 +88,104 @@ def test_dashboard_public_graph_uses_vm_verified_ruleset_rows(monkeypatch):
     }
 
 
-def test_ruleset_sync_once_refreshes_without_directly_requeueing_catchup():
+def test_dashboard_keeps_partial_vm_count_loading_during_curator_transfer(monkeypatch):
+    from plugins.blackbox import audit, config, dkg_client, ruleset, sync_state
+
+    cfg = SimpleNamespace(
+        mode="audit",
+        context_graph_id="0x37b1/agent-blackbox",
+        dkg_url="http://127.0.0.1:9320",
+        dkg_home="/tmp/blackbox-dkg",
+        dkg_bin="/tmp/dkg",
+        sync_interval=60,
+    )
+
+    class PartialRuleset:
+        synced_at = 123.0
+
+        def counts(self):
+            return {"dependency": 246}
+
+        def source_count(self, source):
+            return 246 if source == "public" else 0
+
+    state = {
+        "status": "running",
+        "started_at": 100.0,
+        "passes": 2,
+        "inserted_triples": 160_000,
+    }
+    monkeypatch.setattr(config, "load_blackbox_config", lambda: cfg)
+    monkeypatch.setattr(ruleset, "get", lambda _cfg=None: PartialRuleset())
+    monkeypatch.setattr(audit, "count_findings", lambda: 0)
+    monkeypatch.setattr(sync_state, "read", lambda: state)
+    monkeypatch.setattr(dkg_client.DkgClient, "reachable", lambda self, timeout=None: True)
+    monkeypatch.setattr(
+        dkg_client.DkgClient,
+        "catchup_status",
+        lambda self, cg_id: {"status": "done", "finishedAt": 99},
+    )
+    monkeypatch.setattr(dkg_client.DkgClient, "query", lambda *args, **kwargs: [])
+
+    status = TestClient(server.create_app()).get("/api/graph-status").json()
+
+    assert status["curated"] == 246
+    assert status["sync_progress"]["public"] == {
+        "count": 246,
+        "state": "syncing",
+        "label": "VM syncing",
+    }
+    assert status["sync_progress"]["catchup"] == {
+        "status": "running",
+        "started_at": 100.0,
+        "finished_at": None,
+    }
+    assert status["sync_progress"]["authoritative"] == state
+
+
+def test_dashboard_lists_one_thousand_vm_threats_not_one_collection(monkeypatch):
+    from plugins.blackbox import config, ruleset
+
+    cfg = SimpleNamespace(
+        mode="audit",
+        context_graph_id="0x37b1/agent-blackbox",
+        dkg_url="http://127.0.0.1:9320",
+        dkg_home="/tmp/blackbox-dkg",
+        dkg_bin="/tmp/dkg",
+        sync_interval=60,
+    )
+
+    class ThousandThreats:
+        synced_at = 123.0
+
+        def iter_rules(self):
+            for i in range(1000):
+                yield "dependency", {
+                    "identifier": f"dep:npm:threat-{i}@1.0.0",
+                    "severity": "critical",
+                    "name": f"Threat {i}",
+                    "source": "public",
+                }
+
+    monkeypatch.setattr(config, "load_blackbox_config", lambda: cfg)
+    monkeypatch.setattr(ruleset, "get", lambda _cfg=None: ThousandThreats())
+
+    result = TestClient(server.create_app()).get("/api/graph?tier=public&limit=1000").json()
+
+    assert result["total"] == 1000
+    assert len(result["threats"]) == 1000
+    assert len({row["identifier"] for row in result["threats"]}) == 1000
+
+
+def test_ruleset_sync_once_uses_official_join_then_subscribe():
     class Cfg:
         dkg_url = "http://127.0.0.1:9320"
         dkg_home = "/tmp/blackbox-dkg"
         context_graph_id = "umanitek/guardian-threats-staging"
-        curator_peer_id = "curator-peer"
+        graph_peer_id = "graph-peer"
 
     events = []
+    membership_checks = 0
 
     class FakeClient:
         def __init__(self, *, url, dkg_home):
@@ -103,11 +193,22 @@ def test_ruleset_sync_once_refreshes_without_directly_requeueing_catchup():
             self.dkg_home = dkg_home
             events.append(("client", url, dkg_home))
 
-        def subscribe_context_graph(self, cg_id):
-            raise AssertionError("dashboard sync must leave catch-up throttling to ruleset.refresh")
+        def agent_identity(self):
+            return {"agentAddress": "0xabc"}
 
-        def request_join(self, cg_id, curator_peer_id):
-            raise AssertionError("dashboard sync must leave join throttling to ruleset.refresh")
+        def context_graph_has_agent(self, cg_id, agent_address):
+            nonlocal membership_checks
+            membership_checks += 1
+            events.append(("membership", cg_id, agent_address))
+            return membership_checks > 1
+
+        def subscribe_context_graph(self, cg_id):
+            events.append(("subscribe", cg_id))
+            return {"catchup": {"status": "running"}}
+
+        def request_join(self, cg_id, graph_peer_id):
+            events.append(("join", cg_id, graph_peer_id))
+            return {"delivered": 1}
 
     class FakeRuleset:
         def counts(self):
@@ -122,17 +223,311 @@ def test_ruleset_sync_once_refreshes_without_directly_requeueing_catchup():
             events.append(("refresh", cfg.context_graph_id, client.url, client.dkg_home))
             return FakeRuleset()
 
+    server._join_attempts.clear()
+    server._connection_states.clear()
     first = server._sync_ruleset_once(lambda: Cfg(), FakeClient, FakeRulesetModule)
+    assert first == {"total": 0, "public": 0, "community": 0}
+    assert server._connection_states[Cfg.context_graph_id]["state"] == "joining"
     second = server._sync_ruleset_once(lambda: Cfg(), FakeClient, FakeRulesetModule)
+    assert server._connection_states[Cfg.context_graph_id]["state"] == "syncing"
 
-    assert first == {"total": 5, "community": 0}
-    assert second == first
+    assert second == {"total": 5, "public": 0, "community": 0}
     assert events == [
         ("client", "http://127.0.0.1:9320", "/tmp/blackbox-dkg"),
-        ("refresh", "umanitek/guardian-threats-staging", "http://127.0.0.1:9320", "/tmp/blackbox-dkg"),
+        ("membership", "umanitek/guardian-threats-staging", "0xabc"),
+        ("join", "umanitek/guardian-threats-staging", "graph-peer"),
         ("client", "http://127.0.0.1:9320", "/tmp/blackbox-dkg"),
+        ("membership", "umanitek/guardian-threats-staging", "0xabc"),
+        ("subscribe", "umanitek/guardian-threats-staging"),
         ("refresh", "umanitek/guardian-threats-staging", "http://127.0.0.1:9320", "/tmp/blackbox-dkg"),
     ]
+
+
+def test_ruleset_sync_once_does_not_compete_with_authoritative_sync(monkeypatch):
+    class Cfg:
+        dkg_url = "http://127.0.0.1:9320"
+        dkg_home = "/tmp/blackbox-dkg"
+        context_graph_id = "0x37b1/agent-blackbox"
+        graph_peer_id = "graph-peer"
+
+    class NoClient:
+        def __init__(self, **_kwargs):
+            raise AssertionError("dashboard must not start a second DKG sync")
+
+    class NoRuleset:
+        @staticmethod
+        def refresh(*_args):
+            raise AssertionError("dashboard must not query during authoritative sync")
+
+    monkeypatch.setattr(
+        server.sync_state,
+        "read",
+        lambda: {
+            "status": "running",
+            "public_entries": 1200,
+            "community_entries": 300,
+        },
+    )
+
+    assert server._sync_ruleset_once(lambda: Cfg(), NoClient, NoRuleset) == {
+        "total": 1500,
+        "public": 1200,
+        "community": 300,
+    }
+
+
+def test_dashboard_marks_subscribed_only_after_public_graph_arrives():
+    class Cfg:
+        dkg_url = "http://127.0.0.1:9320"
+        dkg_home = "/tmp/blackbox-dkg"
+        context_graph_id = "0x37b1/agent-blackbox"
+        graph_peer_id = "graph-peer"
+
+    class FakeClient:
+        def __init__(self, *, url, dkg_home):
+            pass
+
+        def agent_identity(self):
+            return {"agentAddress": "0xabc"}
+
+        def context_graph_has_agent(self, cg_id, agent_address):
+            return True
+
+        def subscribe_context_graph(self, cg_id):
+            return {"catchup": {"status": "done"}}
+
+        def catchup_status(self, cg_id):
+            return {"status": "done"}
+
+    class ReadyRuleset:
+        def counts(self):
+            return {"dependency": 3}
+
+        def source_count(self, source):
+            return 3 if source == "public" else 0
+
+    class FakeRulesetModule:
+        @staticmethod
+        def refresh(cfg, client):
+            return ReadyRuleset()
+
+    server._connection_states.clear()
+    result = server._sync_ruleset_once(lambda: Cfg(), FakeClient, FakeRulesetModule)
+
+    assert result == {"total": 3, "public": 3, "community": 0}
+    assert server._connection_states[Cfg.context_graph_id]["state"] == "subscribed"
+
+
+def test_dashboard_restarts_stale_empty_completed_catchup():
+    class Cfg:
+        dkg_url = "http://127.0.0.1:9320"
+        dkg_home = "/tmp/blackbox-dkg"
+        context_graph_id = "0x37b1/agent-blackbox"
+        graph_peer_id = "graph-peer"
+
+    events = []
+
+    class FakeClient:
+        def __init__(self, *, url, dkg_home):
+            pass
+
+        def agent_identity(self):
+            return {"agentAddress": "0xabc"}
+
+        def context_graph_has_agent(self, cg_id, agent_address):
+            return True
+
+        def subscribe_context_graph(self, cg_id):
+            events.append(("subscribe", cg_id))
+            return {"catchup": {"status": "done"}}
+
+        def restart_context_graph_catchup(self, cg_id):
+            events.append(("restart", cg_id))
+
+    class EmptyRuleset:
+        def counts(self):
+            return {}
+
+        def source_count(self, source):
+            return 0
+
+    class FakeRulesetModule:
+        @staticmethod
+        def refresh(cfg, client):
+            return EmptyRuleset()
+
+    server._catchup_restarts.clear()
+    result = server._sync_ruleset_once(lambda: Cfg(), FakeClient, FakeRulesetModule)
+
+    assert result == {"total": 0, "public": 0, "community": 0}
+    assert events == [
+        ("subscribe", "0x37b1/agent-blackbox"),
+        ("restart", "0x37b1/agent-blackbox"),
+    ]
+    assert server._connection_states[Cfg.context_graph_id]["state"] == "syncing"
+
+
+def test_dashboard_restarts_completed_catchup_when_only_community_synced():
+    class Cfg:
+        dkg_url = "http://127.0.0.1:9320"
+        dkg_home = "/tmp/blackbox-dkg"
+        context_graph_id = "0x37b1/agent-blackbox"
+        graph_peer_id = "graph-peer"
+
+    events = []
+
+    class FakeClient:
+        def __init__(self, *, url, dkg_home):
+            pass
+
+        def agent_identity(self):
+            return {"agentAddress": "0xabc"}
+
+        def context_graph_has_agent(self, cg_id, agent_address):
+            return True
+
+        def subscribe_context_graph(self, cg_id):
+            events.append(("subscribe", cg_id))
+            return {"catchup": {"status": "done"}}
+
+        def catchup_status(self, cg_id):
+            events.append(("status", cg_id))
+            return {"status": "done"}
+
+        def restart_context_graph_catchup(self, cg_id):
+            events.append(("restart", cg_id))
+
+    class CommunityOnlyRuleset:
+        def counts(self):
+            return {"dependency": 5}
+
+        def source_count(self, source):
+            return 5 if source == "community" else 0
+
+    class FakeRulesetModule:
+        @staticmethod
+        def refresh(cfg, client):
+            return CommunityOnlyRuleset()
+
+    server._catchup_restarts.clear()
+    result = server._sync_ruleset_once(lambda: Cfg(), FakeClient, FakeRulesetModule)
+
+    assert result == {"total": 5, "public": 0, "community": 5}
+    assert events == [
+        ("subscribe", "0x37b1/agent-blackbox"),
+        ("status", "0x37b1/agent-blackbox"),
+        ("restart", "0x37b1/agent-blackbox"),
+    ]
+    assert server._connection_states[Cfg.context_graph_id]["state"] == "syncing"
+
+
+def test_dashboard_clears_stale_pending_approval_once_catchup_is_running():
+    class Cfg:
+        dkg_url = "http://127.0.0.1:9320"
+        dkg_home = "/tmp/blackbox-dkg"
+        context_graph_id = "0x37b1/agent-blackbox"
+        graph_peer_id = "graph-peer"
+
+    class FakeClient:
+        def __init__(self, *, url, dkg_home):
+            pass
+
+        def agent_identity(self):
+            return {"agentAddress": "0xabc"}
+
+        def context_graph_has_agent(self, cg_id, agent_address):
+            return True
+
+        def subscribe_context_graph(self, cg_id):
+            return {"catchup": {"status": "running"}}
+
+        def catchup_status(self, cg_id):
+            return {"status": "running"}
+
+    class EmptyRuleset:
+        def counts(self):
+            return {}
+
+        def source_count(self, source):
+            return 0
+
+    class FakeRulesetModule:
+        @staticmethod
+        def refresh(cfg, client):
+            return EmptyRuleset()
+
+    server._connection_states.clear()
+    server._connection_states[Cfg.context_graph_id] = {
+        "state": "pending-approval",
+        "updated_at": 1.0,
+    }
+
+    result = server._sync_ruleset_once(lambda: Cfg(), FakeClient, FakeRulesetModule)
+
+    assert result == {"total": 0, "public": 0, "community": 0}
+    assert server._connection_states[Cfg.context_graph_id]["state"] == "syncing"
+
+
+def test_dashboard_failed_catchup_with_stale_public_rows_refreshes_join_before_restart():
+    class Cfg:
+        dkg_url = "http://127.0.0.1:9320"
+        dkg_home = "/tmp/blackbox-dkg"
+        context_graph_id = "0x37b1/agent-blackbox"
+        graph_peer_id = "graph-peer"
+
+    events = []
+
+    class FakeClient:
+        def __init__(self, *, url, dkg_home):
+            pass
+
+        def agent_identity(self):
+            return {"agentAddress": "0xabc"}
+
+        def context_graph_has_agent(self, cg_id, agent_address):
+            return True  # stale allowlist entry; the new peer binding is missing
+
+        def subscribe_context_graph(self, cg_id):
+            events.append(("subscribe", cg_id))
+            return {"catchup": {"status": "failed"}}
+
+        def catchup_status(self, cg_id):
+            events.append(("status", cg_id))
+            return {"status": "failed"}
+
+        def request_join(self, cg_id, graph_peer_id):
+            events.append(("join", cg_id, graph_peer_id))
+            return {"alreadyMember": True, "delivered": 1}
+
+        def restart_context_graph_catchup(self, cg_id):
+            events.append(("restart", cg_id))
+
+    class StaleRuleset:
+        def counts(self):
+            return {"dependency": 2}
+
+        def source_count(self, source):
+            return 2 if source == "public" else 0
+
+    class FakeRulesetModule:
+        @staticmethod
+        def refresh(cfg, client):
+            events.append(("refresh", cfg.context_graph_id))
+            return StaleRuleset()
+
+    server._join_attempts.clear()
+    server._connection_states.clear()
+    result = server._sync_ruleset_once(lambda: Cfg(), FakeClient, FakeRulesetModule)
+
+    assert result == {"total": 2, "public": 2, "community": 0}
+    assert events == [
+        ("subscribe", "0x37b1/agent-blackbox"),
+        ("refresh", "0x37b1/agent-blackbox"),
+        ("status", "0x37b1/agent-blackbox"),
+        ("join", "0x37b1/agent-blackbox", "graph-peer"),
+        ("restart", "0x37b1/agent-blackbox"),
+    ]
+    assert server._connection_states[Cfg.context_graph_id]["state"] == "syncing"
 
 
 def test_dashboard_zero_graph_count_spins_only_for_active_catchup():
@@ -144,6 +539,24 @@ def test_dashboard_zero_graph_count_spins_only_for_active_catchup():
     assert 'p.state === "syncing"' in html
     assert "return !!tier && isTierPending(tier);" in html
     assert "return !(lastStatus && lastStatus.node_reachable === false);" not in html
+    assert '"Fetching a newer " + label + " snapshot"' in html
+    assert 'fmtElapsedSeconds(elapsed) + " elapsed"' in html
+    assert '" · current verified snapshot: " + num(count || 0)' in html
+    assert "' · ' + num(loaded) + ' available'" not in html
+
+
+def test_dashboard_graph_has_fullscreen_control():
+    html = (Path(server.__file__).parent / "static" / "index.html").read_text(
+        encoding="utf-8"
+    )
+
+    assert 'id="graph-fullscreen"' in html
+    assert 'aria-label="View graph fullscreen"' in html
+    assert 'stage.requestFullscreen()' in html
+    assert 'document.exitFullscreen()' in html
+    assert 'document.addEventListener("fullscreenchange", syncGraphFullscreenState)' in html
+    assert ".graph-stage:fullscreen" in html
+    assert ".graph-fullscreen[hidden] { display: none; }" in html
 
 
 def test_dashboard_serves_only_allowlisted_brand_fonts():
@@ -278,3 +691,32 @@ def test_attach_targets_do_not_duplicate_errored_supported_agents(monkeypatch):
     assert len(openclaw_rows) == 1
     assert openclaw_rows[0]["available"] is False
     assert openclaw_rows[0]["disabled_reason"] == "cannot read openclaw.json"
+
+
+def test_agent_cards_distinguish_attached_from_active(monkeypatch):
+    from plugins.blackbox import audit, config, dkg_client
+
+    cfg = SimpleNamespace(
+        dkg_url="http://127.0.0.1:9320",
+        dkg_home="/tmp/blackbox-dkg",
+        context_graph_id="owner/agent-blackbox",
+        sync_interval=60,
+    )
+    monkeypatch.setattr(config, "load_blackbox_config", lambda: cfg)
+    monkeypatch.setattr(dkg_client.DkgClient, "reachable", lambda self, timeout=None: False)
+    monkeypatch.setattr(audit, "local_active_frameworks", lambda: ["hermes"])
+    monkeypatch.setattr(audit, "read_findings", lambda limit=100000: [])
+    monkeypatch.setattr(
+        attach,
+        "attach_all",
+        lambda **kwargs: {
+            "hermes": [{"kind": "hermes", "target": "/tmp/.hermes", "protected": True}],
+            "openclaw": [{"kind": "openclaw", "target": "/tmp/.openclaw", "protected": True}],
+        },
+    )
+
+    agents = TestClient(server.create_app()).get("/api/agents").json()["agents"]
+    by_framework = {row["framework"]: row for row in agents}
+
+    assert by_framework["hermes"]["is_active"] is True
+    assert by_framework["openclaw"]["is_active"] is False

@@ -28,8 +28,8 @@
       },
       "contextGraphId": {
         "type": "string",
-        "default": "umanitek/blackbox-threats-staging",
-        "description": "Private (allowlist) curated threat context-graph id on the local DKG node. Defaults to the blackbox staging graph, the current live default (not the old 'umanitek/guardian-threats-staging'). A dedicated 'umanitek/blackbox-threats' production graph may replace it later."
+        "default": "0x37b1Fdfd134e2b17583bCBdD3034F91504cD9C70/agent-blackbox",
+        "description": "Private threat context-graph id on the local DKG node."
       },
       "dkgUrl": {
         "type": "string",

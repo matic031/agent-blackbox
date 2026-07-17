@@ -16,7 +16,7 @@
  *   - detectDependency(toolName, args, rs)   — parses install cmds → dep lookup
  *
  * `normalizeArgShape` lives here (single source) and is reused by the reporter
- * for identifier building, so client detection and curator-authored escalation
+ * for identifier building, so independent clients
  * shapes stay consistent. It returns the SINGLE top-priority shape (or null),
  * exactly like Python's `normalize_arg_shape`.
  */
@@ -133,7 +133,7 @@ export function emptyRuleset(): Ruleset {
 
 /**
  * Privacy-safe candidate threat attributes forwarded to `buildReportQuads` so a
- * curator can promote a candidate directly. NEVER carries raw prompts, paths, or
+ * reviewers can assess a candidate. NEVER carries raw prompts, paths, or
  * file/skill source — only signatures (pattern / category / danger shape / ...).
  * Mirrors Python `Finding.fields`.
  */
@@ -158,8 +158,8 @@ export interface Finding {
   severity: BlackboxSeverity;
   title: string;
   toolName: string | null;
-  matched: string; // rule name / matched pattern source (not observed content)
-  evidence: string; // redacted snippet
+  matched: string; // local match summary; may contain a bounded observed phrase
+  evidence: string; // local-only redacted snippet; never forwarded to SWM
   /**
    * True ONLY when the finding matched the curated PUBLIC threat graph
    * (`source === "public"`) — the strict "public graph says so" bit; only
@@ -234,7 +234,7 @@ export function detectInjection(text: string, ruleset: Ruleset): Finding[] {
           confirmed: src === "public",
           source: src,
           // Community matches carry the promotion fields so our sighting
-          // strengthens the curation signal. Mirrors Python detect_injection.
+          // strengthens the community signal. Mirrors Python detect_injection.
           fields: src === "community" ? { pattern: rule.pattern } : {},
         });
       }
@@ -370,7 +370,7 @@ export function detectDependency(
 }
 
 // ---------------------------------------------------------------------------
-// Arg-shape normalization (shared by detection + curator) — port of quads.py
+// Arg-shape normalization — port of quads.py
 // ---------------------------------------------------------------------------
 
 // A remote-download-piped-to-interpreter shape: `curl ... | sh`, `wget ... | bash`.
@@ -435,12 +435,17 @@ export function commandFromArgs(toolName: string, args: unknown): string {
   return "";
 }
 
+/** Whether a tool's payload is treated as a shell command. */
+export function isShellTool(toolName: string): boolean {
+  return SHELL_TOOLS.has((toolName || "").trim().toLowerCase());
+}
+
 /**
  * Derive a deterministic escalation `argShape` for a tool call.
  *
  * Returns the SINGLE top-priority stable slug (e.g. `remote-script-pipe`) or
  * `null` when the call matches no known dangerous shape. Deterministic and pure
- * so the client detector and the curator authoring flow agree on identifiers.
+ * so independent clients agree on identifiers.
  * Port of Python `normalize_arg_shape` (returns ONE shape or None).
  */
 export function normalizeArgShape(toolName: string, args: unknown): string | null {
@@ -468,7 +473,8 @@ export function normalizeArgShape(toolName: string, args: unknown): string | nul
 
 // Each entry is [severity, owasp, regex]. The DISCOVERY nomination layer: a
 // prompt matching one NOT already in the graph is auto-submitted as a candidate.
-// Privacy: only the matched substring (truncated) is ever carried off-box.
+// Privacy: the regex source is the shareable signature; observed prompt text
+// stays in local evidence only and must never enter Finding.fields.
 const INJECTION_HEURISTICS: ReadonlyArray<readonly [BlackboxSeverity, string, RegExp]> = [
   // "ignore all previous instructions" and close variants (see quads.py).
   ["high", "LLM01", /(?:ignore|disregard|forget|skip|override)\s+(?:all\s+|any\s+|the\s+|these\s+)?(?:previous|prior|above|earlier|preceding|prior\s+)\s*(?:instruction|message|prompt|rule|context|direction|directive|command|guideline)s?/i],
@@ -476,23 +482,28 @@ const INJECTION_HEURISTICS: ReadonlyArray<readonly [BlackboxSeverity, string, Re
   ["high", "LLM06", /(?:reveal|show|print|repeat|disclose|give|tell|share|send|output|expose|leak|what(?:'s|\s+is|\s+are)?|display)\b[\s\S]{0,40}\b(?:system\s+prompt|system\s+message|initial\s+(?:instruction|prompt)s?|your\s+(?:instructions|prompt|system\s+prompt|guidelines))/i],
   ["high", "LLM01", /you\s+are\s+now\b[\s\S]{0,40}\b(?:DAN|developer\s+mode|jailbroken|unrestricted)/i],
   ["high", "LLM01", /(?:pretend|act\s+as|roleplay|imagine)\s+(?:to\s+be\s+|you(?:'re|\s+are)\s+|as\s+)?[\s\S]{0,40}\b(?:no\s+restrictions|unrestricted|without\s+rules|no\s+rules|jailbroken|DAN\b)/i],
-  ["high", "LLM06", /(?:exfiltrate|leak|send|upload|post|email|give\s+me|show\s+me)\b[\s\S]{0,40}\b(?:api\s*key|secret|token|credentials|password|env(?:ironment)?\s+variables?|\.env)/i],
+  ["high", "LLM06", /(?:exfiltrate|exfil|smuggle)\b[\s\S]{0,40}\b(?:api\s*key|secret|token|credentials|password|env(?:ironment)?\s+variables?|\.env)/i],
+  ["high", "LLM06", /\b(?:leak|upload|steal|send|post)(?:s|ing|ed)?\s+(?:the\s+|my\s+|our\s+|your\s+|all\s+(?:the\s+)?)?(?:api\s*key|secret|token|credentials|password|env(?:ironment)?\s+variables?|\.env)/i],
 ];
 
-/** Truncation cap for the matched dangerous phrase carried on a candidate. */
+/** Truncation cap for the matched dangerous phrase kept as local evidence. */
 const INJECTION_PHRASE_CAP = 120;
 const MAX_INJECTION_SCAN = 50_000;
 
 export interface InjectionHeuristicHit {
+  /** Fixed built-in regex source; safe to share and stable across users. */
   pattern: string;
+  /** Observed prompt substring; local-only and never copied to Finding.fields. */
+  phrase: string;
   severity: BlackboxSeverity;
   owasp: string;
 }
 
 /**
- * Return built-in injection matches as `[{pattern, severity, owasp}]`.
- * `pattern` is the matched dangerous substring (truncated ~120 chars) — NEVER
- * the surrounding prompt. Port of Python `scan_injection_heuristics`.
+ * Return built-in injection matches as `[{pattern, phrase, severity, owasp}]`.
+ * `pattern` is the fixed heuristic regex source; `phrase` is the matched prompt
+ * substring (truncated ~120 chars) and remains local-only. Port of Python
+ * `scan_injection_heuristics`.
  */
 export function scanInjectionHeuristics(text: string): InjectionHeuristicHit[] {
   if (!text) return [];
@@ -507,18 +518,24 @@ export function scanInjectionHeuristics(text: string): InjectionHeuristicHit[] {
       continue;
     }
     if (!m) continue;
-    const phrase = m[0].slice(0, INJECTION_PHRASE_CAP);
-    if (seen.has(phrase)) continue;
-    seen.add(phrase);
-    out.push({ pattern: phrase, severity, owasp });
+    const signature = pattern.source;
+    if (seen.has(signature)) continue;
+    seen.add(signature);
+    out.push({
+      pattern: signature,
+      phrase: m[0].slice(0, INJECTION_PHRASE_CAP),
+      severity,
+      owasp,
+    });
   }
   return out;
 }
 
 /**
  * Built-in injection discovery: heuristic matches not already in the graph.
- * PRIVACY: the candidate carries ONLY the matched dangerous phrase (truncated
- * ~120 chars) — never the surrounding text. Port of Python `discover_injection`.
+ * PRIVACY: the matched prompt substring is kept only in local
+ * `matched`/`evidence`. The candidate fields sent to SWM carry only the fixed
+ * heuristic regex signature. Port of Python `discover_injection`.
  */
 export function discoverInjection(text: string, ruleset: Ruleset): Finding[] {
   const known = new Set<string>();
@@ -537,8 +554,8 @@ export function discoverInjection(text: string, ruleset: Ruleset): Finding[] {
       severity: hit.severity,
       title: "Suspicious prompt-injection phrase",
       toolName: null,
-      matched: hit.pattern,
-      evidence: hit.pattern,
+      matched: hit.phrase,
+      evidence: hit.phrase,
       confirmed: false,
       source: "heuristic",
       fields: { pattern: hit.pattern, owaspCategory: hit.owasp },
@@ -901,7 +918,7 @@ export function detectSkill(toolName: string, args: unknown, ruleset: Ruleset): 
 }
 
 // ---------------------------------------------------------------------------
-// Dependency install parsing (shared by detection + curator import) — port
+// Dependency install parsing — port
 // ---------------------------------------------------------------------------
 
 const SHELL_INSTALL_PATTERNS = [
@@ -926,6 +943,52 @@ function tokenizeShell(command: string): string[] {
     out.push(m[1] ?? m[2] ?? m[3] ?? "");
   }
   return out;
+}
+
+const SHELL_READ_COMMANDS = new Set([
+  "cat",
+  "less",
+  "more",
+  "head",
+  "tail",
+  "bat",
+  "xxd",
+  "hexdump",
+  "strings",
+  "od",
+  "nl",
+]);
+
+function looksLikePath(token: string): boolean {
+  return token.includes("/") || token.startsWith("~") || token.startsWith(".") || token.includes(".");
+}
+
+/** File paths read through cat-family shell commands (visibility only). */
+export function parseShellReads(command: string): string[] {
+  if (!command || ![...SHELL_READ_COMMANDS].some((name) => ` ${command} `.includes(` ${name} `))) return [];
+  const tokens = tokenizeShell(command);
+  const out: string[] = [];
+  let i = 0;
+  while (i < tokens.length) {
+    if (SHELL_READ_COMMANDS.has((tokens[i] ?? "").toLowerCase())) {
+      let j = i + 1;
+      while (j < tokens.length && ![";", "&&", "||", "|", ">", ">>", "<"].includes(tokens[j] ?? "")) {
+        const token = tokens[j] ?? "";
+        if (!token.startsWith("-") && looksLikePath(token)) out.push(token);
+        j += 1;
+      }
+      i = j;
+    } else {
+      i += 1;
+    }
+  }
+  return [...new Set(out)];
+}
+
+/** HTTP(S) URLs fetched through curl/wget shell commands (visibility only). */
+export function parseDownloads(command: string): string[] {
+  if (!command || !/\b(?:curl|wget)\b/i.test(command)) return [];
+  return [...new Set(command.match(/https?:\/\/[^\s;'"|&>]+/gi) ?? [])];
 }
 
 export interface ParsedPackage {

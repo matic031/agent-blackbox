@@ -31,27 +31,11 @@ BLACKBOX_ONTOLOGY = "http://umanitek.ai/ontology/guardian/"
 RDF_TYPE = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"
 XSD_DATETIME = "http://www.w3.org/2001/XMLSchema#dateTime"
 
-THREAT_TYPE_IRI = f"{BLACKBOX_ONTOLOGY}Threat"
-DEP_THREAT_TYPE_IRI = f"{BLACKBOX_ONTOLOGY}VulnerabilityAdvisory"
-INJECTION_THREAT_TYPE_IRI = f"{BLACKBOX_ONTOLOGY}PromptInjectionThreat"
-ESCALATION_THREAT_TYPE_IRI = f"{BLACKBOX_ONTOLOGY}EscalationThreat"
-FILE_ACCESS_THREAT_TYPE_IRI = f"{BLACKBOX_ONTOLOGY}FileAccessThreat"
-SUSPICIOUS_SKILL_THREAT_TYPE_IRI = f"{BLACKBOX_ONTOLOGY}SuspiciousSkillThreat"
-# Indicator-of-compromise threat: a bad domain/url/ip/hash/wallet/contract the
-# agent touches. The concrete indicator type is carried in g:category.
-IOC_THREAT_TYPE_IRI = f"{BLACKBOX_ONTOLOGY}IndicatorThreat"
 REPORT_TYPE_IRI = f"{BLACKBOX_ONTOLOGY}ThreatReport"
 FALSE_POSITIVE_TYPE_IRI = f"{BLACKBOX_ONTOLOGY}FalsePositive"
-#: Legacy curation-proof format. New curation publishes a complete threat KA to
-#: VM; this type remains solely so Python consumers can verify proof-era data
-#: that is already on-chain while operators migrate it to full assets.
-CURATION_PROOF_TYPE_IRI = f"{BLACKBOX_ONTOLOGY}CurationProof"
 
 # Blackbox predicates -------------------------------------------------------
 IDENTIFIER_PRED = f"{BLACKBOX_ONTOLOGY}identifier"
-ANCHOR_ROOT_PRED = f"{BLACKBOX_ONTOLOGY}anchorRoot"
-ANCHOR_MEMBER_PRED = f"{BLACKBOX_ONTOLOGY}anchorMember"
-ANCHOR_COUNT_PRED = f"{BLACKBOX_ONTOLOGY}anchorCount"
 CURATED_PRED = f"{BLACKBOX_ONTOLOGY}curated"
 SEVERITY_PRED = f"{BLACKBOX_ONTOLOGY}severity"
 PATTERN_PRED = f"{BLACKBOX_ONTOLOGY}pattern"
@@ -69,8 +53,6 @@ SOURCE_PRED = f"{BLACKBOX_ONTOLOGY}source"
 REPORTS_THREAT_PRED = f"{BLACKBOX_ONTOLOGY}reportsThreat"
 REPORTER_PRED = f"{BLACKBOX_ONTOLOGY}reporter"
 FRAMEWORK_PRED = f"{BLACKBOX_ONTOLOGY}framework"
-DISPUTES_PRED = f"{BLACKBOX_ONTOLOGY}disputes"
-DISPUTE_REPORTER_PRED = f"{BLACKBOX_ONTOLOGY}disputeReporter"
 
 # threat kind: distinguishes active malware from a mere vulnerability. Only
 # ``malware`` blocks (at/above block_severity); ``vulnerability`` always flags
@@ -98,16 +80,8 @@ SCHEMA_CONTRIBUTOR_PRED = "http://schema.org/contributor"
 # Defaults
 # ---------------------------------------------------------------------------
 
-#: Default community context-graph id (config key ``context_graph_id``).
-#: PRIVATE community graph (on-chain accessPolicy=1, allowlist-gated). The
-#: DKG auto-approves every cryptographically valid join request for this graph,
-#: so membership is open in practice while SWM uses the private relay-backed
-#: path. Approved members read and write SWM. The independent curated publish
-#: policy keeps VM promotion restricted to the curator.
-# Old default, parked for now: the correct graph is the blackbox one below, NOT
-# the legacy one. Do not re-enable without discussion.
-# DEFAULT_CONTEXT_GRAPH_ID = "umanitek/guardian-threats-staging"
-DEFAULT_CONTEXT_GRAPH_ID = "umanitek/blackbox-threats-staging"
+#: Default private context graph (config key ``context_graph_id``).
+DEFAULT_CONTEXT_GRAPH_ID = "0x37b1Fdfd134e2b17583bCBdD3034F91504cD9C70/agent-blackbox"
 
 #: Legacy graph ids from earlier defaults. A node still pointed at one of these
 #: is transparently switched to ``DEFAULT_CONTEXT_GRAPH_ID`` at config-load
@@ -117,54 +91,25 @@ DEFAULT_CONTEXT_GRAPH_ID = "umanitek/blackbox-threats-staging"
 #: genuinely custom ``context_graph_id`` (anything not in this set) is always
 #: left untouched.
 LEGACY_CONTEXT_GRAPH_IDS = frozenset({
+    "umanitek/blackbox-threats-staging",
     "umanitek/guardian-threats-staging",
     "umanitek/guardian-threats",
 })
 
-#: Default Blackbox-managed local DKG node HTTP endpoint. Deliberately not the
-#: DKG CLI's default 9200, so Agent Blackbox never collides with a user's own
-#: DKG node/cache.
-#: Full threat assets handled per compatibility-migration batch. Each threat is
-#: still its own paid, self-contained VM knowledge asset; batching only controls
-#: how much work one ``curate anchor`` migration invocation attempts.
-DEFAULT_VM_MIGRATION_BATCH_SIZE = 250
-# Backward-compatible constant name for callers built against the proof era.
-DEFAULT_ANCHOR_BATCH_SIZE = DEFAULT_VM_MIGRATION_BATCH_SIZE
-
+#: Default Blackbox-managed local DKG node HTTP endpoint.
 DEFAULT_DKG_PORT = 9320
 DEFAULT_DKG_URL = f"http://127.0.0.1:{DEFAULT_DKG_PORT}"
 
-#: Community curator's node peer id — the owner of the private community graph.
-#: A fresh member sends its join request here; the curator DKG auto-approves it
-#: and writes the on-chain allowlist before the member syncs SWM. This is the
-#: ~/.dkg curator node on :9320. Override with ``BLACKBOX_CURATOR_PEER_ID``.
-DEFAULT_CURATOR_PEER_ID = "12D3KooWBY9jmNATMPv1DZcKbFas5RtjpkhT69pPwvkUBY2MMnDX"
+#: Bootstrap peer for joining the default private threat graph.
+DEFAULT_GRAPH_PEER_ID = "12D3KooWBJskzr2unXQG9mR3LRZFUJoxWr1PN6hTbyWyKndHXjZM"
 
-#: Stale/wrong curator peer ids that must NOT be used as the join target. A
-#: config still pointed at one of these is transparently switched to
-#: ``DEFAULT_CURATOR_PEER_ID`` at config-load time, so join requests always
-#: reach the real owner and SWM sync is authorised. The qeYwXz1E peer is the
-#: hermes MEMBER node (agent 0x089D), NOT the recorded owner of
-#: ``umanitek/blackbox-threats-staging`` (that is BY2MMnDX / ~/.dkg / 0xEbaf);
-#: a node targeting qeYwXz1E gets stuck at 0 SWM rows with dial-failed /
-#: "not curator". A genuinely custom peer (not in this set) is left untouched.
-LEGACY_CURATOR_PEER_IDS = frozenset({
+#: Previous bootstrap peers transparently replaced during config loading.
+LEGACY_GRAPH_PEER_IDS = frozenset({
+    "12D3KooWAuEHYTWbD3R3yPTcECCYZnrjHNpJmrUw5b4D5T3m5Kr3",
+    "12D3KooWBY9jmNATMPv1DZcKbFas5RtjpkhT69pPwvkUBY2MMnDX",
     "12D3KooWQHQd1SNecrRxwceqPJkXSKEYn8vrV4QyJ2AfqeYwXz1E",
+    "12D3KooWBJskzr2unXQG9mR3LRZFUJoxWr1PN6hTbyWyKndHXjZM",
 })
-
-# ---------------------------------------------------------------------------
-# DKG networks — Blackbox is MAINNET ONLY (never publishes to a testnet)
-# ---------------------------------------------------------------------------
-#: Supported DKG mainnets, by EVM chain id → dkg network slug. Base is the
-#: default: the curator wallet is funded with ETH on Base. Gnosis/NeuroWeb are
-#: allowed overrides (via ``BLACKBOX_DKG_NETWORK`` / ``setup-graph --network``).
-DKG_MAINNET_CHAINS = {8453: "mainnet-base", 100: "mainnet-gnosis", 2043: "mainnet-neuroweb"}
-#: Known DKG testnets. A node on any of these must NEVER be published to — the
-#: real threat graph lives on mainnet. The preflight blocks these outright.
-DKG_TESTNET_CHAINS = {84532: "testnet-base-sepolia", 10200: "testnet-gnosis-chiado", 20430: "testnet-neuroweb"}
-#: The intended default chain. Fresh DKG v10 nodes can come up on a different
-#: chain (the node default is Gnosis), so seeding verifies against this.
-DEFAULT_DKG_CHAIN_ID = 8453  # Base mainnet
 
 #: Severity ladder, lowest → highest. ``info`` < ... < ``critical``.
 SEVERITY_ORDER = ("info", "low", "medium", "high", "critical")

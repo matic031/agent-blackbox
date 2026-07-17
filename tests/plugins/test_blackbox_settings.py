@@ -171,6 +171,7 @@ def test_load_config_migrates_legacy_default_dkg_url(monkeypatch, tmp_path):
     monkeypatch.delenv("BLACKBOX_DKG_DAEMON_URL", raising=False)
     monkeypatch.delenv("BLACKBOX_DKG_URL", raising=False)
     monkeypatch.delenv("BLACKBOX_DKG_PORT", raising=False)
+    monkeypatch.delenv("BLACKBOX_DKG_HOME", raising=False)
     monkeypatch.setenv("HERMES_HOME", str(hermes_home))
     monkeypatch.setattr(config_mod, "_blackbox_entry", lambda: {"dkg_url": "http://127.0.0.1:9200"})
 
@@ -196,11 +197,13 @@ def test_load_config_migrates_unpaired_shared_default_dkg_home(monkeypatch, tmp_
     assert cfg.dkg_home == str(hermes_home / "blackbox" / "dkg")
 
 
-def test_load_config_preserves_explicit_shared_dkg_pair(monkeypatch):
+def test_load_config_migrates_explicit_shared_dkg_pair(monkeypatch, tmp_path):
+    hermes_home = tmp_path / "hermes"
     monkeypatch.delenv("BLACKBOX_DKG_DAEMON_URL", raising=False)
     monkeypatch.delenv("BLACKBOX_DKG_URL", raising=False)
     monkeypatch.delenv("BLACKBOX_DKG_PORT", raising=False)
     monkeypatch.delenv("BLACKBOX_DKG_HOME", raising=False)
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
     monkeypatch.setattr(
         config_mod,
         "_blackbox_entry",
@@ -208,8 +211,30 @@ def test_load_config_preserves_explicit_shared_dkg_pair(monkeypatch):
     )
 
     cfg = config_mod.load_blackbox_config()
+    assert cfg.dkg_url == constants.DEFAULT_DKG_URL
+    assert cfg.dkg_home == str(hermes_home / "blackbox" / "dkg")
+
+
+def test_configured_blackbox_node_wins_over_stale_environment(monkeypatch, tmp_path):
+    configured_home = tmp_path / "agent-blackbox" / ".dkg"
+    configured_bin = tmp_path / "agent-blackbox" / "dkg" / "dkg"
+    monkeypatch.setenv("BLACKBOX_DKG_HOME", str(Path.home() / ".dkg"))
+    monkeypatch.setenv("BLACKBOX_DKG_BIN", str(Path.home() / ".local" / "bin" / "dkg"))
+    monkeypatch.setenv("BLACKBOX_DKG_DAEMON_URL", "http://127.0.0.1:9200")
+    monkeypatch.setattr(
+        config_mod,
+        "_blackbox_entry",
+        lambda: {
+            "dkg_url": "http://127.0.0.1:9320",
+            "dkg_home": str(configured_home),
+            "dkg_bin": str(configured_bin),
+        },
+    )
+
+    cfg = config_mod.load_blackbox_config()
     assert cfg.dkg_url == "http://127.0.0.1:9320"
-    assert cfg.dkg_home == str(Path.home() / ".dkg")
+    assert cfg.dkg_home == str(configured_home)
+    assert cfg.dkg_bin == str(configured_bin)
 
 
 def test_load_config_preserves_custom_dkg_url(monkeypatch, tmp_path):

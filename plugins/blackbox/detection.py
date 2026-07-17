@@ -2,7 +2,7 @@
 
 No hardcoded threat rules act as truth: every rule comes from the graph-synced
 ruleset, in two trust tiers. Rules tagged ``source: "public"`` come from the
-curated public threat graph (verifiable-memory) — the source of truth: if it's
+verified public threat graph (verifiable-memory) — the source of truth: if it's
 there, it's a threat, and a match is CONFIRMED (blockable). Rules tagged
 ``source: "community"`` come from the shared community pool — a match is
 flagged but can never block. Built-in heuristics only *nominate* candidates
@@ -34,22 +34,21 @@ class Finding:
 
     ``source`` says which trust tier raised the finding:
 
-    * ``"public"`` — matched the curated public threat graph (the source of
+    * ``"public"`` — matched the verified public threat graph (the source of
       truth). ``confirmed`` is True; blockable in block mode.
     * ``"community"`` — matched a rule seen only in the shared community pool.
       Flagged (and re-reported to strengthen the consensus signal) but NEVER
       blocks: anyone can write to the community pool.
     * ``"heuristic"`` — raised only by a built-in discovery heuristic; a
-      *candidate* nominated to the community graph for a curator to promote.
+      *candidate* nominated to the community graph.
     * ``"custom"`` — matched a user-configured local rule (e.g. a protected
       path). Always flags, blocks in block mode, never shared to SWM.
 
     ``confirmed`` is kept as the strict "public graph says so" bit — only
     confirmed findings can block. ``fields`` carries the privacy-safe threat
     attributes (pattern/toolName/category/skillName/...) that the auto-submit
-    path forwards to ``build_report_quads`` so a curator can promote the
-    threat directly — it NEVER contains raw prompts, paths, or file/skill
-    source.
+    path forwards to ``build_report_quads``. It NEVER contains raw prompts,
+    paths, or file/skill source.
     """
 
     identifier: str
@@ -84,7 +83,7 @@ class Finding:
 def _rule_source(rule: Dict[str, Any]) -> str:
     """Trust tier of a graph rule. Untagged rules default to ``public`` —
     rules built before tier tagging (or handed in directly by tests) were
-    always treated as curated."""
+    always treated as verified."""
     src = str(rule.get("source") or "public").lower()
     return src if src in ("public", "community") else "public"
 
@@ -123,8 +122,7 @@ def detect_injection(text: str, ruleset: Any) -> List[Finding]:
                     evidence=str(match.group(0))[:200],
                     confirmed=src == "public",
                     source=src,
-                    # Community matches carry the promotion fields so our
-                    # sighting strengthens the curation signal.
+                    # Community matches carry the fields needed for review.
                     fields={"pattern": rule.get("pattern_src")} if src == "community" else {},
                 )
             )
@@ -415,8 +413,7 @@ def detect_ioc(tool_name: str, args: Any, ruleset: Any) -> List[Finding]:
     broad without raising false positives on unrelated tokens. IOC findings
     ALWAYS flag but never auto-block in this rollout (see :mod:`hooks`) — network
     and address blocklists are higher-churn than pinned package versions, so we
-    alert first and let a curator enable blocking once the false-positive rate
-    is validated.
+    alert first while the false-positive rate is being validated.
     """
     ioc_rules = getattr(ruleset, "ioc", {}) or {}
     if not ioc_rules:
