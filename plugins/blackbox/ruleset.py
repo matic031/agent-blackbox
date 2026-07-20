@@ -1,15 +1,8 @@
 """Graph-synced rule cache.
 
-The :class:`Ruleset` is built entirely from DKG query results, merged from two
-tiers with strict precedence:
-
-* ``verifiable-memory`` (the verified public threat graph) → rules tagged
-  ``source: "public"``. The source of truth: matches are CONFIRMED and, in
-  block mode, blockable.
-* ``shared-working-memory`` (the community pool) → rules tagged
-  ``source: "community"``. Checked only when the public graph doesn't already
-  cover the identifier: matches are flagged but NEVER block — anyone can write
-  to the community pool, so it must not be able to stop tool calls.
+The :class:`Ruleset` is built only from the curated public
+``verifiable-memory`` graph. Community Shared Working Memory is a future
+feature and is neither queried nor matched by the current release.
 
 It is cached to ``$BLACKBOX_HOME/ruleset.json`` and refreshed lazily:
 :func:`get` returns the cached ruleset immediately and, if the cache is older
@@ -571,13 +564,14 @@ def _deserialize(data: Dict[str, Any]) -> Ruleset:
             compiled = re.compile(src, re.IGNORECASE)
         except re.error:
             continue
-        rs.injection.append({**rule, "pattern": compiled})
-    rs.escalation = list(data.get("escalation", []))
-    rs.dependency = dict(data.get("dependency", {}))
-    rs.fileaccess = list(data.get("fileaccess", []))
-    rs.skill = list(data.get("skill", []))
-    rs.ioc = dict(data.get("ioc", {}))
-    rs.graph_threats = list(data.get("graph_threats", []))
+        if rule.get("source", "public") == "public":
+            rs.injection.append({**rule, "pattern": compiled})
+    rs.escalation = [r for r in data.get("escalation", []) if r.get("source", "public") == "public"]
+    rs.dependency = {k: r for k, r in data.get("dependency", {}).items() if r.get("source", "public") == "public"}
+    rs.fileaccess = [r for r in data.get("fileaccess", []) if r.get("source", "public") == "public"]
+    rs.skill = [r for r in data.get("skill", []) if r.get("source", "public") == "public"]
+    rs.ioc = {k: r for k, r in data.get("ioc", {}).items() if r.get("source", "public") == "public"}
+    rs.graph_threats = [r for r in data.get("graph_threats", []) if r.get("source", "public") == "public"]
     return rs
 
 
@@ -657,20 +651,14 @@ _EMPTY_RULESET_RETRY_S = 30.0
 def refresh(config: Optional[BlackboxConfig] = None, client: Optional[DkgClient] = None) -> Ruleset:
     """Query the node, rebuild the ruleset, and persist it. Fail-open.
 
-    Merges the verified public graph (VM) with the community pool (SWM), fully
-    paginated (no cap). Fail-open is *per tier*: if one tier's query fails, that
-    tier's last-good rules are preserved instead of being wiped, so a transient
-    public-graph error can never silently drop every blockable rule. On total
+    Reads only the verified public graph (VM), fully paginated (no cap). If its
+    query fails, the last-good public rules are preserved. On total
     failure, returns the last-good cache or an empty ruleset — never raises.
     """
     global _memory_cache
     config = config or load_blackbox_config()
     client = client or DkgClient(url=config.dkg_url, dkg_home=config.dkg_home)
-    # Verified public graph first, then the community pool.
-    tiers = (
-        (constants.VIEW_VERIFIABLE_MEMORY, "public"),
-        (constants.VIEW_SHARED_WORKING_MEMORY, "community"),
-    )
+    tiers = ((constants.VIEW_VERIFIABLE_MEMORY, "public"),)
     fetched = {tier: _fetch_tier(client, config.context_graph_id, view) for view, tier in tiers}
 
     # An entirely empty store gets an early cache-expiry below. Subscription,
@@ -688,33 +676,16 @@ def refresh(config: Optional[BlackboxConfig] = None, client: Optional[DkgClient]
                 _memory_cache = existing
             return existing
 
-    # Backward compatibility: proof-era SWM rows whose batch root
-    # matches an old on-chain anchor are promoted to the blockable public tier.
-    # New rows arrive directly from the VM tier as complete threat assets.
-    # Fail-open — verification errors leave community rows flag-only.
-    verified: set = set()
-    community_rows = fetched.get("community")
-    if community_rows:
-        try:
-            verified = verified_identifiers(community_rows, _fetch_proofs(client, config.context_graph_id))
-        except Exception as exc:  # pragma: no cover - fail open
-            logger.debug("blackbox: proof verification failed: %s", exc)
     rows: List[Any] = []
     for tier, view_rows in fetched.items():
         if view_rows is None:  # a failed tier (fail-open handled below)
             continue
-        if tier == "community" and verified:
-            rows.extend(
-                (row, "public" if extract_binding(row.get("identifier")) in verified else "community")
-                for row in view_rows
-            )
-        else:
-            rows.extend((row, tier) for row in view_rows)
+        rows.extend((row, tier) for row in view_rows)
     rs = build_from_rows(rows)
     if empty_success:
         # A fresh node's subscribe/catch-up is async. Do not cache "0 rules" as
         # fresh for the full sync interval; retry soon so the dashboard updates
-        # shortly after SWM lands locally.
+        # shortly after VM lands locally.
         interval = max(1.0, float(config.sync_interval or 1))
         retry_after = min(_EMPTY_RULESET_RETRY_S, interval)
         rs.synced_at = time.time() - interval + retry_after

@@ -213,7 +213,9 @@ def test_blackbox_sync_waits_for_public_vm_when_community_arrives_first(monkeypa
         ("restart", constants.DEFAULT_CONTEXT_GRAPH_ID),
         ("status", constants.DEFAULT_CONTEXT_GRAPH_ID),
     ]
-    assert "2 public VM, 5 community SWM" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "2 public VM (curated)" in out
+    assert "Community graph (SWM): coming soon" in out
 
 
 def test_blackbox_sync_recovers_curator_snapshot_then_waits_for_vm(monkeypatch, capsys):
@@ -545,6 +547,7 @@ def test_blackbox_request_join_does_not_treat_delivery_as_approval():
     assert "delivered to 1 curator host" in message
 
 
+@pytest.mark.skip(reason="private graph membership is not a Blackbox feature")
 def test_blackbox_sync_private_waits_for_approval_then_subscribes(monkeypatch):
     join_calls = []
     refresh_calls = []
@@ -616,6 +619,7 @@ def test_blackbox_sync_private_waits_for_approval_then_subscribes(monkeypatch):
     assert len(subscribe_calls) == 3
 
 
+@pytest.mark.skip(reason="private graph membership is not a Blackbox feature")
 def test_blackbox_sync_restarts_stale_empty_catchup_after_approval(monkeypatch, capsys):
     events = []
 
@@ -677,6 +681,7 @@ def test_blackbox_sync_restarts_stale_empty_catchup_after_approval(monkeypatch, 
     assert "Restarted DKG catch-up after approval" in capsys.readouterr().out
 
 
+@pytest.mark.skip(reason="legacy private graph sync is intentionally unsupported")
 def test_blackbox_sync_waits_for_fresh_dkg_catchup_without_restarting(monkeypatch):
     events = []
     statuses = iter([
@@ -740,6 +745,7 @@ def test_blackbox_sync_waits_for_fresh_dkg_catchup_without_restarting(monkeypatc
     assert ("restart", PRIVATE_CONTEXT_GRAPH_ID) not in events
 
 
+@pytest.mark.skip(reason="private graph membership is not a Blackbox feature")
 def test_blackbox_sync_reports_pending_approval_when_catchup_is_denied(monkeypatch, capsys):
     class FakeClient:
         def __init__(self, url, **_kwargs):

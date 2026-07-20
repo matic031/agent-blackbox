@@ -103,7 +103,7 @@ class BlackboxConfig:
     dkg_home: str = field(default_factory=lambda: str(constants.blackbox_dkg_home()))
     dkg_bin: str = field(default_factory=lambda: str(constants.blackbox_dkg_bin()))
     sync_interval: int = 60
-    report: bool = True
+    report: bool = False
     daily_report_limit: int = 9999
     report_min_severity: str = "high"
     block_severity: str = "critical"
@@ -313,7 +313,9 @@ def load_blackbox_config() -> BlackboxConfig:
         sync_interval=_as_int(
             _env_or(entry, env="BLACKBOX_SYNC_INTERVAL", key="sync_interval", default=60), 60
         ),
-        report=_as_bool(_env_or(entry, env="BLACKBOX_REPORT", key="report", default=True), True),
+        # Threat sharing ships with the future community graph. This is not a
+        # user-toggleable path in the VM-only release.
+        report=False,
         daily_report_limit=_as_int(
             _env_or(
                 entry,

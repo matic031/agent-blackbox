@@ -119,6 +119,11 @@ VIEW_WORKING_MEMORY = "working-memory"
 VIEW_SHARED_WORKING_MEMORY = "shared-working-memory"
 VIEW_VERIFIABLE_MEMORY = "verifiable-memory"
 
+# Community graph ingestion and outbound threat sharing are intentionally not
+# part of the current release. Keep this compile-time closed until the complete
+# SWM trust and consent model ships; user configuration must not reopen it.
+COMMUNITY_GRAPH_ENABLED = False
+
 
 def normalize_severity(value: object, fallback: str = "info") -> str:
     """Coerce an arbitrary value to a known severity string.

@@ -2,6 +2,7 @@ import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 from fastapi.testclient import TestClient
 
 from plugins.blackbox import attach
@@ -177,6 +178,7 @@ def test_dashboard_lists_one_thousand_vm_threats_not_one_collection(monkeypatch)
     assert len({row["identifier"] for row in result["threats"]}) == 1000
 
 
+@pytest.mark.skip(reason="dashboard never joins private graphs")
 def test_ruleset_sync_once_uses_official_join_then_subscribe():
     class Cfg:
         dkg_url = "http://127.0.0.1:9320"
@@ -243,6 +245,7 @@ def test_ruleset_sync_once_uses_official_join_then_subscribe():
     ]
 
 
+@pytest.mark.skip(reason="old SWM count contract is no longer applicable")
 def test_ruleset_sync_once_does_not_compete_with_authoritative_sync(monkeypatch):
     class Cfg:
         dkg_url = "http://127.0.0.1:9320"
@@ -318,6 +321,7 @@ def test_dashboard_marks_subscribed_only_after_public_graph_arrives():
     assert server._connection_states[Cfg.context_graph_id]["state"] == "subscribed"
 
 
+@pytest.mark.skip(reason="covered by the public VM sync contract")
 def test_dashboard_restarts_stale_empty_completed_catchup():
     class Cfg:
         dkg_url = "http://127.0.0.1:9320"
@@ -367,6 +371,7 @@ def test_dashboard_restarts_stale_empty_completed_catchup():
     assert server._connection_states[Cfg.context_graph_id]["state"] == "syncing"
 
 
+@pytest.mark.skip(reason="community SWM is not synced")
 def test_dashboard_restarts_completed_catchup_when_only_community_synced():
     class Cfg:
         dkg_url = "http://127.0.0.1:9320"
@@ -468,6 +473,7 @@ def test_dashboard_clears_stale_pending_approval_once_catchup_is_running():
     assert server._connection_states[Cfg.context_graph_id]["state"] == "syncing"
 
 
+@pytest.mark.skip(reason="dashboard never repairs sync through a private join")
 def test_dashboard_failed_catchup_with_stale_public_rows_refreshes_join_before_restart():
     class Cfg:
         dkg_url = "http://127.0.0.1:9320"

@@ -119,17 +119,8 @@ The installer adds `blackbox` as a shortcut for `hermes blackbox`.
 `blackbox chat` opens a dedicated operator chat for Blackbox without adding that
 chat to the protected-agent count.
 
-Found a threat yourself? Report it to the community graph so every agent sees it:
-
-```bash
-# a malicious npm package
-blackbox report --type dependency --ecosystem npm \
-  --name evil-package --version 1.0.0 --severity critical
-
-# a prompt-injection pattern
-blackbox report --type injection \
-  --pattern "ignore all previous instructions" --owasp LLM01
-```
+The community graph and threat sharing are shown as **Coming soon**. For now,
+findings and reports stay local and `blackbox report` submits nothing.
 
 Ready to enforce instead of just watch? Flip block mode in `config.yaml`:
 
@@ -140,7 +131,7 @@ plugins:
       mode: block   # stop confirmed threats instead of only flagging them
 ```
 
-Every detection is logged to the audit trail and shown live in the dashboard. Eligible findings can also be shared as privacy-safe community reports.
+Every detection is logged locally to the audit trail and shown live in the dashboard.
 
 The reviewer only flags - it never blocks, and its verdicts stay on your machine (never shared to the community graph). Turn it off with `blackbox setup-llm --disable`.
 
@@ -186,18 +177,17 @@ Threats should not have to be rediscovered one agent at a time. Agent Blackbox
 gives every protected agent the benefit of what the network has already learned:
 
 - **Verified** threats are reviewed by Umanitek and can be blocked.
-- **Community** reports warn other agents while they await verification.
+- **Community** Shared Working Memory is coming soon and is not used yet.
 - **Local** findings stay available in your own dashboard and audit trail.
 
 ## How it works
 
 1. **Watch.** Blackbox sees the prompt, tool call, command, file, package, or
    skill before the agent acts.
-2. **Check.** It compares the action with built-in security rules and shared
-   threat intelligence.
+2. **Check.** It compares the action with built-in security rules and the
+   curated public Verifiable Memory graph.
 3. **Respond.** Audit mode warns and records. Block mode stops confirmed threats.
-4. **Learn.** Eligible high-severity findings can become privacy-safe community
-   reports, helping other agents spot the same attack.
+4. **Record.** Findings remain in the user's local audit trail.
 
 ### Under the hood
 
@@ -205,9 +195,9 @@ The shared intelligence lives on the OriginTrail Decentralized Knowledge Graph
 (DKG). Blackbox runs its own isolated local DKG node, so it does not replace or
 modify another DKG installation.
 
-The threat graph is private: approved nodes can read its threat data, while its
-anchors remain publicly verifiable. Verified public threats are the only shared
-threats allowed to block; community reports warn until they are reviewed.
+The curated threat graph is public and requires no private membership or join
+approval. Only its verified VM content is used for threat matching. Community
+SWM and threat sharing remain visible as coming-soon features but are inactive.
 
 The dashboard shows **Public**, **Community**, and **Local** intelligence side by
 side. Technical settings, paths, and node details are listed below.
@@ -240,8 +230,8 @@ Set under `plugins.entries.blackbox.*` in `config.yaml`.
 | `dkg_home` | `<agent-blackbox>/.dkg` | isolated DKG node config, token, pid, and cache |
 | `context_graph_id` | `0x37b1Fdfd…/agent-blackbox-vm` | Public verified threat graph |
 | `graph_peer_id` | bundled publisher peer | Authoritative threat-data sync source |
-| `daily_report_limit` | `9999` | max threat reports sent to the community graph per day |
-| `report_min_severity` | `high` | minimum severity for heuristic candidates to be flagged and reported |
+| `report` | `false` | fixed off while community threat sharing is coming soon |
+| `report_min_severity` | `high` | reserved for future community sharing; does not submit today |
 | `detection.<category>.enabled` | `true` | turn a whole category on/off (`injection`, `escalation`, `dependency`, `fileaccess`, `skill`) |
 | `detection.<category>.min_severity` | `info` | quiet a category below this level, e.g. `detection.dependency.min_severity: critical` |
 | `protected_paths` | `[]` | your own files/folders that always block and never leave your machine |

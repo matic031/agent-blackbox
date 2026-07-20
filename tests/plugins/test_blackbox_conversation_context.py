@@ -199,8 +199,4 @@ def test_context_never_reaches_outbound_sighting(monkeypatch):
     }}
     hooks._report_and_audit(cfg, "pre_tool_call", [finding], detail)
 
-    assert shared, "sighting should have been shared for a heuristic finding"
-    blob = json.dumps(shared)
-    assert "CANARY_PROMPT" not in blob
-    assert "CANARY_INPUT" not in blob
-    assert "context" not in blob
+    assert shared == [], "threat sharing stays off until community SWM ships"

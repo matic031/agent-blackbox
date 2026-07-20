@@ -139,7 +139,7 @@ def test_missing_community_does_not_restart_dkg_sync(monkeypatch):
     assert len(rs.dependency) == 1
 
 
-def test_partial_tier_error_preserves_public_rules(monkeypatch):
+def test_vm_error_preserves_public_rules_without_loading_swm(monkeypatch):
     monkeypatch.setattr(ruleset_mod, "_write_cache", lambda rs: None)
     prior = Ruleset(dependency={"npm:evil@1.0": {"identifier": "dep:npm:evil@1.0", "source": "public",
         "severity": "critical", "name": "m", "ecosystem": "npm", "packageName": "evil", "packageVersion": "1.0"}})
@@ -153,7 +153,7 @@ def test_partial_tier_error_preserves_public_rules(monkeypatch):
 
     rs = ruleset_mod.refresh(config_mod.BlackboxConfig(), _Partial())
     assert "npm:evil@1.0" in rs.dependency        # verified rule is preserved
-    assert len(rs.injection) == 1                  # fresh community tier still loaded
+    assert len(rs.injection) == 0                  # community SWM is never queried
 
 
 # ---------------------------------------------------------------------------

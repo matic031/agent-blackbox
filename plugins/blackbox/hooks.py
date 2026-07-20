@@ -73,7 +73,7 @@ def _flag_worthy(cfg: BlackboxConfig, findings: List[detection.Finding]) -> List
 
 
 def _report_and_audit(cfg: BlackboxConfig, event: str, findings: List[detection.Finding], detail: Dict[str, Any]) -> None:
-    """Audit always; on findings write private audit KA + outbound SWM sighting."""
+    """Audit findings locally; never publish them to community SWM."""
     finding_dicts = [f.to_dict() for f in findings]
     audit.record(event=event, findings=finding_dicts or None, detail=detail)
     if not findings:
@@ -97,9 +97,8 @@ def _report_and_audit(cfg: BlackboxConfig, event: str, findings: List[detection.
         if client is not None:
             audit.mark_reported(identifier)
             audit.write_private_audit_ka(client, cfg.context_graph_id, event, finding)
-        # Outbound SWM sighting (never carries observed prompt/command text).
-        if cfg.report and client is not None and audit.allow_report(cfg.daily_report_limit):
-            _share_sighting(client, cfg, finding)
+        # Outbound sharing is closed until the community graph ships. Findings
+        # and their private audit evidence remain local.
 
 
 def _share_sighting(client: DkgClient, cfg: BlackboxConfig, finding: Dict[str, Any]) -> None:

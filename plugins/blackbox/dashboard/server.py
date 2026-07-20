@@ -189,24 +189,50 @@ def _graph_entries(rs: Any, source: str) -> List[Dict[str, Any]]:
 
 def _ruleset_sync_counts(rs: Any) -> Dict[str, int]:
     public = _graph_source_count(rs, "public")
-    community = _graph_source_count(rs, "community")
-    graph_total = public + community
     return {
-        "total": max(_ruleset_total(rs), graph_total),
+        "total": max(_ruleset_total(rs), public),
         "public": public,
-        "community": community,
+        "community": 0,
     }
 
 
 def _sync_ruleset_once(load_config: Any, dkg_client_cls: Any, ruleset_mod: Any) -> Dict[str, int]:
-    """Connect through DKG, then refresh the VM/SWM ruleset."""
+    """Subscribe to the public graph and refresh its curated VM rules."""
     cfg = load_config()
     transfer = sync_state.read()
     if transfer.get("status") == "running":
         public = int(transfer.get("public_entries") or 0)
-        community = int(transfer.get("community_entries") or 0)
-        return {"total": public + community, "public": public, "community": community}
+        return {"total": public, "public": public, "community": 0}
     client = dkg_client_cls(url=cfg.dkg_url, dkg_home=cfg.dkg_home)
+    # The release graph is public. Subscription never requires or attempts a
+    # private membership handshake.
+    try:
+        client.subscribe_context_graph(cfg.context_graph_id)
+        with _join_lock:
+            _connection_states[cfg.context_graph_id] = {
+                "state": "syncing",
+                "updated_at": time.time(),
+            }
+    except Exception as exc:
+        with _join_lock:
+            _connection_states[cfg.context_graph_id] = {
+                "state": "connection-error",
+                "updated_at": time.time(),
+                "error": str(exc),
+            }
+    rs = ruleset_mod.refresh(cfg, client)
+    counts = _ruleset_sync_counts(rs)
+    if counts["public"]:
+        with _join_lock:
+            _connection_states[cfg.context_graph_id] = {
+                "state": "subscribed",
+                "updated_at": time.time(),
+            }
+    return counts
+
+    # Legacy private-graph recovery code below is intentionally unreachable;
+    # retained temporarily to minimize the compatibility diff while the DKG
+    # client API is shared with other products.
     peer_id = str(getattr(cfg, "graph_peer_id", "") or "")
     if peer_id:
         try:
@@ -1164,7 +1190,7 @@ def create_app(*, manage_guardian: bool = False):
         # rows are complete threats, and ruleset.refresh also promotes any
         # still-unmigrated legacy proof rows.
         public = _graph_source_count(rs, "public")
-        community = _graph_source_count(rs, "community")
+        community = 0
 
         # Catch-up state must stay independent from the potentially expensive
         # SWM sightings COUNT. Otherwise a busy store can hide the live
@@ -1183,19 +1209,13 @@ def create_app(*, manage_guardian: bool = False):
                 "catchup": catchup,
             }
 
-        def _sightings() -> Any:
-            if not _node_reachable(cfg):
-                return None
-            client = DkgClient(url=cfg.dkg_url, dkg_home=cfg.dkg_home)
-            return ruleset.community_report_count(client, cfg)
-
         g = _swr(
             "graph-sync-status",
             _node_sync,
             {"node_reachable": False, "catchup": {}},
             ttl=4.0,
         )
-        sightings = _swr("graph-sightings", _sightings, 0)
+        sightings = 0
         total_rules = sum(int(v or 0) for v in counts.values())
         catchup = g.get("catchup") if isinstance(g.get("catchup"), dict) else {}
         node_catchup_state = str(catchup.get("status") or "")
@@ -1228,22 +1248,12 @@ def create_app(*, manage_guardian: bool = False):
                 ),
             )
         )
-        community_state = _graph_sync_state(
-            community,
-            g["node_reachable"],
-            node_catchup_state,
-            settled=(
-                authoritative_done
-                and node_catchup_state.lower() not in {"queued", "running"}
-            ),
-        )
+        community_state = "coming-soon"
         with _join_lock:
             connection = dict(_connection_states.get(cfg.context_graph_id) or {})
         if connection.get("state") in {"pending-approval", "pending-encryption-profile", "joining"}:
             if not public:
                 public_state = connection["state"]
-            if not community:
-                community_state = connection["state"]
         activity = _sync_activity(
             public=public,
             community=community,
@@ -1255,8 +1265,6 @@ def create_app(*, manage_guardian: bool = False):
         if activity["status"] in {"running", "waiting"}:
             if public_state == "empty":
                 public_state = "syncing"
-            if community_state == "empty":
-                community_state = "syncing"
 
         def _sync_label(tier: str, state: str) -> str:
             suffix = {
@@ -1267,6 +1275,7 @@ def create_app(*, manage_guardian: bool = False):
                 "pending-approval": "curator approval pending",
                 "pending-encryption-profile": "waiting for workspace encryption profile",
                 "joining": "joining private graph",
+                "coming-soon": "coming soon",
                 "sync-envelope-error": "peer sync handshake malformed",
             }.get(state, state)
             return f"{tier} {suffix}"
@@ -1294,7 +1303,7 @@ def create_app(*, manage_guardian: bool = False):
                 "community": {
                     "count": int(community or 0),
                     "state": community_state,
-                    "label": _sync_label("SWM", community_state),
+                    "label": "Community graph coming soon",
                 },
                 "catchup": {
                     "status": catchup_state or "idle",
@@ -1437,7 +1446,8 @@ def create_app(*, manage_guardian: bool = False):
                 reporters.append({"framework": fw, "address": str(addr), "count": n})
             return reporters
 
-        for rep in (_swr("agents-reporters", _load_reporters, []) or []):
+        # Remote SWM reporters are not part of the VM-only release.
+        for rep in []:
             fw, addr, n = rep["framework"], rep["address"], rep["count"]
             key = (fw, addr.lower())
             if key in found:
@@ -1605,7 +1615,7 @@ def create_app(*, manage_guardian: bool = False):
     def sync_graphs() -> Any:
         """Force an immediate ruleset refresh from the DKG node — the graph
         manual-refresh, same work as ``hermes blackbox sync``: subscribe/catch
-        up the public (VM) and community (SWM) graphs, then rebuild the local
+        up the curated public (VM) graph, then rebuild the local
         ruleset. Runs the exact path the background sync loop uses. The frontend
         re-polls /api/graph-status + /api/graph afterwards to redraw the counts.
         Fail-open: never 500s the dashboard."""
@@ -1625,7 +1635,7 @@ def create_app(*, manage_guardian: bool = False):
         """Map a UI tier name to a DKG SPARQL view.
 
         ``public`` → verifiable-memory (the curated source of truth),
-        ``community`` → shared-working-memory (the shared community pool),
+        ``community`` → coming soon (never queried),
         ``local`` → working-memory (this node's own private graph).
         """
         tier = (tier or default).lower()
@@ -1645,8 +1655,14 @@ def create_app(*, manage_guardian: bool = False):
         offset: int = Query(0, ge=0),
     ) -> Any:
         """Threats from one graph tier: ``public`` | ``community`` | ``local``."""
-        cfg = load_blackbox_config()
         tier, view = _tier_view(tier)
+        if tier == "community":
+            return {
+                "tier": "community", "threats": [], "total": 0,
+                "offset": offset, "limit": limit, "partial": False,
+                "coming_soon": True,
+            }
+        cfg = load_blackbox_config()
 
         def _category(identifier: str) -> str:
             ident = str(identifier or "")
@@ -1716,6 +1732,9 @@ def create_app(*, manage_guardian: bool = False):
 
     @app.get("/api/reports")
     def reports(limit: int = Query(50, ge=1, le=200)) -> Any:
+        return {"reports": [], "coming_soon": True, "sharing_enabled": False}
+
+        # Community reports are deliberately not queried in the VM-only release.
         cfg = load_blackbox_config()
 
         # Node-backed sightings list, served stale-while-revalidate.
@@ -1784,12 +1803,17 @@ def create_app(*, manage_guardian: bool = False):
     }
 
     @app.get("/api/threat")
-    def threat(identifier: str = Query(..., min_length=1), tier: str = Query("community")) -> Any:
+    def threat(identifier: str = Query(..., min_length=1), tier: str = Query("public")) -> Any:
         """Full detail for ONE threat via a targeted point-lookup.
 
         ``tier`` ∈ public | community | local. Fail-open."""
+        tier, view = _tier_view(tier, default="public")
+        if tier == "community":
+            return {
+                "identifier": identifier, "tier": "community", "found": False,
+                "coming_soon": True,
+            }
         cfg = load_blackbox_config()
-        tier, view = _tier_view(tier, default="community")
         prefix = identifier.split(":", 1)[0].lower() if ":" in identifier else ""
         category = prefix if prefix in ("dep", "injection", "escalation", "fileaccess", "skill", "ioc") else "other"
         if category == "dep":

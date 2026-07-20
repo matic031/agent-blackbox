@@ -26,12 +26,6 @@ _BLACKBOX_SOUL_MARKER = "<!-- managed-by: hermes-blackbox-chat -->"
 _LEGACY_GUARDIAN_SOUL_MARKER = "<!-- managed-by: hermes-guardian-chat -->"
 _BLACKBOX_SOURCE_ROOT_MARKER = ".blackbox-source-root"
 _BLACKBOX_CONTEXT_FILE_MAX_CHARS = 100_000
-# The release graph is public. Keep the private-join machinery available for
-# the previous private graph without making public installs request curator
-# membership.
-_PRIVATE_AUTO_JOIN_GRAPH_IDS: frozenset[str] = frozenset({
-    "0x37b1Fdfd134e2b17583bCBdD3034F91504cD9C70/agent-blackbox",
-})
 _BLACKBOX_SOUL = f"""{_BLACKBOX_SOUL_MARKER}
 # Agent Blackbox
 
@@ -46,11 +40,11 @@ questions from general knowledge. If asked "what's in the public/community/local
 graph", "what threats do we know", "recent activity", "connected agents", etc.,
 you MUST fetch the real data from the sources below and answer from that.
 
-## The three tiers (know the difference)
-- **Public** (on-chain, verifiable memory): the Umanitek-verified threat graph.
+## Graph scope
+- **Public** (on-chain, verifiable memory): the Umanitek-curated threat graph.
   Confirmed threats that BLOCK in block mode. Field name in APIs: `curated`.
-- **Community** (shared working memory / SWM): an open pool any agent reports
-  into. Flags only, never blocks. Field name: `community`.
+- **Community** (shared working memory / SWM): coming soon. It is not queried,
+  matched, joined, or written in this release. Findings stay local.
 - **Local** (this node's working memory + synced ruleset): what THIS node has
   pulled down and what it detects with offline. Field name: `ruleset`.
 
@@ -59,12 +53,12 @@ Prefer the running dashboard API on http://127.0.0.1:9700 (all read-only, JSON):
 
 - `GET /api/graph-status` — counts + config. Returns `mode`, `context_graph_id`,
   `dkg_url`, `node_reachable`, `last_sync`, `ruleset` (per-category local counts),
-  `curated` (Public tier count), `community` (Community/SWM count),
+  `curated` (Public tier count), `community` (always 0 / coming soon),
   `sightings`, `findings_logged`.
-- `GET /api/graph?tier=public|community|local` — the actual threat ENTRIES for a
+- `GET /api/graph?tier=public|local` — the actual threat ENTRIES for a
   tier. Returns `{{tier, threats:[{{identifier, category, severity, name}}]}}`.
   Use this to list what's in the public/community/local graph.
-- `GET /api/threat?tier=public|community&identifier=<id>` — full detail for one
+- `GET /api/threat?tier=public&identifier=<id>` — full detail for one
   threat (description, references/advisories, reporters).
 - `GET /api/findings?limit=&offset=` — threats Blackbox has flagged on this
   machine (newest first) with total.
@@ -72,7 +66,7 @@ Prefer the running dashboard API on http://127.0.0.1:9700 (all read-only, JSON):
   lifecycle, API requests, tool calls with the real command, installs, flags).
 - `GET /api/agents` — connected/protected local agents. Count the `agents` array
   EXACTLY; never estimate from generic Hermes status or sessions.
-- `GET /api/reports` — recent outbound sightings shared to the community graph.
+- `GET /api/reports` — returns the community-feature coming-soon state.
 
 If the dashboard is NOT running (curl to :9700 fails), fall back to:
 - `hermes blackbox status` — mode, node reachability, ruleset + findings counts.
@@ -151,7 +145,7 @@ def setup_cli(parser: argparse.ArgumentParser) -> None:
     detach_p.add_argument("--openclaw-only", action="store_true", help="Only detach from OpenClaw workspaces")
     detach_p.set_defaults(func=_cmd_detach)
 
-    report = sub.add_parser("report", help="Submit a NEW candidate threat to the community graph (SWM)")
+    report = sub.add_parser("report", help="Community threat sharing (coming soon; submits nothing)")
     report.add_argument(
         "--type", required=True,
         choices=["injection", "escalation", "dependency", "fileaccess", "skill"],
@@ -732,10 +726,11 @@ def _cmd_sync(args: argparse.Namespace) -> int:
     print(f"Ruleset synced from {cfg.context_graph_id}:")
     print(f"  {counts['injection']} injection, {counts['escalation']} escalation, "
           f"{counts['dependency']} dependency")
-    print(f"  {public_count:,} public VM, {community_count:,} community SWM")
+    print(f"  {public_count:,} public VM (curated)")
+    print("  Community graph (SWM): coming soon")
     if not sync_complete:
         if private_graph and (pending_approval or not subscribed):
-            print("  Pending curator approval; private VM/SWM data is not available yet.")
+            print("  This graph is not supported; Agent Blackbox only uses its public VM graph.")
             if agent_address:
                 print(f"  Ask the curator to approve agent address: {agent_address}")
             if last_subscribe_error:
@@ -749,14 +744,11 @@ def _cmd_sync(args: argparse.Namespace) -> int:
         }:
             detail = last_catchup.get("error") or (last_catchup.get("result") or {}).get("error")
             print(f"  Fresh DKG catch-up failed{f': {detail}' if detail else '.'}")
-        elif managed_graph and community_count > 0 and public_count == 0:
-            print("  Community SWM synced, but public VM is still empty.")
-            print("  Retry with `hermes blackbox sync --wait`.")
         elif authoritative_attempted and not authoritative_complete:
             print("  Authoritative curator VM transfer is incomplete.")
             print("  Retry with `hermes blackbox sync --wait`.")
         else:
-            print("  0 rules — DKG has not made VM/SWM threat rows queryable yet.")
+            print("  0 rules — DKG has not made curated VM threat rows queryable yet.")
             print("  Retry with `hermes blackbox sync --wait`.")
         if getattr(args, "require_rules", False):
             print("  Required ruleset sync is incomplete.")
@@ -913,10 +905,8 @@ def _catchup_job_id(catchup: Any) -> str:
 
 
 def _should_request_private_join(cfg: BlackboxConfig) -> bool:
-    return bool(
-        getattr(cfg, "graph_peer_id", "")
-        and getattr(cfg, "context_graph_id", "") in _PRIVATE_AUTO_JOIN_GRAPH_IDS
-    )
+    """Private graph membership is never part of Agent Blackbox."""
+    return False
 
 
 def _request_join(client: DkgClient, cg_id: str, graph_peer_id: str) -> tuple[Optional[str], bool]:
@@ -1035,31 +1025,9 @@ def _print_openclaw_attach_row(row: Dict[str, Any], prefix: str) -> None:
 
 
 def _cmd_report(args: argparse.Namespace) -> int:
-    cfg = load_blackbox_config()
-    client = DkgClient(url=cfg.dkg_url, dkg_home=cfg.dkg_home)
-    try:
-        identifier, quad_kwargs = _build_candidate(args)
-    except ValueError as exc:
-        print(f"error: {exc}")
-        return 2
-    reporter = _resolve_reporter(client)
-    q = quads.build_report_quads(
-        identifier=identifier,
-        category=args.type,
-        severity=args.severity,
-        reporter_address=reporter,
-        framework="hermes",
-        **quad_kwargs,
-    )
-    name = f"report-{quads.stable_hash(identifier + reporter, 16)}"
-    try:
-        client.share_knowledge_asset(cfg.context_graph_id, name, q)
-    except DkgError as exc:
-        print(f"error: failed to share report: {exc}")
-        return 1
-    print(f"Reported candidate threat: {identifier}")
-    print(f"  shared to {cfg.context_graph_id} (SWM) as reporter {reporter}")
-    return 0
+    print("Community graph and threat sharing are coming soon.")
+    print("Nothing was submitted; findings and threat reports stay local.")
+    return 2
 
 
 def _cmd_dashboard(args: argparse.Namespace) -> int:
