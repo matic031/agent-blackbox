@@ -144,6 +144,53 @@ def test_dashboard_keeps_partial_vm_count_loading_during_curator_transfer(monkey
     assert status["sync_progress"]["authoritative"] == state
 
 
+def test_dashboard_automatic_sync_runs_canonical_verified_cli(monkeypatch):
+    cfg = SimpleNamespace(context_graph_id="0x37b1/agent-blackbox")
+
+    class CachedRuleset:
+        def counts(self):
+            return {"dependency": 7}
+
+        def source_count(self, source):
+            return 7 if source == "public" else 0
+
+    class RulesetModule:
+        @staticmethod
+        def peek(_cfg=None):
+            return CachedRuleset()
+
+    calls = []
+
+    def fake_run(argv, **kwargs):
+        calls.append((argv, kwargs))
+        return subprocess.CompletedProcess(argv, 0, stdout="Ruleset synced", stderr="")
+
+    monkeypatch.setattr(server.subprocess, "run", fake_run)
+
+    result = server._network_sync_once(lambda: cfg, RulesetModule, timeout=123)
+
+    assert result == {
+        "ok": True,
+        "busy": False,
+        "returncode": 0,
+        "total": 7,
+        "public": 7,
+        "community": 0,
+    }
+    assert calls[0][0] == [
+        server.sys.executable,
+        "-m",
+        "hermes_cli.main",
+        "blackbox",
+        "sync",
+        "--wait",
+        "--timeout",
+        "123",
+        "--require-rules",
+    ]
+    assert calls[0][1]["timeout"] == 153
+
+
 def test_dashboard_lists_one_thousand_vm_threats_not_one_collection(monkeypatch):
     from plugins.blackbox import config, ruleset
 
@@ -625,23 +672,6 @@ def test_dashboard_failed_catchup_with_stale_public_rows_refreshes_join_before_r
         ("restart", "0x37b1/agent-blackbox"),
     ]
     assert server._connection_states[Cfg.context_graph_id]["state"] == "syncing"
-
-
-def test_dashboard_keeps_verified_snapshot_quiet_during_refresh():
-    html = (Path(server.__file__).parent / "static" / "index.html").read_text(
-        encoding="utf-8"
-    )
-
-    assert "if (value == null) return true;" in html
-    assert 'p.state === "syncing"' in html
-    assert "return !!tier && isTierPending(tier);" in html
-    assert "return !(lastStatus && lastStatus.node_reachable === false);" not in html
-    assert "Fetching a newer" not in html
-    assert "current verified snapshot" not in html
-    assert 'var hasVerifiedSnapshot = graphTotalForTier("public") > 0;' in html
-    assert 'activeTier === "public" && !hasVerifiedSnapshot' in html
-    assert 't === "public" && isTierPending(t)' in html
-    assert "' · ' + num(loaded) + ' available'" not in html
 
 
 def test_dashboard_graph_has_fullscreen_control():

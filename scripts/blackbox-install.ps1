@@ -1157,12 +1157,12 @@ function Sync-Ruleset {
         Write-Step "Blackbox is installed, but setup is incomplete until DKG returns a non-empty ruleset."
         Write-Step "Retry after fixing DKG/catch-up with: blackbox sync --wait --require-rules"
     }
-    Write-Step "Returning DKG to Viktor's stabilized steady-state settings ..."
+    Write-Step "Returning DKG to stabilized steady-state settings ..."
     if (-not (Restart-BlackboxDkgForSyncMode -DurableMode $DkgSteadyDurableSyncEnabled)) {
         $script:InstallIncomplete = $true
         Write-Warn2 "DKG did not return to its steady-state sync settings."
     } elseif ($DkgSteadyDurableSyncEnabled -eq "0") {
-        Write-Ok "DKG stabilized: automatic/reconciler/durable sync off; one in-flight slot; zero queue"
+        Write-Ok "DKG stabilized: controlled Blackbox auto-sync enabled; one in-flight slot; zero queue"
     }
 }
 

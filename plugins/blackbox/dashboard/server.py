@@ -44,6 +44,7 @@ _GUARDIAN_RUNTIME_HOST = "127.0.0.1"
 _GUARDIAN_RUNTIME_PORT = 9121
 _GUARDIAN_RESTART_DELAY_SEC = 2.0
 _join_lock = threading.Lock()
+_network_sync_lock = threading.Lock()
 _connection_states: Dict[str, Dict[str, Any]] = {}
 _subscription_attempts: Set[str] = set()
 
@@ -203,6 +204,77 @@ def _ruleset_sync_counts(rs: Any) -> Dict[str, int]:
         "public": public,
         "community": 0,
     }
+
+
+def _network_sync_argv(timeout: int = 3600) -> List[str]:
+    """Run the canonical verified graph sync in an isolated process."""
+    return [
+        sys.executable,
+        "-m",
+        "hermes_cli.main",
+        "blackbox",
+        "sync",
+        "--wait",
+        "--timeout",
+        str(max(1, int(timeout))),
+        "--require-rules",
+    ]
+
+
+def _network_sync_once(
+    load_config: Any,
+    ruleset_mod: Any,
+    *,
+    timeout: int = 3600,
+) -> Dict[str, Any]:
+    """Fetch and verify the latest VM snapshot, once per dashboard process.
+
+    The CLI owns the complete curator-pinned recovery protocol and publishes
+    progress through ``sync_state``. Running it in a subprocess keeps a long
+    network transfer isolated from the dashboard server while its status
+    remains visible to every dashboard poll.
+    """
+    if not _network_sync_lock.acquire(blocking=False):
+        cfg = load_config()
+        return {"ok": True, "busy": True, **_ruleset_sync_counts(ruleset_mod.peek(cfg))}
+    try:
+        completed = subprocess.run(
+            _network_sync_argv(timeout),
+            capture_output=True,
+            text=True,
+            timeout=max(30, int(timeout) + 30),
+            check=False,
+        )
+        output = "\n".join(
+            part.strip() for part in (completed.stdout, completed.stderr) if part.strip()
+        )
+        if completed.returncode != 0:
+            logger.warning(
+                "blackbox automatic graph sync exited %d: %s",
+                completed.returncode,
+                output[-2000:] or "no output",
+            )
+        else:
+            logger.info("blackbox automatic graph sync completed")
+        cfg = load_config()
+        counts = _ruleset_sync_counts(ruleset_mod.peek(cfg))
+        return {
+            "ok": completed.returncode == 0,
+            "busy": False,
+            "returncode": completed.returncode,
+            **counts,
+        }
+    except subprocess.TimeoutExpired:
+        logger.warning("blackbox automatic graph sync exceeded %ds", int(timeout))
+        cfg = load_config()
+        return {
+            "ok": False,
+            "busy": False,
+            "error": "automatic graph sync timed out",
+            **_ruleset_sync_counts(ruleset_mod.peek(cfg)),
+        }
+    finally:
+        _network_sync_lock.release()
 
 
 def _sync_ruleset_once(load_config: Any, dkg_client_cls: Any, ruleset_mod: Any) -> Dict[str, int]:
@@ -768,18 +840,30 @@ def create_app(*, manage_guardian: bool = False):
                 time.sleep(0.1)
 
     def _ruleset_sync_loop() -> None:
-        """Keep VM/SWM threat rows syncing while the dashboard is running.
+        """Keep verified VM threat rows network-synced while the dashboard runs.
 
         ``sync_interval`` is a period, not a post-sync sleep: the sync's own
         duration is deducted from the wait so a refresh *starts* every
         ``sync_interval`` seconds even when the sync itself is slow."""
         last_total: Any = None
+        # The installer performs an authoritative catch-up before it starts the
+        # dashboard. Waiting one configured period avoids immediately repeating
+        # that expensive transfer and keeps short-lived test/app probes inert.
+        initial_interval = max(
+            _RULESET_MIN_RETRY_SEC,
+            float(load_blackbox_config().sync_interval or _RULESET_EMPTY_RETRY_SEC),
+        )
+        for _ in range(int(initial_interval * 10)):
+            if _rescan_state["stop"]:
+                return
+            time.sleep(0.1)
         while not _rescan_state["stop"]:
             wait = _RULESET_EMPTY_RETRY_SEC
             started = time.monotonic()
             try:
                 cfg = load_blackbox_config()
-                counts = _sync_ruleset_once(lambda: cfg, DkgClient, ruleset)
+                result = _network_sync_once(lambda: cfg, ruleset)
+                counts = result
                 total = int(counts.get("total") or 0)
                 public = int(counts.get("public") or 0)
                 community = int(counts.get("community") or 0)
@@ -792,7 +876,7 @@ def create_app(*, manage_guardian: bool = False):
                     wait = min(_RULESET_EMPTY_RETRY_SEC, wait)
                 if total != last_total:
                     logger.info(
-                        "blackbox ruleset sync: %d rule(s), %d public, %d community; next refresh in %.0fs",
+                        "blackbox automatic graph sync: %d rule(s), %d public, %d community; next sync in %.0fs",
                         total,
                         public,
                         community,
@@ -801,14 +885,14 @@ def create_app(*, manage_guardian: bool = False):
                     last_total = total
                 else:
                     logger.debug(
-                        "blackbox ruleset sync: %d rule(s), %d public, %d community; next refresh in %.0fs",
+                        "blackbox automatic graph sync: %d rule(s), %d public, %d community; next sync in %.0fs",
                         total,
                         public,
                         community,
                         wait,
                     )
             except Exception as exc:  # pragma: no cover - fail open
-                logger.debug("blackbox ruleset sync: iteration failed: %s", exc)
+                logger.debug("blackbox automatic graph sync: iteration failed: %s", exc)
                 wait = _RULESET_EMPTY_RETRY_SEC
             for _ in range(int(wait * 10)):
                 if _rescan_state["stop"]:
@@ -824,7 +908,7 @@ def create_app(*, manage_guardian: bool = False):
         t.start()
         logger.info("blackbox rescan: background thread started (interval %.1fs)", _RESCAN_INTERVAL_SEC)
         threading.Thread(target=_ruleset_sync_loop, name="blackbox-ruleset-sync", daemon=True).start()
-        logger.info("blackbox ruleset sync: background thread started")
+        logger.info("blackbox automatic graph sync: background thread started")
         if manage_guardian:
             guardian_thread = threading.Thread(
                 target=_guardian_runtime_loop,
@@ -1531,23 +1615,22 @@ def create_app(*, manage_guardian: bool = False):
 
     @app.post("/api/sync")
     def sync_graphs() -> Any:
-        """Force an immediate ruleset refresh from the DKG node — the graph
-        manual-refresh, same work as ``hermes blackbox sync``: subscribe/catch
-        up the curated public (VM) graph, then rebuild the local
-        ruleset. Runs the exact path the background sync loop uses. The frontend
-        re-polls /api/graph-status + /api/graph afterwards to redraw the counts.
-        Fail-open: never 500s the dashboard."""
-        try:
-            counts = _sync_ruleset_once(load_blackbox_config, DkgClient, ruleset)
-        except Exception as exc:  # pragma: no cover - fail open
-            logger.debug("blackbox dashboard: manual sync failed: %s", exc)
-            return JSONResponse({"ok": False, "error": str(exc)})
-        return {
-            "ok": True,
-            "total": int(counts.get("total", 0)),
-            "public": int(counts.get("public", 0)),
-            "community": int(counts.get("community", 0)),
-        }
+        """Start the canonical verified network sync without blocking HTTP."""
+        if _network_sync_lock.locked():
+            return {"ok": True, "started": False, "busy": True}
+
+        def _manual_sync() -> None:
+            try:
+                _network_sync_once(load_blackbox_config, ruleset)
+            except Exception as exc:  # pragma: no cover - fail open
+                logger.debug("blackbox dashboard: manual sync failed: %s", exc)
+
+        threading.Thread(
+            target=_manual_sync,
+            name="blackbox-manual-network-sync",
+            daemon=True,
+        ).start()
+        return {"ok": True, "started": True, "busy": False}
 
     def _tier_view(tier: str, default: str = "public") -> tuple:
         """Map a UI tier name to a DKG SPARQL view.

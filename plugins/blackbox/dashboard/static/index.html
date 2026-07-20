@@ -3145,7 +3145,8 @@
     return !!tier && isTierPending(tier);
   }
   // Render a count element as either the loader or the number. Once a verified
-  // snapshot exists, keep showing its count while a newer snapshot downloads.
+  // snapshot exists, keep showing its count and add the loader beside it while
+  // a newer snapshot downloads.
   function showsLoader(el) {
     return !!el.querySelector(".bb-loader");
   }
@@ -3155,8 +3156,19 @@
     if (countSyncing(key, value)) {
       var positive = value != null && Number(value) > 0;
       var shown = positive ? (fmt ? num(value) : String(value)) : "";
-      if (positive) el.textContent = shown;
-      else if (!showsLoader(el)) el.innerHTML = LOADER_HTML;
+      if (positive) {
+        var valueEl = el.querySelector(".sync-count-value");
+        if (!valueEl) {
+          el.textContent = "";
+          valueEl = document.createElement("span");
+          valueEl.className = "sync-count-value";
+          el.appendChild(valueEl);
+        }
+        valueEl.textContent = shown;
+        if (!showsLoader(el)) el.insertAdjacentHTML("beforeend", LOADER_HTML);
+      } else if (!showsLoader(el)) {
+        el.innerHTML = LOADER_HTML;
+      }
     } else {
       el.textContent = fmt ? num(value) : (value == null ? 0 : value);
     }
@@ -3205,8 +3217,8 @@
     var progress = lastStatus && lastStatus.sync_progress;
     var activity = progress && progress.activity;
     var status = String(activity && activity.status || "idle");
-    var hasVerifiedSnapshot = graphTotalForTier("public") > 0;
-    var visible = activeTier === "public" && !hasVerifiedSnapshot && (
+    renderGraphRefreshState(status === "running" || status === "waiting");
+    var visible = activeTier === "public" && (
       status === "running" || status === "waiting" ||
       status === "failed" || status === "offline"
     );
@@ -3663,16 +3675,26 @@
 
   // Graph manual-refresh: force `hermes blackbox sync` (POST /api/sync) to
   // catch up the verifiable ruleset, then re-poll so the count and graph redraw.
-  // Same spin-while-busy pattern as refreshAgents.
+  // The click only starts an asynchronous sync. The authoritative polled sync
+  // state keeps the icon spinning until the graph transfer actually settles.
   var graphRefreshBusy = false;
+  function renderGraphRefreshState(syncActive) {
+    var btn = $("graph-refresh");
+    if (!btn) return;
+    var busy = graphRefreshBusy || !!syncActive;
+    btn.classList.toggle("spinning", busy);
+    btn.disabled = busy;
+    btn.setAttribute("aria-busy", busy ? "true" : "false");
+  }
   function refreshGraphs() {
     if (graphRefreshBusy) return;
     graphRefreshBusy = true;
-    var btn = $("graph-refresh");
-    if (btn) { btn.classList.add("spinning"); btn.disabled = true; }
+    renderGraphRefreshState(true);
     function done() {
       graphRefreshBusy = false;
-      if (btn) { btn.classList.remove("spinning"); btn.disabled = false; }
+      var activity = lastStatus && lastStatus.sync_progress && lastStatus.sync_progress.activity;
+      var status = String(activity && activity.status || "idle");
+      renderGraphRefreshState(status === "running" || status === "waiting");
     }
     postJSON("/api/sync", {})
       .catch(function () { /* fail-open: re-poll anyway */ })

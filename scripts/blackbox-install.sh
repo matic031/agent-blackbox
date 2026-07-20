@@ -1488,12 +1488,12 @@ sync_ruleset() {
         step "Blackbox is installed, but setup is incomplete until DKG returns a non-empty ruleset."
         step "Retry after fixing DKG/catch-up with: blackbox sync --wait --require-rules"
     fi
-    step "Returning DKG to Viktor's stabilized steady-state settings ..."
+    step "Returning DKG to stabilized steady-state settings ..."
     if ! restart_blackbox_dkg_for_sync_mode "$BLACKBOX_DKG_STEADY_DURABLE_SYNC_ENABLED"; then
         BLACKBOX_INSTALL_INCOMPLETE=true
         warn "DKG did not return to its steady-state sync settings."
     elif [ "$BLACKBOX_DKG_STEADY_DURABLE_SYNC_ENABLED" = "0" ]; then
-        ok "DKG stabilized: automatic/reconciler/durable sync off; one in-flight slot; zero queue"
+        ok "DKG stabilized: controlled Blackbox auto-sync enabled; one in-flight slot; zero queue"
     fi
     return 0
 }
