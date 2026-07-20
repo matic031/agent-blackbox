@@ -792,3 +792,25 @@ def get(config: Optional[BlackboxConfig] = None) -> Ruleset:
             with _memory_lock:
                 _refreshing = False
     return cached
+
+
+def peek(config: Optional[BlackboxConfig] = None) -> Ruleset:
+    """Return the last cached ruleset without starting a node refresh.
+
+    The dashboard has one dedicated refresh worker. Request handlers and the
+    dashboard's catch-up watcher use this read-only path so a large initial DKG
+    transfer cannot accidentally fan out additional Blazegraph queries.
+    """
+    global _memory_cache
+    config = config or load_blackbox_config()
+    del config  # Kept for API symmetry and future profile-aware caches.
+    with _memory_lock:
+        cached = _memory_cache
+    if cached is None:
+        cached = _read_cache() or Ruleset()
+        with _memory_lock:
+            if _memory_cache is None:
+                _memory_cache = cached
+            else:
+                cached = _memory_cache
+    return cached

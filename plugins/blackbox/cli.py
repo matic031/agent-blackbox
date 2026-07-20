@@ -580,18 +580,14 @@ def _cmd_sync_impl(args: argparse.Namespace) -> int:
                 if not private_graph:
                     print(f"warning: could not subscribe to {cfg.context_graph_id}: {exc}")
 
-        if subscribed:
-            rs = ruleset.refresh(cfg, client)
-        counts = rs.counts()
-        public_count = _ruleset_graph_count(rs, "public")
-        community_count = _ruleset_graph_count(rs, "community")
-
         catchup_state = ""
+        catchup_includes_swm = False
         if managed_graph and subscribed:
             try:
                 catchup = client.catchup_status(cfg.context_graph_id)
                 last_catchup = catchup
                 catchup_state = str(catchup.get("status") or "").lower()
+                catchup_includes_swm = catchup.get("includeSharedMemory") is True
                 catchup_job_id = _catchup_job_id(catchup)
                 if catchup_job_id and (
                     not baseline_catchup_known
@@ -603,12 +599,27 @@ def _cmd_sync_impl(args: argparse.Namespace) -> int:
                     admitted = False
             except DkgError:
                 pass
+        if subscribed:
+            if catchup_state in {"queued", "running"}:
+                # DKG applies durable catch-up atomically. A full VM query here
+                # cannot expose useful partial rules and competes with the
+                # Blazegraph write that must finish first. Poll only the cheap
+                # job status until the transfer reaches a terminal state.
+                rs = ruleset.peek(cfg)
+            else:
+                rs = ruleset.refresh(cfg, client)
+        counts = rs.counts()
+        public_count = _ruleset_graph_count(rs, "public")
+        community_count = _ruleset_graph_count(rs, "community")
+
         if (
             managed_graph
             and subscribed
             and not catchup_restarted
-            and not fresh_catchup_seen
-            and catchup_state == "done"
+            and (
+                catchup_includes_swm
+                or (not fresh_catchup_seen and catchup_state == "done")
+            )
             and not (
                 authoritative_available
                 and getattr(args, "wait", False)
@@ -618,7 +629,9 @@ def _cmd_sync_impl(args: argparse.Namespace) -> int:
             try:
                 client.restart_context_graph_catchup(cfg.context_graph_id)
                 catchup_restarted = True
-                if private_graph:
+                if catchup_includes_swm:
+                    print("Replaced a legacy SWM catch-up with VM-only sync.")
+                elif private_graph:
                     print("Restarted DKG catch-up after approval; waiting for threat rows.")
                 else:
                     print("Restarted DKG catch-up; waiting for public threat rows.")
@@ -627,25 +640,22 @@ def _cmd_sync_impl(args: argparse.Namespace) -> int:
             except DkgError as exc:
                 logger.debug("blackbox: catch-up restart failed: %s", exc)
 
-        authoritative_fallback_ready = (
-            managed_graph
-            and authoritative_available
-            and getattr(args, "wait", False)
-            and public_count > 0
-            and (
-                catchup_state in {"failed", "cancelled", "denied", "unreachable"}
-                or (
-                    catchup_state == "deferred"
-                    and authoritative_recovered
-                    and authoritative_complete
-                )
-            )
-        )
+        # A terminal generic catch-up is not success by itself.  A completed,
+        # idempotent publisher-pinned recovery is: it has independently
+        # verified the durable VM snapshot and may satisfy this gate on the
+        # following loop iteration.
+        authoritative_fallback_ready = authoritative_recovered
+        catchup_active = catchup_state in {"queued", "running"}
         fresh_catchup_complete = (
             not getattr(args, "wait", False)
-            or not (catchup_restarted or fresh_catchup_seen)
-            or catchup_state == "done"
-            or authoritative_fallback_ready
+            or (
+                not catchup_active
+                and (
+                    not (catchup_restarted or fresh_catchup_seen)
+                    or catchup_state == "done"
+                    or authoritative_fallback_ready
+                )
+            )
         )
         base_sync_complete = (
             public_count > 0 if managed_graph else sum(counts.values()) > 0
@@ -657,7 +667,10 @@ def _cmd_sync_impl(args: argparse.Namespace) -> int:
         # authoritative publisher immediately; the recovery helper already
         # waits through DKG backpressure and verifies completion atomically.
         authoritative_recovery_ready = base_sync_complete or (
-            release_graph and subscribed
+            release_graph
+            and subscribed
+            and catchup_state
+            in {"failed", "cancelled", "denied", "unreachable", "deferred"}
         )
         if (
             authoritative_recovery_ready
@@ -667,18 +680,17 @@ def _cmd_sync_impl(args: argparse.Namespace) -> int:
             and not authoritative_attempted
         ):
             authoritative_attempted = True
-            recovered_target = _catchup_authoritative_vm(
+            authoritative_recovered = _catchup_authoritative_vm(
                 client,
                 cfg.context_graph_id,
                 cfg.graph_peer_id,
                 deadline,
             )
-            authoritative_recovered = recovered_target is not None
             rs = ruleset.refresh(cfg, client)
             counts = rs.counts()
             public_count = _ruleset_graph_count(rs, "public")
             community_count = _ruleset_graph_count(rs, "community")
-            authoritative_target = int(recovered_target or 0)
+            authoritative_target = public_count
         if authoritative_recovered:
             authoritative_complete = (
                 authoritative_target > 0 and public_count >= authoritative_target
@@ -809,12 +821,11 @@ def _catchup_authoritative_vm(
     context_graph_id: str,
     graph_peer_id: str,
     deadline: float,
-) -> Optional[int]:
+) -> bool:
     """Recover and verify the publisher's durable VM snapshot."""
     catchup = getattr(client, "catchup_from_peer", None)
-    threat_count = getattr(client, "threat_count", None)
-    if not callable(catchup) or not callable(threat_count) or not graph_peer_id:
-        return None
+    if not callable(catchup) or not graph_peer_id:
+        return False
     sync_state.write(
         "running",
         context_graph_id=context_graph_id,
@@ -823,8 +834,6 @@ def _catchup_authoritative_vm(
     )
     print("Recovering the complete publisher VM snapshot...")
     backpressure_notice_printed = False
-    last_local = 0
-    last_expected = 0
     while True:
         remaining = deadline - time.monotonic()
         if remaining <= 1:
@@ -834,7 +843,7 @@ def _catchup_authoritative_vm(
                 graph_peer_id=graph_peer_id,
                 error="authoritative sync deadline reached",
             )
-            return None
+            return False
         budget_ms = max(
             1_000,
             min(300_000, int(max(1.0, remaining - 10) * 1_000)),
@@ -873,7 +882,7 @@ def _catchup_authoritative_vm(
                 error=error,
             )
             logger.debug("blackbox: authoritative curator recovery failed: %s", exc)
-            return None
+            return False
         results = result.get("results") if isinstance(result, dict) else None
         peer_result = next(
             (
@@ -914,35 +923,29 @@ def _catchup_authoritative_vm(
                     graph_peer_id=graph_peer_id,
                     error=error,
                 )
-                return None
+                return False
             time.sleep(min(3.0, max(0.2, deadline - time.monotonic())))
             continue
-        try:
-            last_expected = int(threat_count(context_graph_id, peer_id=graph_peer_id))
-            last_local = int(threat_count(context_graph_id))
-        except DkgError as exc:
-            logger.debug("blackbox: publisher VM count verification failed: %s", exc)
-        if last_expected > 0 and last_local >= last_expected:
-            sync_state.write(
-                "running",
-                context_graph_id=context_graph_id,
-                graph_peer_id=graph_peer_id,
-                phase="refreshing-verifiable-memory",
-                public_entries=last_local,
-                expected_public_entries=last_expected,
-                inserted_durable_triples=int(result.get("totalDurableInsertedTriples") or 0),
-            )
-            print(f"  publisher VM verified ({last_local:,}/{last_expected:,} threats)")
-            return last_expected
+        inserted = int(result.get("totalDurableInsertedTriples") or 0)
         sync_state.write(
             "running",
             context_graph_id=context_graph_id,
             graph_peer_id=graph_peer_id,
-            phase="waiting-for-verifiable-memory",
-            public_entries=last_local,
-            expected_public_entries=last_expected,
+            phase=(
+                "recovering-verifiable-memory"
+                if inserted > 0
+                else "refreshing-verifiable-memory"
+            ),
+            inserted_durable_triples=inserted,
         )
-        time.sleep(min(3.0, max(0.2, deadline - time.monotonic())))
+        if inserted <= 0:
+            print("  publisher durable sync settled (no new triples)")
+            return True
+        print(f"  publisher durable sync advanced ({inserted:,} triples inserted)")
+        # A transport interruption can yield a verified prefix and a successful
+        # HTTP response. Repeat the pinned pass until the publisher reports a
+        # clean idempotent zero-insert round; only then is recovery settled.
+        time.sleep(min(2.0, max(0.2, deadline - time.monotonic())))
 
 
 def _catchup_denied(catchup: Dict[str, Any]) -> bool:

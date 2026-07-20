@@ -75,6 +75,9 @@ $DkgDaemonUrl = "http://127.0.0.1:$DkgPort"
 $DkgStoreQueueLimit = if ($env:BLACKBOX_DKG_STORE_QUEUE_LIMIT) { [int]$env:BLACKBOX_DKG_STORE_QUEUE_LIMIT } else { 512 }
 $DkgListContextGraphsProjection = if ($env:BLACKBOX_DKG_LIST_CONTEXT_GRAPHS_PROJECTION) { $env:BLACKBOX_DKG_LIST_CONTEXT_GRAPHS_PROJECTION } else { "1" }
 $DkgSyncGlobalMaxInflight = "1"
+$DkgSyncGlobalQueueLimit = "0"
+$script:DkgDurableSyncEnabled = if ($env:BLACKBOX_DKG_DURABLE_SYNC_ENABLED) { $env:BLACKBOX_DKG_DURABLE_SYNC_ENABLED } else { "0" }
+$DkgSteadyDurableSyncEnabled = $script:DkgDurableSyncEnabled
 $DkgCatchupMaxConcurrentPeers = "1"
 $DkgStoreQueueWaitTimeoutMs = "300000"
 $script:DkgNodeOptions = ""
@@ -255,7 +258,11 @@ function Invoke-BlackboxDkg {
         "DKG_ACCEPT_STORE_RESET",
         "DKG_STORE_QUEUE_LIMIT",
         "DKG_LIST_CONTEXT_GRAPHS_PROJECTION",
+        "DKG_SYNC_ON_CONNECT_ENABLED",
+        "DKG_SYNC_RECONCILER_ENABLED",
+        "DKG_DURABLE_SYNC_ENABLED",
         "DKG_SYNC_GLOBAL_MAX_INFLIGHT",
+        "DKG_SYNC_GLOBAL_QUEUE_LIMIT",
         "DKG_CATCHUP_MAX_CONCURRENT_PEERS",
         "DKG_STORE_QUEUE_WAIT_TIMEOUT_MS",
         "DKG_SYNC_TOTAL_TIMEOUT_MS",
@@ -278,7 +285,11 @@ function Invoke-BlackboxDkg {
         ) { "1" } else { "0" }
         $env:DKG_STORE_QUEUE_LIMIT = "$DkgStoreQueueLimit"
         $env:DKG_LIST_CONTEXT_GRAPHS_PROJECTION = "$DkgListContextGraphsProjection"
+        $env:DKG_SYNC_ON_CONNECT_ENABLED = "0"
+        $env:DKG_SYNC_RECONCILER_ENABLED = "0"
+        $env:DKG_DURABLE_SYNC_ENABLED = $script:DkgDurableSyncEnabled
         $env:DKG_SYNC_GLOBAL_MAX_INFLIGHT = "$DkgSyncGlobalMaxInflight"
+        $env:DKG_SYNC_GLOBAL_QUEUE_LIMIT = "$DkgSyncGlobalQueueLimit"
         $env:DKG_CATCHUP_MAX_CONCURRENT_PEERS = "$DkgCatchupMaxConcurrentPeers"
         $env:DKG_STORE_QUEUE_WAIT_TIMEOUT_MS = "$DkgStoreQueueWaitTimeoutMs"
         $env:DKG_SYNC_TOTAL_TIMEOUT_MS = "1800000"
@@ -620,6 +631,28 @@ function Initialize-BlackboxStore {
             if ($LASTEXITCODE -eq 0) {
                 $script:DkgAlreadyRunning = $false
                 if (Test-BlackboxBlazegraph) { return $true }
+                $managedContainer = "dkg-blazegraph-$namespace"
+                $storeRestarted = $false
+                Write-Step "Restarting the unresponsive managed Blazegraph container ..."
+                & docker restart $managedContainer | Out-Null
+                if ($LASTEXITCODE -eq 0) {
+                    $storeRestarted = $true
+                } else {
+                    # A wedged JVM can leave the container stopped even though
+                    # Docker reports a failed graceful restart. Start the same
+                    # container so its graph volume remains intact.
+                    $running = (& docker inspect -f '{{.State.Running}}' $managedContainer 2>$null)
+                    if ($LASTEXITCODE -eq 0 -and "$running".Trim() -eq "false") {
+                        & docker start $managedContainer | Out-Null
+                        if ($LASTEXITCODE -eq 0) { $storeRestarted = $true }
+                    }
+                    if (-not $storeRestarted) {
+                        Write-Warn2 "Could not restart managed container $managedContainer."
+                    }
+                }
+                if ($storeRestarted -and (Test-BlackboxBlazegraph)) {
+                    return $true
+                }
             } else {
                 Write-Warn2 "Could not pause the Blackbox DKG daemon before store recovery."
             }
@@ -715,12 +748,17 @@ existing_relays = data.get("relayPeers") if isinstance(data.get("relayPeers"), l
 merged_relays = list(dict.fromkeys([*existing_relays, *MAINNET_BASE_RELAYS]))
 data["relayPeers"] = merged_relays
 data["relayReservationCount"] = int(data.get("relayReservationCount") or 4)
-# Use the DKG native default reconnect reconciler.
-data.pop("syncOnConnectEnabled", None)
-# DKG owns sync scheduling, catch-up, backpressure, and approval delivery.
+# Blackbox starts explicit subscription catch-up jobs. Starting another durable
+# sync every time any peer connects only competes with that job for the single
+# large-sync slot and can starve the Blazegraph store queue on fresh installs.
+data["syncOnConnectEnabled"] = False
+# Disable automatic retry/fan-out. Blackbox initiates one explicit durable
+# publisher catch-up, so durable sync itself must remain available.
+data["syncReconcilerEnabled"] = False
+data["durableSyncEnabled"] = False
 data.pop("syncAgentsMeta", None)
-data.pop("syncGlobalMaxInflight", None)
-data.pop("syncGlobalQueueLimit", None)
+data["syncGlobalMaxInflight"] = 1
+data["syncGlobalQueueLimit"] = 0
 data.pop("restrictAutoSubscribeContextGraphs", None)
 data["syncSharedMemoryOnConnect"] = False
 priorities = data.get("syncContextGraphPriorities")
@@ -969,74 +1007,19 @@ function Install-BlackboxDkgPackage {
         Write-Warn2 "Could not determine the installed DKG package version."
         return $false
     }
-    if (-not (Set-BlackboxDkgLargeGraphRecovery -InstalledVersion $installedVersion)) {
-        Write-Warn2 "Installed DKG runtime could not be prepared for the complete Blackbox graph."
+    try {
+        $numericVersion = [version](($installedVersion -split '-', 2)[0])
+    } catch {
+        Write-Warn2 "Could not parse installed DKG package version $installedVersion."
         return $false
     }
+    if ($numericVersion -lt [version]"10.0.7") {
+        Write-Warn2 "DKG $installedVersion is too old for the complete Blackbox graph; version 10.0.7+ is required."
+        return $false
+    }
+    Write-Step "Using published upstream DKG $installedVersion unchanged."
     Write-Ok "Published DKG npm package ready ($installedVersion)"
     return $true
-}
-
-function Set-BlackboxDkgLargeGraphRecovery {
-    param([string]$InstalledVersion)
-    if ($InstalledVersion -ne "10.0.6") {
-        Write-Step "Using upstream DKG $InstalledVersion sync behavior (no local runtime shim)."
-        return $true
-    }
-    # DKG 10.0.6 discards normal and private recovery after 120 seconds.
-    # Patch both requester budgets and the private API ceiling.
-    $lifecyclePath = Join-Path $DkgCliDir "node_modules\@origintrail-official\dkg-agent\dist\dkg-agent-lifecycle.js"
-    $constantsPath = Join-Path $DkgCliDir "node_modules\@origintrail-official\dkg-agent\dist\dkg-agent-constants.js"
-    $routePath = Join-Path $DkgCliDir "node_modules\@origintrail-official\dkg\dist\daemon\routes\memory.js"
-    $patches = @(
-        @{
-            Path = $lifecyclePath
-            Old = "createContextGraphSyncDeadline: (remaining) => this.createContextGraphSyncDeadline(remaining),"
-            New = "createContextGraphSyncDeadline: (_remaining) => Date.now() + Math.max(SYNC_TOTAL_TIMEOUT_MS, Number.parseInt(process.env.DKG_SWM_RECOVERY_TIMEOUT_MS ?? '3600000', 10) || 3_600_000),"
-            Transitional = @(
-                "createContextGraphSyncDeadline: (_remaining) => Date.now() + Math.max(SYNC_TOTAL_TIMEOUT_MS, Number.parseInt(process.env.DKG_SWM_RECOVERY_TIMEOUT_MS ?? '1800000', 10) || 1_800_000),",
-                "createContextGraphSyncDeadline: (_remaining) => Date.now() + Math.max(SYNC_TOTAL_TIMEOUT_MS, Number.parseInt(process.env.DKG_SWM_RECOVERY_TIMEOUT_MS ?? '900000', 10) || 900_000),"
-            )
-        },
-        @{
-            Path = $constantsPath
-            Old = "export const SYNC_TOTAL_TIMEOUT_MS = 120_000;"
-            New = "export const SYNC_TOTAL_TIMEOUT_MS = Math.max(120_000, Number.parseInt(process.env.DKG_SYNC_TOTAL_TIMEOUT_MS ?? '1800000', 10) || 1_800_000);"
-            Transitional = @("export const SYNC_TOTAL_TIMEOUT_MS = 1_800_000;")
-        },
-        @{
-            Path = $routePath
-            Old = "const MAX_BUDGET_MS = 300_000;"
-            New = "const MAX_BUDGET_MS = 3_600_000;"
-            Transitional = @("const MAX_BUDGET_MS = 1_800_000;", "const MAX_BUDGET_MS = 900_000;")
-        }
-    )
-    try {
-        foreach ($patch in $patches) {
-            if (-not (Test-Path $patch.Path)) { throw "missing DKG recovery file $($patch.Path)" }
-            $text = [System.IO.File]::ReadAllText($patch.Path)
-            foreach ($transitional in $patch.Transitional) {
-                if ($text.Contains($transitional)) {
-                    $text = $text.Replace($transitional, $patch.New)
-                }
-            }
-            if ($text.Contains($patch.Old)) {
-                $text = $text.Replace($patch.Old, $patch.New)
-            }
-            if ($text.Contains($patch.New)) {
-                [System.IO.File]::WriteAllText($patch.Path, $text)
-            }
-            $expectedCount = if ($patch.Path -eq $lifecyclePath) { 2 } else { 1 }
-            $actualCount = ([regex]::Matches($text, [regex]::Escape($patch.New))).Count
-            if ($actualCount -lt $expectedCount) {
-                throw "unsupported DKG recovery source in $($patch.Path)"
-            }
-        }
-        return $true
-    } catch {
-        Write-Warn2 "Could not patch DKG private recovery timeout: $_"
-        return $false
-    }
 }
 
 function Install-Dkg {
@@ -1143,10 +1126,25 @@ function Install-Dkg {
     }
 }
 
+function Restart-BlackboxDkgForSyncMode {
+    param([string]$DurableMode)
+    $script:DkgDurableSyncEnabled = $DurableMode
+    try { Invoke-BlackboxDkg stop 2>$null | Out-Null } catch { }
+    Invoke-BlackboxDkg start
+    return (Wait-BlackboxDkgRuntime)
+}
+
 # Pull the verified ruleset now so detection is live immediately after install.
 function Sync-Ruleset {
     if (-not $script:DkgReady) { return }
     Write-Heading "Syncing the threat ruleset"
+    Write-Step "Temporarily enabling durable sync for one controlled publisher catch-up ..."
+    if (-not (Restart-BlackboxDkgForSyncMode -DurableMode "1")) {
+        $script:InstallIncomplete = $true
+        Write-Err2 "Could not start the controlled DKG sync window."
+        Restart-BlackboxDkgForSyncMode -DurableMode $DkgSteadyDurableSyncEnabled | Out-Null
+        return
+    }
     Write-Step "Pulling verified threats from the graph (blackbox sync --wait) ..."
     $out = & $script:HermesBin blackbox sync --wait --timeout $CatchupTimeout --require-rules 2>&1
     $code = $LASTEXITCODE
@@ -1158,6 +1156,13 @@ function Sync-Ruleset {
         Write-Err2 "Initial threat-graph sync did not load any rules."
         Write-Step "Blackbox is installed, but setup is incomplete until DKG returns a non-empty ruleset."
         Write-Step "Retry after fixing DKG/catch-up with: blackbox sync --wait --require-rules"
+    }
+    Write-Step "Returning DKG to Viktor's stabilized steady-state settings ..."
+    if (-not (Restart-BlackboxDkgForSyncMode -DurableMode $DkgSteadyDurableSyncEnabled)) {
+        $script:InstallIncomplete = $true
+        Write-Warn2 "DKG did not return to its steady-state sync settings."
+    } elseif ($DkgSteadyDurableSyncEnabled -eq "0") {
+        Write-Ok "DKG stabilized: automatic/reconciler/durable sync off; one in-flight slot; zero queue"
     }
 }
 

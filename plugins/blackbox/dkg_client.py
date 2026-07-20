@@ -30,19 +30,6 @@ _TIMEOUT = 3.0
 # background refresh and the dashboard hit it, never the cached hot hook path.
 _QUERY_TIMEOUT = 30.0
 _STORE_TIMEOUT = 150.0
-_REMOTE_QUERY_TIMEOUT_MS = 30_000
-_THREAT_COUNT_SPARQL = """SELECT (COUNT(DISTINCT ?threat) AS ?n) WHERE {
-  { ?threat <http://umanitek.ai/ontology/guardian/identifier> ?identifier . }
-  UNION
-  { VALUES ?kind {
-      <urn:defender:DependencySignal>
-      <urn:defender:InjectionSignal>
-      <urn:defender:SkillSignal>
-      <urn:defender:IocSignal>
-    }
-    ?threat a ?kind .
-  }
-}"""
 Quad = Dict[str, str]
 
 
@@ -527,61 +514,6 @@ class DkgClient:
             logger.debug("blackbox: query failed: %s", exc)
             return [] if on_error is None else on_error
         return normalize_bindings(result)
-
-    def threat_count(self, cg_id: str, *, peer_id: Optional[str] = None) -> int:
-        """Count durable threat subjects locally or on one pinned peer.
-
-        The pinned count is the completion contract for authoritative sync:
-        DKG 10.0.x can swallow a per-graph durable-store failure and still
-        return HTTP 200 from its catch-up route, so insertion totals alone are
-        not proof that the local VM is current.
-        """
-        if peer_id:
-            result = self._request(
-                "POST",
-                "/api/query-remote",
-                {
-                    "peerId": peer_id,
-                    "lookupType": "SPARQL_QUERY",
-                    "contextGraphId": cg_id,
-                    "sparql": _THREAT_COUNT_SPARQL,
-                    "limit": 1,
-                    "timeout": _REMOTE_QUERY_TIMEOUT_MS,
-                },
-                timeout=(_REMOTE_QUERY_TIMEOUT_MS / 1_000) + 5,
-            )
-            if str(result.get("status") or "").upper() != "OK":
-                raise DkgError(
-                    "publisher VM count failed: "
-                    + str(result.get("error") or result.get("status") or "unknown response")
-                )
-            rows: Any = result.get("bindings")
-            if isinstance(rows, str):
-                try:
-                    rows = json.loads(rows)
-                except json.JSONDecodeError as exc:
-                    raise DkgError("publisher VM count returned invalid bindings") from exc
-            if not isinstance(rows, list):
-                raise DkgError("publisher VM count returned no bindings")
-            bindings = [row for row in rows if isinstance(row, dict)]
-        else:
-            result = self._request(
-                "POST",
-                "/api/query",
-                {
-                    "sparql": _THREAT_COUNT_SPARQL,
-                    "contextGraphId": cg_id,
-                    "view": constants.VIEW_VERIFIABLE_MEMORY,
-                },
-                timeout=_QUERY_TIMEOUT,
-            )
-            bindings = normalize_bindings(result)
-        if not bindings:
-            raise DkgError("VM threat count returned no rows")
-        try:
-            return int(extract_binding(bindings[0].get("n")) or 0)
-        except (TypeError, ValueError) as exc:
-            raise DkgError("VM threat count was not an integer") from exc
 
     def register_agent(self, name: str, framework: str = "hermes") -> Dict[str, Any]:
         """Register a new agent on the node → ``{agentAddress, authToken, ...}``."""

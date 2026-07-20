@@ -148,6 +148,75 @@ def test_dashboard_sync_never_requests_private_join(monkeypatch):
     assert events == [("subscribe", "legacy/private")]
 
 
+def test_dashboard_does_not_query_rules_while_durable_catchup_runs(monkeypatch):
+    class Cfg:
+        dkg_url = "http://127.0.0.1:9320"
+        dkg_home = "/tmp/blackbox"
+        context_graph_id = "public/graph"
+
+    class Client:
+        def __init__(self, **_kwargs):
+            pass
+
+        def subscribe_context_graph(self, _cg_id):
+            raise AssertionError("active catch-up must not be resubscribed")
+
+        def catchup_status(self, _cg_id):
+            return {"status": "running", "includeSharedMemory": False}
+
+    cached = ruleset.Ruleset()
+
+    class Rules:
+        @staticmethod
+        def peek(_cfg):
+            return cached
+
+        @staticmethod
+        def refresh(_cfg, _client):
+            raise AssertionError("VM must not be queried during durable catch-up")
+
+    monkeypatch.setattr(server.sync_state, "read", lambda: {})
+
+    assert server._sync_ruleset_once(lambda: Cfg(), Client, Rules) == {
+        "total": 0,
+        "public": 0,
+        "community": 0,
+    }
+
+
+def test_dashboard_subscribes_at_most_once_when_status_is_unavailable(monkeypatch):
+    calls = []
+
+    class Cfg:
+        dkg_url = "http://127.0.0.1:9320"
+        dkg_home = "/tmp/blackbox"
+        context_graph_id = "public/one-shot-subscribe"
+
+    class Client:
+        def __init__(self, **_kwargs):
+            pass
+
+        def catchup_status(self, _cg_id):
+            return {}
+
+        def subscribe_context_graph(self, cg_id):
+            calls.append(cg_id)
+            return {}
+
+    class Rules:
+        @staticmethod
+        def refresh(_cfg, _client):
+            return ruleset.Ruleset()
+
+    monkeypatch.setattr(server.sync_state, "read", lambda: {})
+    server._subscription_attempts.discard(Cfg.context_graph_id)
+
+    server._sync_ruleset_once(lambda: Cfg(), Client, Rules)
+    server._sync_ruleset_once(lambda: Cfg(), Client, Rules)
+
+    assert calls == [Cfg.context_graph_id]
+
+
 def test_dashboard_community_surfaces_are_static_coming_soon(monkeypatch):
     app = server.create_app()
     with TestClient(app) as client:

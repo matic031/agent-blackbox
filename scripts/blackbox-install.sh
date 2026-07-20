@@ -65,6 +65,9 @@ BLACKBOX_DKG_DAEMON_URL="http://127.0.0.1:$BLACKBOX_DKG_PORT"
 BLACKBOX_DKG_STORE_QUEUE_LIMIT="${BLACKBOX_DKG_STORE_QUEUE_LIMIT:-512}"
 BLACKBOX_DKG_LIST_CONTEXT_GRAPHS_PROJECTION="${BLACKBOX_DKG_LIST_CONTEXT_GRAPHS_PROJECTION:-1}"
 BLACKBOX_DKG_SYNC_GLOBAL_MAX_INFLIGHT="1"
+BLACKBOX_DKG_SYNC_GLOBAL_QUEUE_LIMIT="0"
+BLACKBOX_DKG_DURABLE_SYNC_ENABLED="${BLACKBOX_DKG_DURABLE_SYNC_ENABLED:-0}"
+BLACKBOX_DKG_STEADY_DURABLE_SYNC_ENABLED="$BLACKBOX_DKG_DURABLE_SYNC_ENABLED"
 BLACKBOX_DKG_CATCHUP_MAX_CONCURRENT_PEERS="1"
 BLACKBOX_DKG_STORE_QUEUE_WAIT_TIMEOUT_MS="300000"
 BLACKBOX_DKG_NODE_OPTIONS=""
@@ -78,7 +81,7 @@ BLACKBOX_LLM_KEY_SOURCE="${BLACKBOX_LLM_KEY_SOURCE:-}"
 BLACKBOX_LLM_API_KEY="${BLACKBOX_LLM_API_KEY:-}"
 BLACKBOX_HERMES_SETUP="${BLACKBOX_HERMES_SETUP:-reuse}" # reuse | always | never
 BLACKBOX_AUTO_DASHBOARD="${BLACKBOX_AUTO_DASHBOARD:-1}"
-BLACKBOX_SYNC_MODE="${BLACKBOX_SYNC_MODE:-background}" # background | wait
+BLACKBOX_SYNC_MODE="${BLACKBOX_SYNC_MODE:-wait}" # retained for compatibility; sync is controlled
 BLACKBOX_INSTALL_INCOMPLETE=false
 BLACKBOX_THREAT_GRAPH_INCOMPLETE=false
 BLACKBOX_SYNC_PENDING=false
@@ -165,7 +168,11 @@ blackbox_dkg() {
     DKG_ACCEPT_STORE_RESET="$accept_store_reset" \
     DKG_STORE_QUEUE_LIMIT="$BLACKBOX_DKG_STORE_QUEUE_LIMIT" \
     DKG_LIST_CONTEXT_GRAPHS_PROJECTION="$BLACKBOX_DKG_LIST_CONTEXT_GRAPHS_PROJECTION" \
+    DKG_SYNC_ON_CONNECT_ENABLED="0" \
+    DKG_SYNC_RECONCILER_ENABLED="0" \
+    DKG_DURABLE_SYNC_ENABLED="$BLACKBOX_DKG_DURABLE_SYNC_ENABLED" \
     DKG_SYNC_GLOBAL_MAX_INFLIGHT="$BLACKBOX_DKG_SYNC_GLOBAL_MAX_INFLIGHT" \
+    DKG_SYNC_GLOBAL_QUEUE_LIMIT="$BLACKBOX_DKG_SYNC_GLOBAL_QUEUE_LIMIT" \
     DKG_CATCHUP_MAX_CONCURRENT_PEERS="$BLACKBOX_DKG_CATCHUP_MAX_CONCURRENT_PEERS" \
     DKG_STORE_QUEUE_WAIT_TIMEOUT_MS="$BLACKBOX_DKG_STORE_QUEUE_WAIT_TIMEOUT_MS" \
     DKG_SYNC_TOTAL_TIMEOUT_MS="1800000" \
@@ -497,6 +504,26 @@ PYEOF
                 if check_blackbox_blazegraph; then
                     return 0
                 fi
+                local managed_container="dkg-blazegraph-$namespace"
+                local store_restarted=false
+                step "Restarting the unresponsive managed Blazegraph container ..."
+                if docker restart "$managed_container" >/dev/null 2>&1; then
+                    store_restarted=true
+                else
+                    # A wedged JVM can make Docker's graceful restart return
+                    # non-zero after it has nevertheless stopped the container.
+                    # Starting that same container preserves its named volume
+                    # and is safer than falling through to reprovisioning.
+                    if [ "$(docker inspect -f '{{.State.Running}}' "$managed_container" 2>/dev/null)" = false ] &&
+                        docker start "$managed_container" >/dev/null 2>&1; then
+                        store_restarted=true
+                    else
+                        warn "Could not restart managed container $managed_container."
+                    fi
+                fi
+                if [ "$store_restarted" = true ] && check_blackbox_blazegraph; then
+                    return 0
+                fi
             else
                 warn "Could not pause the Blackbox DKG daemon before store recovery."
             fi
@@ -612,13 +639,17 @@ existing_relays = data.get("relayPeers") if isinstance(data.get("relayPeers"), l
 merged_relays = list(dict.fromkeys([*existing_relays, *MAINNET_BASE_RELAYS]))
 data["relayPeers"] = merged_relays
 data["relayReservationCount"] = int(data.get("relayReservationCount") or 4)
-# Use the DKG native default reconnect reconciler.
-data.pop("syncOnConnectEnabled", None)
-# Retire old Blackbox backpressure overrides. DKG owns sync scheduling,
-# admission catch-up, backpressure, and approval redelivery.
+# Blackbox starts explicit subscription catch-up jobs. Starting another durable
+# sync every time any peer connects only competes with that job for the single
+# large-sync slot and can starve the Blazegraph store queue on fresh installs.
+data["syncOnConnectEnabled"] = False
+# Disable automatic retry/fan-out. Blackbox initiates one explicit durable
+# publisher catch-up, so durable sync itself must remain available.
+data["syncReconcilerEnabled"] = False
+data["durableSyncEnabled"] = False
 data.pop("syncAgentsMeta", None)
-data.pop("syncGlobalMaxInflight", None)
-data.pop("syncGlobalQueueLimit", None)
+data["syncGlobalMaxInflight"] = 1
+data["syncGlobalQueueLimit"] = 0
 data.pop("restrictAutoSubscribeContextGraphs", None)
 data["syncSharedMemoryOnConnect"] = False
 priorities = data.get("syncContextGraphPriorities")
@@ -1225,73 +1256,22 @@ install_blackbox_dkg_package() {
         warn "Could not determine the installed DKG package version."
         return 1
     fi
-    if ! patch_blackbox_dkg_large_graph_recovery "$installed_version"; then
-        warn "Installed DKG runtime could not be prepared for the complete Blackbox graph."
+    if ! "$VENV_DIR/bin/python" - "$installed_version" <<'PYEOF'
+import sys
+
+raw = sys.argv[1].split("-", 1)[0]
+try:
+    version = tuple(int(part) for part in raw.split("."))
+except ValueError:
+    raise SystemExit(1)
+raise SystemExit(0 if version >= (10, 0, 7) else 1)
+PYEOF
+    then
+        warn "DKG $installed_version is too old for the complete Blackbox graph; version 10.0.7+ is required."
         return 1
     fi
+    step "Using published upstream DKG $installed_version unchanged."
     ok "Published DKG npm package ready (${installed_version:-installed})"
-}
-
-patch_blackbox_dkg_large_graph_recovery() {
-    local installed_version="${1:-}"
-    if [ "$installed_version" != "10.0.6" ]; then
-        step "Using upstream DKG $installed_version sync behavior (no local runtime shim)."
-        return 0
-    fi
-    # DKG 10.0.6 bounds normal sync and private curator SWM recovery to 120s.
-    # The Blackbox graph is larger and recovery is atomic, so timed-out work is
-    # discarded. Patch both requester budgets and the private API ceiling.
-    # Exact-string guards keep this compatibility patch scoped to the known
-    # DKG version and fail closed instead of rewriting unknown upstream code.
-    "$VENV_DIR/bin/python" - \
-        "$BLACKBOX_DKG_CLI_DIR/node_modules/@origintrail-official/dkg-agent/dist/dkg-agent-lifecycle.js" \
-        "$BLACKBOX_DKG_CLI_DIR/node_modules/@origintrail-official/dkg-agent/dist/dkg-agent-constants.js" \
-        "$BLACKBOX_DKG_CLI_DIR/node_modules/@origintrail-official/dkg/dist/daemon/routes/memory.js" <<'PYEOF'
-import sys
-from pathlib import Path
-
-lifecycle_path, constants_path, route_path = map(Path, sys.argv[1:4])
-replacements = (
-    (
-        lifecycle_path,
-        "createContextGraphSyncDeadline: (remaining) => this.createContextGraphSyncDeadline(remaining),",
-        "createContextGraphSyncDeadline: (_remaining) => Date.now() + Math.max(SYNC_TOTAL_TIMEOUT_MS, Number.parseInt(process.env.DKG_SWM_RECOVERY_TIMEOUT_MS ?? '3600000', 10) || 3_600_000),",
-        (
-            "createContextGraphSyncDeadline: (_remaining) => Date.now() + Math.max(SYNC_TOTAL_TIMEOUT_MS, Number.parseInt(process.env.DKG_SWM_RECOVERY_TIMEOUT_MS ?? '1800000', 10) || 1_800_000),",
-            "createContextGraphSyncDeadline: (_remaining) => Date.now() + Math.max(SYNC_TOTAL_TIMEOUT_MS, Number.parseInt(process.env.DKG_SWM_RECOVERY_TIMEOUT_MS ?? '900000', 10) || 900_000),",
-        ),
-        2,
-    ),
-    (
-        constants_path,
-        "export const SYNC_TOTAL_TIMEOUT_MS = 120_000;",
-        "export const SYNC_TOTAL_TIMEOUT_MS = Math.max(120_000, Number.parseInt(process.env.DKG_SYNC_TOTAL_TIMEOUT_MS ?? '1800000', 10) || 1_800_000);",
-        ("export const SYNC_TOTAL_TIMEOUT_MS = 1_800_000;",),
-        1,
-    ),
-    (
-        route_path,
-        "const MAX_BUDGET_MS = 300_000;",
-        "const MAX_BUDGET_MS = 3_600_000;",
-        ("const MAX_BUDGET_MS = 1_800_000;", "const MAX_BUDGET_MS = 900_000;"),
-        1,
-    ),
-)
-for path, old, new, transitionals, expected_new_count in replacements:
-    try:
-        text = path.read_text(encoding="utf-8")
-    except OSError as exc:
-        raise SystemExit(f"missing DKG recovery file {path}: {exc}")
-    for transitional in transitionals:
-        if transitional in text:
-            text = text.replace(transitional, new)
-    if old in text:
-        text = text.replace(old, new)
-    if text.count(new) >= expected_new_count:
-        path.write_text(text, encoding="utf-8")
-    if text.count(new) < expected_new_count:
-        raise SystemExit(f"unsupported DKG recovery source in {path}")
-PYEOF
 }
 
 install_dkg() {
@@ -1407,6 +1387,14 @@ install_dkg() {
     fi
 }
 
+restart_blackbox_dkg_for_sync_mode() {
+    local durable_mode="$1"
+    BLACKBOX_DKG_DURABLE_SYNC_ENABLED="$durable_mode"
+    blackbox_dkg stop >/dev/null 2>&1 || true
+    blackbox_dkg start || true
+    wait_for_blackbox_dkg_runtime
+}
+
 # Pull the verified ruleset from the graph now, so detection is live immediately
 # after install rather than after the user runs a manual sync.
 sync_ruleset() {
@@ -1414,20 +1402,12 @@ sync_ruleset() {
     heading "Syncing the threat ruleset"
     mkdir -p "$HERMES_HOME/logs"
     BLACKBOX_SYNC_LOG="$HERMES_HOME/logs/blackbox-sync-install.log"
-    if [ "$BLACKBOX_SYNC_MODE" = "background" ]; then
-        step "Starting DKG catch-up in the background; the dashboard stays usable while it syncs."
-        run_detached "$BLACKBOX_SYNC_LOG" "$HERMES_BIN" blackbox sync --wait --timeout "$BLACKBOX_DKG_CATCHUP_TIMEOUT" --require-rules
-        local sync_pid="$BLACKBOX_DETACHED_PID"
-        if ! detached_process_survived_startup "$sync_pid"; then
-            BLACKBOX_INSTALL_INCOMPLETE=true
-            BLACKBOX_THREAT_GRAPH_INCOMPLETE=true
-            err "Threat graph sync exited during startup."
-            step "Log: $BLACKBOX_SYNC_LOG"
-            return 0
-        fi
-        BLACKBOX_SYNC_PENDING=true
-        ok "Threat graph sync running in background (PID $sync_pid)"
-        step "Log: $BLACKBOX_SYNC_LOG"
+    step "Temporarily enabling durable sync for one controlled publisher catch-up ..."
+    if ! restart_blackbox_dkg_for_sync_mode 1; then
+        BLACKBOX_INSTALL_INCOMPLETE=true
+        BLACKBOX_THREAT_GRAPH_INCOMPLETE=true
+        err "Could not start the controlled DKG sync window."
+        restart_blackbox_dkg_for_sync_mode "$BLACKBOX_DKG_STEADY_DURABLE_SYNC_ENABLED" || true
         return 0
     fi
 
@@ -1444,6 +1424,14 @@ sync_ruleset() {
         step "Blackbox is installed, but setup is incomplete until DKG returns a non-empty ruleset."
         step "Retry after fixing DKG/catch-up with: blackbox sync --wait --require-rules"
     fi
+    step "Returning DKG to Viktor's stabilized steady-state settings ..."
+    if ! restart_blackbox_dkg_for_sync_mode "$BLACKBOX_DKG_STEADY_DURABLE_SYNC_ENABLED"; then
+        BLACKBOX_INSTALL_INCOMPLETE=true
+        warn "DKG did not return to its steady-state sync settings."
+    elif [ "$BLACKBOX_DKG_STEADY_DURABLE_SYNC_ENABLED" = "0" ]; then
+        ok "DKG stabilized: automatic/reconciler/durable sync off; one in-flight slot; zero queue"
+    fi
+    return 0
 }
 
 dkg_manual_hint() {
@@ -1824,8 +1812,8 @@ main() {
     configure_blackbox_mode
     attach_all_agents
     setup_llm
-    start_dashboard
     sync_ruleset
+    start_dashboard
     next_steps
     if [ "$BLACKBOX_INSTALL_INCOMPLETE" = true ]; then
         exit 1

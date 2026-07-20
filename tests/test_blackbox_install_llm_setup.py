@@ -19,6 +19,8 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 INSTALL_SH = REPO_ROOT / "scripts" / "blackbox-install.sh"
 INSTALL_PS1 = REPO_ROOT / "scripts" / "blackbox-install.ps1"
 BLAZEGRAPH_HELPER = REPO_ROOT / "scripts" / "blackbox-blazegraph.mjs"
+CURATOR_CONFIG = REPO_ROOT / "scripts" / "blackbox-curator-config.py"
+CURATOR_SERVICE = REPO_ROOT / "scripts" / "blackbox-dkg-curator.service.conf"
 BLAZEGRAPH_URL = "http://127.0.0.1:9999/bigdata/namespace/test/sparql"
 
 
@@ -277,18 +279,22 @@ run_detached {shlex.quote(str(log_file))} {shlex.quote(sys.executable)} -c {shle
         subprocess.run(["/bin/kill", "-TERM", str(child_pid)], check=False)
 
 
-def test_unix_installer_verifies_background_sync_survives_startup() -> None:
+def test_unix_installer_runs_one_controlled_sync_before_dashboard() -> None:
     run_body = _extract_function_body("run_detached")
     health_body = _extract_function_body("detached_process_survived_startup")
     sync_body = _extract_function_body("sync_ruleset")
 
     assert 'BLACKBOX_DETACHED_PID=$!' in run_body
     assert 'kill -0 "$pid"' in health_body
-    assert 'detached_process_survived_startup "$sync_pid"' in sync_body
+    assert "run_detached" not in sync_body
+    assert "restart_blackbox_dkg_for_sync_mode 1" in sync_body
+    assert (
+        'restart_blackbox_dkg_for_sync_mode '
+        '"$BLACKBOX_DKG_STEADY_DURABLE_SYNC_ENABLED"'
+    ) in sync_body
     assert 'BLACKBOX_INSTALL_INCOMPLETE=true' in sync_body
     assert 'BLACKBOX_THREAT_GRAPH_INCOMPLETE=true' in sync_body
-    assert 'Threat graph sync exited during startup.' in sync_body
-    assert 'Threat graph sync running in background (PID $sync_pid)' in sync_body
+    assert "one controlled publisher catch-up" in sync_body
 
 
 def test_installers_enable_blackbox_noninteractively() -> None:
@@ -688,9 +694,11 @@ def test_dkg_config_writer_leaves_subscriptions_to_the_dkg_api(tmp_path: Path) -
     ]
     assert "autoApproveJoinRequests" not in migrated
     assert "syncAgentsMeta" not in migrated
-    assert "syncOnConnectEnabled" not in migrated
-    assert "syncGlobalMaxInflight" not in migrated
-    assert "syncGlobalQueueLimit" not in migrated
+    assert migrated["syncOnConnectEnabled"] is False
+    assert migrated["syncReconcilerEnabled"] is False
+    assert migrated["durableSyncEnabled"] is False
+    assert migrated["syncGlobalMaxInflight"] == 1
+    assert migrated["syncGlobalQueueLimit"] == 0
     assert "restrictAutoSubscribeContextGraphs" not in migrated
     assert migrated["store"] == {
         "backend": "blazegraph",
@@ -1171,9 +1179,11 @@ def test_installers_use_native_dkg_membership_without_sync_overrides() -> None:
         assert "blackbox-dkg-runtime-fingerprint.py" in text
         assert "DKG daemon is ready on npm build" in text
         assert "autoApproveJoinRequests" not in text
-        assert 'data.pop("syncOnConnectEnabled", None)' in text
-        assert 'data.pop("syncGlobalMaxInflight", None)' in text
-        assert 'data.pop("syncGlobalQueueLimit", None)' in text
+        assert 'data["syncOnConnectEnabled"] = False' in text
+        assert 'data["syncReconcilerEnabled"] = False' in text
+        assert 'data["durableSyncEnabled"] = False' in text
+        assert 'data["syncGlobalMaxInflight"] = 1' in text
+        assert 'data["syncGlobalQueueLimit"] = 0' in text
         assert 'data.pop("restrictAutoSubscribeContextGraphs", None)' in text
         assert 'data["syncSharedMemoryOnConnect"] = False' in text
         assert 'data["syncContextGraphPriorities"] = priorities' in text
@@ -1183,15 +1193,28 @@ def test_installers_use_native_dkg_membership_without_sync_overrides() -> None:
         assert "DKG_STORE_QUEUE_LIMIT" in text
         assert "DKG_LIST_CONTEXT_GRAPHS_PROJECTION" in text
         assert "DKG_SYNC_GLOBAL_MAX_INFLIGHT" in text
+        assert "DKG_SYNC_GLOBAL_QUEUE_LIMIT" in text
+        assert "DKG_SYNC_ON_CONNECT_ENABLED" in text
+        assert "DKG_SYNC_RECONCILER_ENABLED" in text
+        assert "DKG_DURABLE_SYNC_ENABLED" in text
         assert "NODE_OPTIONS" in text
         assert "blackbox-npm-install.log" in text
         assert "Blazegraph SPARQL endpoint is healthy" in text
         assert "Blazegraph is unavailable or returned an error" in text
 
     assert 'BLACKBOX_DKG_SYNC_GLOBAL_MAX_INFLIGHT="1"' in unix
+    assert 'BLACKBOX_DKG_SYNC_GLOBAL_QUEUE_LIMIT="0"' in unix
+    assert 'BLACKBOX_DKG_DURABLE_SYNC_ENABLED="${BLACKBOX_DKG_DURABLE_SYNC_ENABLED:-0}"' in unix
     assert 'BLACKBOX_DKG_CATCHUP_MAX_CONCURRENT_PEERS="1"' in unix
     assert 'BLACKBOX_DKG_STORE_QUEUE_WAIT_TIMEOUT_MS="300000"' in unix
     assert '$DkgSyncGlobalMaxInflight = "1"' in windows
+    assert '$DkgSyncGlobalQueueLimit = "0"' in windows
+    assert 'else { "0" }' in windows
+    assert "restart_blackbox_dkg_for_sync_mode 1" in unix
+    assert 'restart_blackbox_dkg_for_sync_mode "$BLACKBOX_DKG_STEADY_DURABLE_SYNC_ENABLED"' in unix
+    assert 'Restart-BlackboxDkgForSyncMode -DurableMode "1"' in windows
+    assert "Restart-BlackboxDkgForSyncMode -DurableMode $DkgSteadyDurableSyncEnabled" in windows
+    assert unix.index("sync_ruleset\n") < unix.index("start_dashboard\n")
     assert '$DkgCatchupMaxConcurrentPeers = "1"' in windows
     assert '$DkgStoreQueueWaitTimeoutMs = "300000"' in windows
     assert "one large sync at a time" in unix
@@ -1249,96 +1272,24 @@ blackbox_dkg start
     )
 
 
-@pytest.mark.skipif(shutil.which("bash") is None, reason="bash is unavailable")
-def test_unix_large_graph_patch_updates_both_private_recovery_call_sites(
-    tmp_path: Path,
-) -> None:
-    cli_dir = tmp_path / "dkg-cli"
-    lifecycle = (
-        cli_dir
-        / "node_modules"
-        / "@origintrail-official"
-        / "dkg-agent"
-        / "dist"
-        / "dkg-agent-lifecycle.js"
-    )
-    constants = (
-        cli_dir
-        / "node_modules"
-        / "@origintrail-official"
-        / "dkg-agent"
-        / "dist"
-        / "dkg-agent-constants.js"
-    )
-    route = (
-        cli_dir
-        / "node_modules"
-        / "@origintrail-official"
-        / "dkg"
-        / "dist"
-        / "daemon"
-        / "routes"
-        / "memory.js"
-    )
-    lifecycle.parent.mkdir(parents=True)
-    route.parent.mkdir(parents=True)
-    old_deadline = (
-        "createContextGraphSyncDeadline: (remaining) => "
-        "this.createContextGraphSyncDeadline(remaining),"
-    )
-    lifecycle.write_text(f"first {old_deadline}\nsecond {old_deadline}\n", encoding="utf-8")
-    constants.write_text(
-        "export const SYNC_TOTAL_TIMEOUT_MS = 120_000;\n",
-        encoding="utf-8",
-    )
-    route.write_text("const MAX_BUDGET_MS = 300_000;\n", encoding="utf-8")
-    venv = tmp_path / "venv"
-    (venv / "bin").mkdir(parents=True)
-    (venv / "bin" / "python").symlink_to(Path(sys.executable))
-    body = _extract_function_body("patch_blackbox_dkg_large_graph_recovery")
-    command = f"""
-patch_blackbox_dkg_large_graph_recovery() {{
-{body}
-}}
-VENV_DIR={shlex.quote(str(venv))}
-BLACKBOX_DKG_CLI_DIR={shlex.quote(str(cli_dir))}
-patch_blackbox_dkg_large_graph_recovery 10.0.6
-"""
+def test_installers_never_patch_the_published_dkg_runtime() -> None:
+    unix = INSTALL_SH.read_text(encoding="utf-8")
+    windows = INSTALL_PS1.read_text(encoding="utf-8")
 
-    subprocess.run(["bash", "-c", command], check=True)
+    for text in (unix, windows):
+        assert "dkg-agent-lifecycle.js" not in text
+        assert "dkg-agent-constants.js" not in text
+        assert "dist/daemon/routes/memory.js" not in text
+        assert "dist\\daemon\\routes\\memory.js" not in text
+        assert "Using published upstream DKG" in text
+        assert "unchanged" in text
 
-    patched = lifecycle.read_text(encoding="utf-8")
-    assert old_deadline not in patched
-    assert patched.count("DKG_SWM_RECOVERY_TIMEOUT_MS") == 2
-    assert "DKG_SYNC_TOTAL_TIMEOUT_MS" in constants.read_text(encoding="utf-8")
-    assert "SYNC_TOTAL_TIMEOUT_MS = 120_000;" not in constants.read_text(encoding="utf-8")
-    assert "const MAX_BUDGET_MS = 3_600_000;" in route.read_text(encoding="utf-8")
-
-
-def test_unix_large_graph_patch_defers_to_newer_upstream_dkg(tmp_path: Path) -> None:
-    cli_dir = tmp_path / "dkg-cli"
-    lifecycle = (
-        cli_dir
-        / "node_modules"
-        / "@origintrail-official"
-        / "dkg-agent"
-        / "dist"
-        / "dkg-agent-lifecycle.js"
-    )
-    lifecycle.parent.mkdir(parents=True)
-    lifecycle.write_text("upstream sync implementation\n", encoding="utf-8")
-    body = _extract_function_body("patch_blackbox_dkg_large_graph_recovery")
-    command = f"""
-patch_blackbox_dkg_large_graph_recovery() {{
-{body}
-}}
-step() {{ :; }}
-BLACKBOX_DKG_CLI_DIR={shlex.quote(str(cli_dir))}
-patch_blackbox_dkg_large_graph_recovery 10.0.7
-"""
-
-    subprocess.run(["bash", "-c", command], check=True)
-    assert lifecycle.read_text(encoding="utf-8") == "upstream sync implementation\n"
+    curator = CURATOR_CONFIG.read_text(encoding="utf-8")
+    service = CURATOR_SERVICE.read_text(encoding="utf-8")
+    assert "--dkg-agent-dist" not in curator
+    assert "--dkg-agent-dist" not in service
+    assert "dkg-agent-lifecycle.js" not in curator
+    assert "dkg-agent-registry.js" not in curator
 
 
 def test_installers_restart_running_owned_dkg_only_for_runtime_changes() -> None:
@@ -1347,7 +1298,10 @@ def test_installers_restart_running_owned_dkg_only_for_runtime_changes() -> None
 
     assert "BLACKBOX_DKG_RESTART_REQUIRED" in INSTALL_SH.read_text(encoding="utf-8")
     assert 'if [ "$BLACKBOX_DKG_RESTART_REQUIRED" != true ]; then' in unix
-    assert "blackbox_dkg stop && blackbox_dkg start && wait_for_blackbox_dkg_runtime" in unix
+    assert "blackbox_dkg start || true" in unix
+    assert "if wait_for_blackbox_dkg_runtime; then" in unix
+    assert 'docker start "$managed_container"' in INSTALL_SH.read_text(encoding="utf-8")
+    assert "docker start $managedContainer" in windows
     assert "install_blackbox_dkg_package" in unix
     assert "prepare_blackbox_dkg_runtime_fingerprint" in unix
     assert "record_blackbox_dkg_runtime_fingerprint" in unix

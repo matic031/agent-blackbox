@@ -282,27 +282,6 @@ def test_query_normalizes_bindings(monkeypatch):
     assert json.loads(cap["body"])["view"] == "verifiable-memory"
 
 
-def test_threat_count_verifies_pinned_publisher_and_local_vm(monkeypatch):
-    cap = _capture_sequence(
-        monkeypatch,
-        [
-            '{"status":"OK","bindings":"[{\\"n\\":{\\"value\\":\\"25000\\"}}]"}',
-            '{"bindings":[{"n":{"value":"25000"}}]}',
-        ],
-    )
-    client = dkg_client.DkgClient(url="http://node", token="tok")
-
-    assert client.threat_count("cg", peer_id="publisher") == 25_000
-    assert client.threat_count("cg") == 25_000
-    assert cap["calls"][0]["url"] == "http://node/api/query-remote"
-    remote = json.loads(cap["calls"][0]["body"])
-    assert remote["peerId"] == "publisher"
-    assert remote["lookupType"] == "SPARQL_QUERY"
-    assert remote["contextGraphId"] == "cg"
-    assert cap["calls"][1]["url"] == "http://node/api/query"
-    assert json.loads(cap["calls"][1]["body"])["view"] == "verifiable-memory"
-
-
 def test_working_memory_query_sends_agent_address(monkeypatch):
     cap = _capture(monkeypatch, '{"bindings": []}')
     client = dkg_client.DkgClient(url="http://node", token="t")

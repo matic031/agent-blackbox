@@ -220,7 +220,8 @@ def test_blackbox_sync_waits_for_public_vm_when_community_arrives_first(monkeypa
 
 def test_blackbox_sync_recovers_curator_snapshot_then_waits_for_vm(monkeypatch, capsys):
     events = []
-    public_counts = iter([6_875, 6_875, 23_001])
+    public_counts = iter([6_875, 23_001])
+    durable_rounds = iter([244_842, 0])
 
     class FakeClient:
         def __init__(self, url, **_kwargs):
@@ -237,13 +238,14 @@ def test_blackbox_sync_recovers_curator_snapshot_then_waits_for_vm(monkeypatch, 
 
         def catchup_from_peer(self, cg_id, peer_id, *, budget_ms):
             events.append(("curator", cg_id, peer_id, budget_ms))
+            inserted = next(durable_rounds)
             return {
                 "ok": True,
                 "includeDurable": True,
                 "includeSharedMemory": False,
                 "peersAttempted": 1,
-                "totalDurableInsertedTriples": 244_842,
-                "results": [{"peerId": peer_id, "durableInsertedTriples": 244_842}],
+                "totalDurableInsertedTriples": inserted,
+                "results": [{"peerId": peer_id, "durableInsertedTriples": inserted}],
             }
 
         def threat_count(self, cg_id, *, peer_id=None):
@@ -298,13 +300,14 @@ def test_blackbox_sync_recovers_curator_snapshot_then_waits_for_vm(monkeypatch, 
     args = argparse.Namespace(wait=True, timeout=30, require_rules=True)
     assert cli_mod._cmd_sync(args) == 0
     curator_events = [event for event in events if event[0] == "curator"]
-    assert len(curator_events) == 1
+    assert len(curator_events) == 2
     assert states[-1][0] == "done"
     assert states[-1][1]["public_entries"] == 23_001
     assert states[-1][1]["expected_public_entries"] == 23_001
     out = capsys.readouterr().out
     assert "Recovering the complete publisher VM snapshot" in out
-    assert "publisher VM verified" in out
+    assert "publisher durable sync advanced" in out
+    assert "publisher durable sync settled" in out
     assert "23,001 public VM" in out
 
 
@@ -383,7 +386,7 @@ def test_blackbox_sync_uses_authoritative_publisher_for_empty_local_store(
     assert "25,000 public VM" in capsys.readouterr().out
 
 
-def test_blackbox_sync_accepts_deferred_after_verified_authoritative_vm(
+def test_blackbox_sync_does_not_accept_deferred_catchup_as_complete(
     monkeypatch, capsys
 ):
     curator_calls = []
@@ -451,17 +454,64 @@ def test_blackbox_sync_accepts_deferred_after_verified_authoritative_vm(
         "write",
         lambda status, **details: states.append((status, details)) or details,
     )
+    monkeypatch.setattr(cli_mod.time, "sleep", lambda _seconds: None)
 
     args = argparse.Namespace(wait=True, timeout=30, require_rules=True)
     assert cli_mod._cmd_sync(args) == 0
     assert len(curator_calls) == 1
     assert len(status_calls) >= 3
     assert states[-1][0] == "done"
-    statuses = [status for status, _details in states]
-    assert statuses.count("done") == 1
-    assert all(details.get("phase") == "complete" for status, details in states if status == "done")
-    assert states[-1][1]["public_entries"] == 4
+    assert any(
+        status == "running"
+        and details.get("phase") == "recovering-verifiable-memory"
+        for status, details in states
+    )
     assert "4 public VM" in capsys.readouterr().out
+
+
+def test_blackbox_sync_does_not_query_vm_while_catchup_is_running(monkeypatch):
+    status_calls = []
+    clock = {"value": 0.0}
+
+    def monotonic():
+        clock["value"] += 0.25
+        return clock["value"]
+
+    class FakeClient:
+        def __init__(self, url, **_kwargs):
+            self.url = url
+
+        def subscribe_context_graph(self, _cg_id):
+            return {"catchup": {"jobId": "fresh", "status": "queued"}}
+
+        def catchup_status(self, _cg_id):
+            status_calls.append(True)
+            return {"jobId": "fresh", "status": "running"}
+
+    cached = ruleset_mod.Ruleset()
+    monkeypatch.setattr(cli_mod, "DkgClient", FakeClient)
+    monkeypatch.setattr(
+        cli_mod,
+        "load_blackbox_config",
+        lambda: config_mod.BlackboxConfig(
+            context_graph_id=constants.DEFAULT_CONTEXT_GRAPH_ID,
+            dkg_url=constants.DEFAULT_DKG_URL,
+        ),
+    )
+    monkeypatch.setattr(cli_mod.ruleset, "peek", lambda _cfg: cached)
+    monkeypatch.setattr(
+        cli_mod.ruleset,
+        "refresh",
+        lambda *_args: (_ for _ in ()).throw(
+            AssertionError("VM must not be queried during durable catch-up")
+        ),
+    )
+    monkeypatch.setattr(cli_mod.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(cli_mod.time, "monotonic", monotonic)
+
+    args = argparse.Namespace(wait=True, timeout=1, require_rules=True)
+    assert cli_mod._cmd_sync(args) == 2
+    assert status_calls
 
 
 def test_authoritative_recovery_waits_for_dkg_backpressure(monkeypatch, capsys):
@@ -726,7 +776,7 @@ def test_blackbox_sync_uses_curator_when_generic_catchup_peer_fails(monkeypatch,
     args = argparse.Namespace(wait=True, timeout=30, require_rules=True)
     assert cli_mod._cmd_sync(args) == 0
     assert len(events) == 1
-    assert "publisher VM verified" in capsys.readouterr().out
+    assert "publisher durable sync settled" in capsys.readouterr().out
 
 
 def test_blackbox_request_join_does_not_treat_delivery_as_approval():

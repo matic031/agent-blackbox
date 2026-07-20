@@ -35,16 +35,13 @@ _RESCAN_INTERVAL_SEC = 5.0
 _RECONCILE_INTERVAL_SEC = 60.0
 _RULESET_EMPTY_RETRY_SEC = 10.0
 _RULESET_MIN_RETRY_SEC = 5.0
-_JOIN_RETRY_SEC = 60.0
-_CATCHUP_RESTART_SEC = 60.0
 _GUARDIAN_PROFILE = "guardian"
 _GUARDIAN_RUNTIME_HOST = "127.0.0.1"
 _GUARDIAN_RUNTIME_PORT = 9121
 _GUARDIAN_RESTART_DELAY_SEC = 2.0
-_join_attempts: Dict[str, float] = {}
-_catchup_restarts: Dict[str, float] = {}
 _join_lock = threading.Lock()
 _connection_states: Dict[str, Dict[str, Any]] = {}
+_subscription_attempts: Set[str] = set()
 
 _STATIC_DIR = Path(__file__).resolve().parent / "static"
 _ASSETS_DIR = Path(__file__).resolve().parent / "assets"
@@ -86,12 +83,6 @@ def _port_is_listening(host: str, port: int) -> bool:
 
 
 def _recent_daemon_lines(dkg_home: str, *, max_lines: int = 400) -> List[str]:
-    """Return the most recent daemon log lines, newest last.
-
-    The dashboard only needs a short local window to explain why a private
-    graph join is stalled. Relay churn is noisy; the actionable lines are the
-    explicit join/sync blockers that mention the context graph id.
-    """
     path = Path(dkg_home).expanduser() / "daemon.log"
     try:
         with path.open("r", encoding="utf-8", errors="replace") as handle:
@@ -101,12 +92,7 @@ def _recent_daemon_lines(dkg_home: str, *, max_lines: int = 400) -> List[str]:
 
 
 def _daemon_connection_hint(dkg_home: str, cg_id: str) -> Dict[str, str]:
-    """Infer the freshest actionable join/sync blocker from daemon.log.
-
-    Prefer concrete blockers that explain why a new agent will not progress
-    past a pending join. Generic relay/network-isolation chatter is ignored
-    unless it is tied to an explicit denied sync for this graph.
-    """
+    """Infer the freshest actionable join/sync blocker from daemon.log."""
     if not dkg_home or not cg_id:
         return {}
     for raw in reversed(_recent_daemon_lines(dkg_home)):
@@ -136,23 +122,6 @@ def _daemon_connection_hint(dkg_home: str, cg_id: str) -> Dict[str, str]:
                 "evidence": line,
             }
     return {}
-
-
-def _connection_state_payload(cfg: Any, state: str, **extra: Any) -> Dict[str, Any]:
-    """Build a user-facing connection state, enriched with local daemon hints."""
-    payload: Dict[str, Any] = {
-        "state": state,
-        "updated_at": time.time(),
-        **extra,
-    }
-    if state in {"joining", "pending-approval", "connection-error"}:
-        hint = _daemon_connection_hint(
-            str(getattr(cfg, "dkg_home", "") or ""),
-            str(getattr(cfg, "context_graph_id", "") or ""),
-        )
-        if hint:
-            payload.update(hint)
-    return payload
 
 
 def _ruleset_total(rs: Any) -> int:
@@ -197,29 +166,65 @@ def _ruleset_sync_counts(rs: Any) -> Dict[str, int]:
 
 
 def _sync_ruleset_once(load_config: Any, dkg_client_cls: Any, ruleset_mod: Any) -> Dict[str, int]:
-    """Subscribe to the public graph and refresh its curated VM rules."""
+    """Ensure one public-graph subscription and refresh curated VM rules."""
     cfg = load_config()
     transfer = sync_state.read()
     if transfer.get("status") == "running":
         public = int(transfer.get("public_entries") or 0)
         return {"total": public, "public": public, "community": 0}
     client = dkg_client_cls(url=cfg.dkg_url, dkg_home=cfg.dkg_home)
-    # The release graph is public. Subscription never requires or attempts a
-    # private membership handshake.
     try:
-        client.subscribe_context_graph(cfg.context_graph_id)
+        catchup = client.catchup_status(cfg.context_graph_id)
+    except Exception:
+        catchup = {}
+    catchup_state = str(catchup.get("status") or "").lower()
+    catchup_job_id = str(
+        catchup.get("jobId") or catchup.get("job_id") or catchup.get("id") or ""
+    )
+    with _join_lock:
+        if catchup_job_id:
+            _subscription_attempts.add(cfg.context_graph_id)
+        subscribe = (
+            not catchup_job_id
+            and cfg.context_graph_id not in _subscription_attempts
+        )
+        if subscribe:
+            # Claim the attempt before network I/O. The dashboard refresh loop
+            # must never turn a slow/failed subscribe into a retry storm.
+            _subscription_attempts.add(cfg.context_graph_id)
+    if subscribe:
+        try:
+            subscription = client.subscribe_context_graph(cfg.context_graph_id) or {}
+            nested = subscription.get("catchup")
+            if isinstance(nested, dict):
+                catchup = nested
+                catchup_state = str(catchup.get("status") or "").lower()
+            with _join_lock:
+                _connection_states[cfg.context_graph_id] = {
+                    "state": "syncing",
+                    "updated_at": time.time(),
+                }
+        except Exception as exc:
+            with _join_lock:
+                _connection_states[cfg.context_graph_id] = {
+                    "state": "connection-error",
+                    "updated_at": time.time(),
+                    "error": str(exc),
+                }
+    elif catchup_state in {"queued", "running"}:
         with _join_lock:
             _connection_states[cfg.context_graph_id] = {
                 "state": "syncing",
                 "updated_at": time.time(),
             }
-    except Exception as exc:
-        with _join_lock:
-            _connection_states[cfg.context_graph_id] = {
-                "state": "connection-error",
-                "updated_at": time.time(),
-                "error": str(exc),
-            }
+    if catchup_state in {"queued", "running"}:
+        # A catch-up applies complete durable snapshots atomically. Querying
+        # the VM while Blazegraph is ingesting millions of triples only adds
+        # store contention and cannot reveal useful partial rules. Serve the
+        # last-good cache until DKG reports a terminal state.
+        peek = getattr(ruleset_mod, "peek", None)
+        rs = peek(cfg) if callable(peek) else ruleset_mod.refresh(cfg, client)
+        return _ruleset_sync_counts(rs)
     rs = ruleset_mod.refresh(cfg, client)
     counts = _ruleset_sync_counts(rs)
     if counts["public"]:
@@ -228,173 +233,6 @@ def _sync_ruleset_once(load_config: Any, dkg_client_cls: Any, ruleset_mod: Any) 
                 "state": "subscribed",
                 "updated_at": time.time(),
             }
-    return counts
-
-    # Legacy private-graph recovery code below is intentionally unreachable;
-    # retained temporarily to minimize the compatibility diff while the DKG
-    # client API is shared with other products.
-    peer_id = str(getattr(cfg, "graph_peer_id", "") or "")
-    if peer_id:
-        try:
-            identity = client.agent_identity()
-            agent_address = str(identity.get("agentAddress") or "")
-            confirmed = client.context_graph_has_agent(cfg.context_graph_id, agent_address)
-        except Exception:
-            agent_address = ""
-            confirmed = False
-        if not confirmed:
-            now = time.monotonic()
-            with _join_lock:
-                previous = _join_attempts.get(cfg.context_graph_id)
-                request_join = previous is None or now - previous >= _JOIN_RETRY_SEC
-                if request_join:
-                    _join_attempts[cfg.context_graph_id] = now
-            if request_join:
-                try:
-                    client.request_join(cfg.context_graph_id, peer_id)
-                except Exception as exc:
-                    logger.debug("blackbox: private join retry failed: %s", exc)
-            with _join_lock:
-                _connection_states[cfg.context_graph_id] = _connection_state_payload(
-                    cfg,
-                    "joining",
-                    agent_address=agent_address,
-                )
-            return {"total": 0, "public": 0, "community": 0}
-    subscription: Dict[str, Any] = {}
-    try:
-        subscription = client.subscribe_context_graph(cfg.context_graph_id) or {}
-        with _join_lock:
-            _connection_states[cfg.context_graph_id] = {
-                "state": "syncing",
-                "updated_at": time.time(),
-            }
-    except Exception as subscribe_error:
-        now = time.monotonic()
-        with _join_lock:
-            previous = _join_attempts.get(cfg.context_graph_id)
-            request_join = bool(
-                peer_id and (previous is None or now - previous >= _JOIN_RETRY_SEC)
-            )
-            if request_join:
-                _join_attempts[cfg.context_graph_id] = now
-        if request_join:
-            try:
-                result = client.request_join(cfg.context_graph_id, peer_id)
-                already_member = bool(
-                    isinstance(result, dict)
-                    and (result.get("alreadyMember") or result.get("already_member"))
-                )
-                state = "joining" if already_member else "pending-approval"
-            except Exception:
-                state = "connection-error"
-            with _join_lock:
-                _connection_states[cfg.context_graph_id] = _connection_state_payload(
-                    cfg,
-                    state,
-                    error=str(subscribe_error),
-                )
-    rs = ruleset_mod.refresh(cfg, client)
-    counts = _ruleset_sync_counts(rs)
-    catchup_state = str((subscription.get("catchup") or {}).get("status") or "").lower()
-    try:
-        catchup = client.catchup_status(cfg.context_graph_id)
-        catchup_state = str(catchup.get("status") or catchup_state).lower()
-    except Exception:
-        pass
-    with _join_lock:
-        current_state = dict(_connection_states.get(cfg.context_graph_id) or {})
-    current_name = str(current_state.get("state") or "")
-    settled = counts["public"] > 0
-    syncing = catchup_state in {"queued", "running", "done", ""}
-    if settled:
-        with _join_lock:
-            _connection_states[cfg.context_graph_id] = {
-                "state": "subscribed",
-                "updated_at": time.time(),
-            }
-    elif syncing and current_name not in {
-        "pending-encryption-profile",
-        "connection-error",
-        "sync-envelope-error",
-    }:
-        # Once subscribe/catch-up is active, a stale pre-approval marker is
-        # actively misleading. The curator may have already refreshed the peer
-        # binding even though the earlier join attempt left us in a pending
-        # state with zero rows still loading.
-        with _join_lock:
-            _connection_states[cfg.context_graph_id] = {
-                "state": "syncing",
-                "updated_at": time.time(),
-            }
-    if catchup_state == "failed" and peer_id:
-        # The common fresh-machine failure is a stale allowlist entry: the
-        # wallet is listed, but its signed delegation was never delivered, so
-        # DKG correctly rejects sync from the new peer key.  Re-run the native
-        # join handshake before restarting catch-up.
-        now = time.monotonic()
-        with _join_lock:
-            previous = _join_attempts.get(cfg.context_graph_id)
-            request_join = previous is None or now - previous >= _JOIN_RETRY_SEC
-            if request_join:
-                _join_attempts[cfg.context_graph_id] = now
-        if request_join:
-            try:
-                result = client.request_join(cfg.context_graph_id, peer_id)
-                curator_confirmed = bool(
-                    isinstance(result, dict)
-                    and (
-                        result.get("alreadyMember")
-                        or result.get("already_member")
-                    )
-                )
-                if curator_confirmed:
-                    client.restart_context_graph_catchup(cfg.context_graph_id)
-                    with _join_lock:
-                        _connection_states[cfg.context_graph_id] = {
-                            "state": "syncing",
-                            "updated_at": time.time(),
-                        }
-                    return counts
-                delivered = bool(
-                    isinstance(result, dict)
-                    and (result.get("delivered") or result.get("deliveredCount"))
-                )
-                with _join_lock:
-                    _connection_states[cfg.context_graph_id] = _connection_state_payload(
-                        cfg,
-                        "pending-approval" if delivered else "connection-error",
-                        error=(
-                            "curator approval pending"
-                            if delivered
-                            else "signed join request did not reach the curator"
-                        ),
-                    )
-            except Exception as exc:
-                with _join_lock:
-                    _connection_states[cfg.context_graph_id] = _connection_state_payload(
-                        cfg,
-                        "connection-error",
-                        error=str(exc),
-                    )
-                logger.debug("blackbox: failed catch-up join repair failed: %s", exc)
-    if counts["public"] == 0 and catchup_state == "done":
-        now = time.monotonic()
-        with _join_lock:
-            previous = _catchup_restarts.get(cfg.context_graph_id)
-            restart = previous is None or now - previous >= _CATCHUP_RESTART_SEC
-            if restart:
-                _catchup_restarts[cfg.context_graph_id] = now
-        if restart:
-            try:
-                client.restart_context_graph_catchup(cfg.context_graph_id)
-                with _join_lock:
-                    _connection_states[cfg.context_graph_id] = {
-                        "state": "syncing",
-                        "updated_at": time.time(),
-                    }
-            except Exception as exc:
-                logger.debug("blackbox: catch-up restart failed: %s", exc)
     return counts
 
 
@@ -411,6 +249,14 @@ def _graph_sync_state(
         return "ready"
     if node_reachable and str(catchup_status or "").lower() in {"queued", "running"}:
         return "syncing"
+    if str(catchup_status or "").lower() in {
+        "failed",
+        "cancelled",
+        "denied",
+        "unreachable",
+        "deferred",
+    }:
+        return "incomplete"
     if int(count or 0) > 0:
         return "ready"
     if not node_reachable:
@@ -1184,7 +1030,7 @@ def create_app(*, manage_guardian: bool = False):
     @app.get("/api/graph-status")
     def graph_status() -> Any:
         cfg = load_blackbox_config()
-        rs = ruleset.get(cfg)
+        rs = ruleset.peek(cfg)
         counts = rs.counts()
         # Community + sightings come from the synced ruleset cache, NOT the
         # shared-working-memory view, which does O(slice) trust work and times
@@ -1274,6 +1120,7 @@ def create_app(*, manage_guardian: bool = False):
                 "syncing": "syncing",
                 "unreachable": "offline",
                 "empty": "empty",
+                "incomplete": "incomplete",
                 "pending-approval": "curator approval pending",
                 "pending-encryption-profile": "waiting for workspace encryption profile",
                 "joining": "joining private graph",
@@ -1681,7 +1528,7 @@ def create_app(*, manage_guardian: bool = False):
         # The ruleset merges complete public VM threats with community SWM rows
         # and retains a compatibility join for any legacy CurationProof assets.
         if tier in {"public", "community"}:
-            rs = ruleset.get(cfg)
+            rs = ruleset.peek(cfg)
             all_threats = [
                 {
                     "identifier": item.get("identifier"),
@@ -1830,7 +1677,7 @@ def create_app(*, manage_guardian: bool = False):
         }
         cached_rule: Dict[str, Any] = {}
         try:
-            for _cat, rule in ruleset.get(cfg).iter_rules():
+            for _cat, rule in ruleset.peek(cfg).iter_rules():
                 if rule.get("source") == tier and rule.get("identifier") == identifier:
                     cached_rule = rule
                     break
@@ -1840,7 +1687,7 @@ def create_app(*, manage_guardian: bool = False):
             try:
                 cached_rule = next(
                     item
-                    for item in _graph_entries(ruleset.get(cfg), tier)
+                    for item in _graph_entries(ruleset.peek(cfg), tier)
                     if item.get("identifier") == identifier
                 )
             except Exception:

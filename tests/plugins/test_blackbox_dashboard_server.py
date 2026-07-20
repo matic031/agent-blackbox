@@ -218,6 +218,10 @@ def test_graph_sync_state_treats_authoritatively_settled_zero_as_ready():
     assert server._graph_sync_state(0, True, "running", settled=True) == "ready"
 
 
+def test_graph_sync_state_does_not_label_partial_failed_vm_as_ready():
+    assert server._graph_sync_state(3_000, True, "failed") == "incomplete"
+
+
 def test_daemon_connection_hint_prefers_encryption_profile_blocker(tmp_path):
     cg_id = "0x37b1Fdfd134e2b17583bCBdD3034F91504cD9C70/agent-blackbox"
     daemon_log = tmp_path / "daemon.log"
