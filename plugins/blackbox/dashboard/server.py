@@ -1529,6 +1529,7 @@ def create_app(*, manage_guardian: bool = False):
         tier: str = Query("public"),
         limit: int = Query(1000, ge=1, le=10000),
         offset: int = Query(0, ge=0),
+        q: str = Query("", max_length=200),
     ) -> Any:
         """Threats from one graph tier: ``public`` | ``community`` | ``local``."""
         tier, view = _tier_view(tier)
@@ -1565,6 +1566,15 @@ def create_app(*, manage_guardian: bool = False):
                 }
                 for item in _graph_entries(rs, tier)
             ]
+            needle = str(q or "").strip().casefold()
+            if needle:
+                all_threats = [
+                    item for item in all_threats
+                    if needle in " ".join(
+                        str(item.get(key) or "")
+                        for key in ("identifier", "name", "category", "severity")
+                    ).casefold()
+                ]
             return {
                 "tier": tier,
                 "threats": all_threats[offset:offset + limit],

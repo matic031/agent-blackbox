@@ -52,7 +52,7 @@ def test_dashboard_public_graph_uses_vm_verified_ruleset_rows(monkeypatch):
 
     fake_ruleset = FakeRuleset()
     monkeypatch.setattr(config, "load_blackbox_config", lambda: cfg)
-    monkeypatch.setattr(ruleset, "get", lambda _cfg=None: fake_ruleset)
+    monkeypatch.setattr(ruleset, "peek", lambda _cfg=None: fake_ruleset)
     monkeypatch.setattr(audit, "count_findings", lambda: 0)
     monkeypatch.setattr(dkg_client.DkgClient, "reachable", lambda self, timeout=None: False)
     monkeypatch.setattr(
@@ -117,7 +117,7 @@ def test_dashboard_keeps_partial_vm_count_loading_during_curator_transfer(monkey
         "inserted_triples": 160_000,
     }
     monkeypatch.setattr(config, "load_blackbox_config", lambda: cfg)
-    monkeypatch.setattr(ruleset, "get", lambda _cfg=None: PartialRuleset())
+    monkeypatch.setattr(ruleset, "peek", lambda _cfg=None: PartialRuleset())
     monkeypatch.setattr(audit, "count_findings", lambda: 0)
     monkeypatch.setattr(sync_state, "read", lambda: state)
     monkeypatch.setattr(dkg_client.DkgClient, "reachable", lambda self, timeout=None: True)
@@ -169,13 +169,71 @@ def test_dashboard_lists_one_thousand_vm_threats_not_one_collection(monkeypatch)
                 }
 
     monkeypatch.setattr(config, "load_blackbox_config", lambda: cfg)
-    monkeypatch.setattr(ruleset, "get", lambda _cfg=None: ThousandThreats())
+    monkeypatch.setattr(ruleset, "peek", lambda _cfg=None: ThousandThreats())
 
     result = TestClient(server.create_app()).get("/api/graph?tier=public&limit=1000").json()
 
     assert result["total"] == 1000
     assert len(result["threats"]) == 1000
     assert len({row["identifier"] for row in result["threats"]}) == 1000
+
+
+def test_dashboard_graph_search_filters_the_full_verified_cache(monkeypatch):
+    from plugins.blackbox import config, ruleset
+
+    cfg = SimpleNamespace(
+        mode="audit",
+        context_graph_id="0x37b1/agent-blackbox",
+        dkg_url="http://127.0.0.1:9320",
+        dkg_home="/tmp/blackbox-dkg",
+        dkg_bin="/tmp/dkg",
+        sync_interval=60,
+    )
+
+    class SearchableThreats:
+        synced_at = 123.0
+
+        def iter_rules(self):
+            yield "dependency", {
+                "identifier": "dep:npm:quiet-package@1.0.0",
+                "severity": "low",
+                "name": "Quiet package",
+                "source": "public",
+            }
+            yield "dependency", {
+                "identifier": "dep:pypi:needle-package@2.0.0",
+                "severity": "critical",
+                "name": "Needle package",
+                "source": "public",
+            }
+
+    monkeypatch.setattr(config, "load_blackbox_config", lambda: cfg)
+    monkeypatch.setattr(ruleset, "peek", lambda _cfg=None: SearchableThreats())
+
+    result = TestClient(server.create_app()).get(
+        "/api/graph?tier=public&limit=100&q=needle"
+    ).json()
+
+    assert result["total"] == 1
+    assert result["threats"][0]["identifier"] == "dep:pypi:needle-package@2.0.0"
+
+
+def test_dashboard_graph_pages_are_user_driven_and_keep_scene_state():
+    html = (
+        Path(__file__).resolve().parents[1]
+        / "plugins"
+        / "blackbox"
+        / "dashboard"
+        / "static"
+        / "index.html"
+    ).read_text(encoding="utf-8")
+
+    assert 'id="graph-search"' in html
+    assert 'id="graph-load-more"' in html
+    assert "if (graphCache[tier]) return Promise.resolve(false);" in html
+    assert "return next(nowLoaded);" not in html
+    assert "priorPositions[node.id]" in html
+    assert "graphCanvasSize.width === w && graphCanvasSize.height === h" in html
 
 
 @pytest.mark.skip(reason="dashboard never joins private graphs")

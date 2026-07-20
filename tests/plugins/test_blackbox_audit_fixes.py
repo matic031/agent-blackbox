@@ -148,6 +148,51 @@ def test_empty_refresh_keeps_last_verified_rules(monkeypatch):
     assert writes == [prior]
 
 
+def test_empty_refresh_prefers_newer_nonempty_disk_cache(monkeypatch):
+    disk = Ruleset(
+        dependency={
+            "npm:disk-good@1.0": {
+                "identifier": "dep:npm:disk-good@1.0",
+                "source": "public",
+            }
+        },
+        synced_at=900.0,
+    )
+    monkeypatch.setattr(ruleset_mod, "_memory_cache", Ruleset(synced_at=950.0))
+    monkeypatch.setattr(ruleset_mod, "_read_cache", lambda: disk)
+    monkeypatch.setattr(ruleset_mod, "_write_cache", lambda _rs: None)
+    monkeypatch.setattr(ruleset_mod, "_cache_file_stamp", lambda: 2)
+    monkeypatch.setattr(ruleset_mod.time, "time", lambda: 1000.0)
+
+    class _Empty:
+        def query(self, sparql, cg_id, view=None, on_error=None):
+            return []
+
+    rs = ruleset_mod.refresh(config_mod.BlackboxConfig(), _Empty())
+
+    assert rs is disk
+    assert len(rs.dependency) == 1
+
+
+def test_peek_reloads_cache_replaced_by_another_process(monkeypatch):
+    disk = Ruleset(
+        dependency={
+            "npm:new@1.0": {
+                "identifier": "dep:npm:new@1.0",
+                "source": "public",
+            }
+        },
+        synced_at=200.0,
+    )
+    monkeypatch.setattr(ruleset_mod, "_memory_cache", Ruleset(synced_at=100.0))
+    monkeypatch.setattr(ruleset_mod, "_memory_cache_stamp", 1)
+    monkeypatch.setattr(ruleset_mod, "_cache_file_stamp", lambda: 2)
+    monkeypatch.setattr(ruleset_mod, "_read_cache", lambda: disk)
+
+    assert ruleset_mod.peek() is disk
+    assert ruleset_mod._memory_cache_stamp == 2
+
+
 def test_missing_community_does_not_restart_dkg_sync(monkeypatch):
     monkeypatch.setattr(ruleset_mod, "_write_cache", lambda rs: None)
     monkeypatch.setattr(ruleset_mod, "_memory_cache", None)

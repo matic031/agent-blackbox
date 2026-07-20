@@ -1054,6 +1054,48 @@
     max-width: calc(100% - 28px);
   }
   .graph-controls > * { pointer-events: auto; }
+  .graph-search {
+    display: inline-flex;
+    align-items: center;
+    min-height: 28px;
+    width: min(220px, 36vw);
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    background: var(--graph-control-soft);
+    box-shadow: 0 6px 18px rgba(0,0,0,0.18);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+  }
+  .graph-search svg { width: 13px; height: 13px; margin-left: 8px; color: var(--muted); flex: 0 0 auto; }
+  .graph-search input {
+    width: 100%;
+    min-width: 0;
+    border: 0;
+    outline: 0;
+    padding: 5px 8px 5px 6px;
+    color: var(--text);
+    background: transparent;
+    font: inherit;
+    font-size: 10.5px;
+  }
+  .graph-search input::placeholder { color: var(--muted); opacity: .82; }
+  .graph-load-more {
+    appearance: none;
+    min-height: 28px;
+    padding: 4px 9px;
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    color: var(--text);
+    background: var(--graph-control-soft);
+    font: inherit;
+    font-size: 10.5px;
+    font-weight: 700;
+    cursor: pointer;
+    box-shadow: 0 6px 18px rgba(0,0,0,0.18);
+  }
+  .graph-load-more:hover { border-color: var(--border-strong); background: var(--elevated); }
+  .graph-load-more:disabled { cursor: wait; opacity: .62; }
+  .graph-load-more[hidden] { display: none; }
   .graph-detail {
     display: inline-flex;
     align-items: center;
@@ -1708,6 +1750,8 @@
     .section { margin-top: 26px; }
     .section-head { align-items: flex-start; }
     .graph-stage { height: 390px; }
+    .graph-search { width: auto; flex: 1 1 180px; min-height: 40px; }
+    .graph-load-more { min-height: 40px; }
     .graph-count { flex: 1 1 100%; justify-content: center; }
     thead th, tbody td { padding-left: 12px; padding-right: 12px; }
     .stats { grid-template-columns: 1fr; }
@@ -2822,6 +2866,11 @@
           <div class="graph-stage" id="graph-stage">
             <div class="graph-canvas" id="graph-canvas"></div>
             <div class="graph-controls" id="graph-controls" style="display:none;">
+              <label class="graph-search" id="graph-search-wrap">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"></circle><path d="m20 20-3.5-3.5"></path></svg>
+                <input type="search" id="graph-search" autocomplete="off" spellcheck="false" placeholder="Find any threat" aria-label="Find a threat in the graph">
+              </label>
+              <button type="button" class="graph-load-more" id="graph-load-more" hidden>Load more</button>
               <span class="graph-count" id="graph-count"></span>
               <div class="graph-detail" role="group" aria-label="Graph mode">
                 <button type="button" id="graph-detail-compact" data-detail="compact">Compact</button>
@@ -3041,17 +3090,24 @@
   "use strict";
 
   var POLL_MS = 4000;
-  var GRAPH_PAGE_SIZE = 10000;
+  var GRAPH_PAGE_SIZE = 5000;
+  var GRAPH_SEARCH_LIMIT = 500;
   var connOk = true;
   var TIERS = ["public", "community", "local"];
   var activeTier = "public";
   var graphCache = { public: null, community: null, local: null };
   var graphLoadInFlight = { public: false, community: false };
+  var graphRevision = { public: 0, community: 0 };
+  var graphSearchQuery = { public: "", community: "" };
+  var graphSearchCache = { public: null, community: null };
+  var graphSearchRevision = { public: 0, community: 0 };
+  var graphSearchInFlight = { public: false, community: false };
+  var graphSearchTimer = null;
   var GRAPH_DETAIL_PRESETS = {
-    compact: { cap: 20, focusCap: 80 },
-    explore: { cap: 70, focusCap: 420 }
+    compact: { cap: 48, focusCap: 160 },
+    explore: { cap: 180, focusCap: 1000 }
   };
-  var GRAPH_MAX_VISIBLE_LEAVES = 3600;
+  var GRAPH_MAX_VISIBLE_LEAVES = 4000;
   var graphDetailMode = { public: "compact", community: "compact" };
   var graphLeafLimit = {
     public: GRAPH_DETAIL_PRESETS.compact.cap,
@@ -3314,53 +3370,87 @@
       graphCache[tier].total = page.total;
       graphCache[tier].partial = current.length < (Number(page.total) || current.length);
     }
+    graphRevision[tier] += 1;
   }
 
-  function graphPageUrl(tier, offset) {
+  function graphPageUrl(tier, offset, query, limit) {
     return "/api/graph?tier=" + encodeURIComponent(tier) +
-      "&limit=" + GRAPH_PAGE_SIZE + "&offset=" + (offset || 0);
+      "&limit=" + (limit || GRAPH_PAGE_SIZE) + "&offset=" + (offset || 0) +
+      (query ? "&q=" + encodeURIComponent(query) : "");
   }
 
   function graphLoaded(tier) {
     return graphCache[tier] ? asList(graphCache[tier]).length : 0;
   }
 
-  function graphNeedsLoad(tier) {
-    if (graphLoadInFlight[tier]) return false;
+  function graphHasMore(tier) {
     var data = graphCache[tier];
     if (!data) return true;
     var loaded = graphLoaded(tier);
     var total = graphTotalForTier(tier);
-    if (total != null && total < loaded) return true;
-    if (total != null && loaded < total) return true;
+    if (total != null && total !== loaded) return true;
     return !!data.partial;
   }
 
-  function loadGraphTier(tier) {
-    if (!graphNeedsLoad(tier)) return Promise.resolve(false);
+  function loadGraphPage(tier) {
+    if (graphLoadInFlight[tier] || !graphHasMore(tier)) return Promise.resolve(false);
     graphLoadInFlight[tier] = true;
     var target = graphTotalForTier(tier);
     var loaded = graphLoaded(tier);
     var offset = target != null && target >= loaded ? loaded : 0;
-    function next(pageOffset) {
-      return getJSON(graphPageUrl(tier, pageOffset)).then(function (page) {
-        mergeGraphPage(tier, page);
-        // Paint every completed page. Large graphs now visibly fill instead of
-        // waiting for the entire multi-page download before the first redraw.
-        if (tier === activeTier) renderGraphTab();
-        var nowLoaded = graphLoaded(tier);
-        var total = Number((graphCache[tier] && graphCache[tier].total) || nowLoaded);
-        if (nowLoaded < total || (graphCache[tier] && graphCache[tier].partial)) {
-          return next(nowLoaded);
-        }
-        return true;
-      });
-    }
-    return next(offset).then(function (changed) {
+    return getJSON(graphPageUrl(tier, offset)).then(function (page) {
+      mergeGraphPage(tier, page);
       graphLoadInFlight[tier] = false;
-      return changed;
+      if (tier === activeTier) renderGraphTab();
+      return true;
     }, function (err) {
       graphLoadInFlight[tier] = false;
+      throw err;
+    });
+  }
+
+  // Polling seeds one page only. Additional pages are an explicit exploration
+  // action, so a 169k-entry cache never downloads or replays layout animations
+  // merely because the dashboard is open.
+  function loadGraphTier(tier) {
+    if (graphCache[tier]) return Promise.resolve(false);
+    return loadGraphPage(tier);
+  }
+
+  function graphViewData(tier) {
+    return graphSearchQuery[tier] && graphSearchCache[tier]
+      ? graphSearchCache[tier]
+      : graphCache[tier];
+  }
+
+  function graphViewList(tier) {
+    return asList(graphViewData(tier));
+  }
+
+  function searchGraphTier(tier, query) {
+    query = String(query || "").trim();
+    graphSearchQuery[tier] = query;
+    if (!query) {
+      graphSearchCache[tier] = null;
+      graphSearchRevision[tier] += 1;
+      invalidateGraphTier(tier);
+      renderGraphTab();
+      return Promise.resolve(false);
+    }
+    graphSearchInFlight[tier] = true;
+    graphSearchCache[tier] = null;
+    if (tier === activeTier) updateGraphControls(false, graphRenderMeta[tier]);
+    var requested = query;
+    return getJSON(graphPageUrl(tier, 0, query, GRAPH_SEARCH_LIMIT)).then(function (page) {
+      if (graphSearchQuery[tier] !== requested) return false;
+      graphSearchCache[tier] = page;
+      graphSearchRevision[tier] += 1;
+      graphSearchInFlight[tier] = false;
+      invalidateGraphTier(tier);
+      if (tier === activeTier) renderGraphTab();
+      return true;
+    }, function (err) {
+      if (graphSearchQuery[tier] === requested) graphSearchInFlight[tier] = false;
       throw err;
     });
   }
@@ -3782,7 +3872,7 @@
 	      return (String(t.identifier || "").split(":")[1] || "other").toLowerCase() === focus.eco;
 	    }
 	    function graphTopCategoryFocus(tier, list) {
-	      list = list || asList(graphCache[tier]);
+	      list = list || graphViewList(tier);
 	      var counts = {};
 	      list.forEach(function (t) {
 	        var ck = catKey(t.category);
@@ -3796,7 +3886,7 @@
 	    }
 	    function ensureExploreFocus(tier, list) {
 	      if (tier === "local" || graphDetailMode[tier] !== "explore") return;
-	      list = list || asList(graphCache[tier]);
+	      list = list || graphViewList(tier);
 	      if (graphFocus[tier] && list.some(function (t) { return graphMatchesFocus(t, graphFocus[tier]); })) return;
 	      var focus = graphTopCategoryFocus(tier, list);
 	      if (!focus) return;
@@ -4103,6 +4193,7 @@
   var didInitialZoom = false;
   var graphNodesShown = [];
   var graphLastNodeClickAt = 0;
+  var graphCanvasSize = { width: 0, height: 0 };
 
   // Umanitek flag mark from assets/umanitek-icon.svg. Kept as vectors so it
   // remains crisp at every graph zoom level.
@@ -4537,7 +4628,7 @@
 	  }
 
 	  function graphThreatsForFocus(tier, focus) {
-	    return asList(graphCache[tier]).filter(function (t) { return graphMatchesFocus(t, focus); });
+	    return graphViewList(tier).filter(function (t) { return graphMatchesFocus(t, focus); });
 	  }
 
 	  function graphTopSeverity(items) {
@@ -4834,12 +4925,11 @@
       return graphFocusKey(a) === graphFocusKey(b);
     }
     function graphActiveThreatsFor(focus) {
-      var list = asList(graphCache[activeTier]);
+      var list = graphViewList(activeTier);
       return focus ? list.filter(function (t) { return graphMatchesFocus(t, focus); }) : list;
     }
     function invalidateGraphTier(tier) {
       fgSig[tier] = null;
-      didInitialZoom = false;
     }
     function loadMoreGraph(focusTarget) {
       if (activeTier === "local") return;
@@ -4856,6 +4946,9 @@
       graphLeafLimit[activeTier] = Math.max(current + 1, next);
       invalidateGraphTier(activeTier);
       renderGraphTab();
+      if (!graphSearchQuery[activeTier] && graphHasMore(activeTier)) {
+        loadGraphPage(activeTier).catch(function () {});
+      }
     }
     function setGraphDetailMode(mode) {
       if (!GRAPH_DETAIL_PRESETS[mode] || activeTier === "local") return;
@@ -4884,11 +4977,39 @@
       var count = $("graph-count");
       if (count) {
         var syncing = isTierPending(activeTier);
-        count.style.display = (syncing || meta.focusLabel) ? "" : "none";
-        count.innerHTML = syncing
-          ? LOADER_HTML + '<strong>' + esc(tierProgress(activeTier).label || "Syncing") +
-            (catchupElapsed() == null ? '' : ' · ' + fmtElapsedSeconds(catchupElapsed()) + ' elapsed') + '</strong>'
-          : (meta.focusLabel ? '<strong>' + esc(meta.focusLabel) + '</strong>' : "");
+        var query = graphSearchQuery[activeTier];
+        var loaded = graphLoaded(activeTier);
+        var total = graphTotalForTier(activeTier);
+        var view = graphViewData(activeTier);
+        var viewTotal = Number((view && view.total) || graphViewList(activeTier).length);
+        count.style.display = "";
+        if (graphSearchInFlight[activeTier]) {
+          count.innerHTML = LOADER_HTML + '<strong>Searching</strong>';
+        } else if (query) {
+          count.innerHTML = '<strong>' + num(meta.shownLeaves) + ' visible</strong> · ' +
+            num(viewTotal) + ' match' + (viewTotal === 1 ? '' : 'es');
+        } else if (syncing) {
+          count.innerHTML = LOADER_HTML + '<strong>' + esc(tierProgress(activeTier).label || "Syncing") +
+            (catchupElapsed() == null ? '' : ' · ' + fmtElapsedSeconds(catchupElapsed()) + ' elapsed') + '</strong>' +
+            (loaded ? ' · ' + num(loaded) + ' cached' : '');
+        } else {
+          count.innerHTML = '<strong>' + num(meta.shownLeaves) + ' visible</strong> · ' +
+            num(loaded) + ' loaded' + (total != null ? ' of ' + num(total) : '') +
+            (meta.focusLabel ? ' · ' + esc(meta.focusLabel) : '');
+        }
+      }
+      var loadButton = $("graph-load-more");
+      if (loadButton) {
+        var canLoad = !graphSearchQuery[activeTier] && graphHasMore(activeTier);
+        loadButton.hidden = !canLoad;
+        loadButton.disabled = !!graphLoadInFlight[activeTier];
+        loadButton.textContent = graphLoadInFlight[activeTier]
+          ? "Loading…"
+          : "Load " + num(Math.min(GRAPH_PAGE_SIZE, Math.max(0, graphTotalForTier(activeTier) - graphLoaded(activeTier)))) + " more";
+      }
+      var searchInput = $("graph-search");
+      if (searchInput && document.activeElement !== searchInput) {
+        searchInput.value = graphSearchQuery[activeTier] || "";
       }
     }
 
@@ -5122,7 +5243,7 @@
 
     // Every tier — including local — renders through the one force-graph stage.
     var isLocal = activeTier === "local";
-    var data = isLocal ? localCache : graphCache[activeTier];
+    var data = isLocal ? localCache : graphViewData(activeTier);
 
     // still loading this tier
     if (data == null) {
@@ -5165,15 +5286,35 @@
       var graphList = isLocal ? null : asList(data);
       if (!isLocal) ensureExploreFocus(activeTier, graphList);
       var sig = isLocal ? localSig(data)
-        : graphSig(graphList) + "|" + (graphDetailMode[activeTier] || "compact") +
+        : (graphSearchQuery[activeTier] && graphSearchCache[activeTier]
+            ? graphSearchRevision[activeTier]
+            : graphRevision[activeTier]) +
+          "|" + (graphDetailMode[activeTier] || "compact") +
           "|" + graphCap(activeTier) + "|" + graphFocusKey(graphFocus[activeTier]);
       // Re-feed only on data change or a tier switch that isn't mounted yet, so
       // the poll doesn't reset the user's pan/zoom.
       if (fgTierShown !== activeTier || fgSig[activeTier] !== sig) {
+        var enteringTier = fgTierShown !== activeTier;
+        var priorPositions = {};
+        graphNodesShown.forEach(function (node) {
+          if (!node || node.id == null || typeof node.x !== "number") return;
+          priorPositions[node.id] = {
+            x: node.x, y: node.y, vx: node.vx, vy: node.vy,
+            fx: node.fx, fy: node.fy
+          };
+        });
         fgSig[activeTier] = sig;
 	        fgTierShown = activeTier;
-	        didInitialZoom = false;
+	        if (enteringTier) didInitialZoom = false;
 	        var graphData = isLocal ? buildLocalGraphData(data) : buildGraphData(activeTier, graphList);
+	        (graphData.nodes || []).forEach(function (node) {
+	          var prior = priorPositions[node.id];
+	          if (!prior) return;
+	          node.x = prior.x; node.y = prior.y;
+	          node.vx = prior.vx; node.vy = prior.vy;
+	          if (prior.fx != null) node.fx = prior.fx;
+	          if (prior.fy != null) node.fy = prior.fy;
+	        });
 	        graphNodesShown = graphData.nodes || [];
 	        g.graphData(graphData);
         tuneForces(g, isLocal, graphData.nodes.length);
@@ -5188,7 +5329,11 @@
     var el = $("graph-canvas");
     if (!el) return;
     var w = el.clientWidth, h = el.clientHeight;
-    if (w > 0 && h > 0) { fg.width(w).height(h); }
+    if (w <= 0 || h <= 0) return;
+    if (graphCanvasSize.width === w && graphCanvasSize.height === h) return;
+    graphCanvasSize.width = w;
+    graphCanvasSize.height = h;
+    fg.width(w).height(h);
   }
 
   function syncGraphFullscreenState() {
@@ -6055,6 +6200,29 @@
 	    var btn = $("graph-detail-" + mode);
 	    if (btn) btn.addEventListener("click", function () { setGraphDetailMode(mode); });
 	  });
+
+  var graphLoadMoreButton = $("graph-load-more");
+  if (graphLoadMoreButton) graphLoadMoreButton.addEventListener("click", function () {
+    if (activeTier === "local" || graphLoadInFlight[activeTier]) return;
+    graphLoadMoreButton.disabled = true;
+    graphLoadMoreButton.textContent = "Loading…";
+    loadGraphPage(activeTier).catch(function () {}).then(function () {
+      updateGraphControls(false, graphRenderMeta[activeTier]);
+    });
+  });
+
+  var graphSearchInput = $("graph-search");
+  if (graphSearchInput) graphSearchInput.addEventListener("input", function () {
+    var tier = activeTier;
+    var query = graphSearchInput.value;
+    if (graphSearchTimer) clearTimeout(graphSearchTimer);
+    graphSearchTimer = setTimeout(function () {
+      if (tier !== activeTier && graphSearchInput.value !== query) return;
+      searchGraphTier(tier, query).catch(function () {
+        updateGraphControls(false, graphRenderMeta[tier]);
+      });
+    }, 280);
+  });
 
 	  // wire findings sort control
   function setFindingsSort(mode) {

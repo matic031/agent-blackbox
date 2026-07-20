@@ -603,10 +603,36 @@ def _read_cache() -> Optional[Ruleset]:
 
 _memory_lock = threading.Lock()
 _memory_cache: Optional[Ruleset] = None
+_memory_cache_stamp: Optional[int] = None
 _refreshing = False
 
 
 _QUERY_ERROR = object()  # sentinel: distinguishes a tier failure from an empty tier
+
+
+def _cache_file_stamp() -> Optional[int]:
+    try:
+        return _cache_path().stat().st_mtime_ns
+    except OSError:
+        return None
+
+
+def _latest_cached_ruleset() -> Optional[Ruleset]:
+    """Return memory cache, reloading when another process replaced the file."""
+    global _memory_cache, _memory_cache_stamp
+    stamp = _cache_file_stamp()
+    with _memory_lock:
+        cached = _memory_cache
+        known_stamp = _memory_cache_stamp
+    if cached is not None and stamp == known_stamp:
+        return cached
+    disk = _read_cache()
+    with _memory_lock:
+        if disk is not None:
+            _memory_cache = disk
+            cached = disk
+        _memory_cache_stamp = stamp
+    return cached
 
 
 def _fetch_tier(
@@ -656,7 +682,7 @@ def refresh(config: Optional[BlackboxConfig] = None, client: Optional[DkgClient]
     query fails, the last-good public rules are preserved. On total
     failure, returns the last-good cache or an empty ruleset — never raises.
     """
-    global _memory_cache
+    global _memory_cache, _memory_cache_stamp
     config = config or load_blackbox_config()
     client = client or DkgClient(url=config.dkg_url, dkg_home=config.dkg_home)
     tiers = ((constants.VIEW_VERIFIABLE_MEMORY, "public"),)
@@ -671,22 +697,26 @@ def refresh(config: Optional[BlackboxConfig] = None, client: Optional[DkgClient]
         # Snapshot replacement is atomic from the user's perspective. A
         # transient empty query (or a concurrent refresh racing catch-up)
         # must never erase an already verified, enforceable ruleset.
-        prior = _memory_cache or _read_cache()
+        disk_prior = _read_cache()
+        candidates = [item for item in (_memory_cache, disk_prior) if item is not None]
+        prior = max(candidates, key=lambda item: item.source_count("public"), default=None)
         if prior is not None and prior.source_count("public") > 0:
             prior.synced_at = time.time()
             _write_cache(prior)
             with _memory_lock:
                 _memory_cache = prior
+                _memory_cache_stamp = _cache_file_stamp()
             return prior
 
     if all(rows is None for rows in fetched.values()):
         # Every tier failed — keep the last-good ruleset instead of emptying.
-        existing = _memory_cache or _read_cache()
+        existing = _latest_cached_ruleset()
         if existing is not None:
             existing.synced_at = time.time()
             _write_cache(existing)
             with _memory_lock:
                 _memory_cache = existing
+                _memory_cache_stamp = _cache_file_stamp()
             return existing
 
     rows: List[Any] = []
@@ -705,13 +735,14 @@ def refresh(config: Optional[BlackboxConfig] = None, client: Optional[DkgClient]
 
     errored = [tier for tier, view_rows in fetched.items() if view_rows is None]
     if errored:
-        prior = _memory_cache or _read_cache()
+        prior = _latest_cached_ruleset()
         if prior is not None:
             _restore_tiers(rs, prior, errored)
 
     _write_cache(rs)
     with _memory_lock:
         _memory_cache = rs
+        _memory_cache_stamp = _cache_file_stamp()
     return rs
 
 
@@ -781,14 +812,14 @@ def get(config: Optional[BlackboxConfig] = None) -> Ruleset:
     Never blocks on the network: a stale cache is returned immediately while a
     single background thread refreshes it for the next call.
     """
-    global _memory_cache, _refreshing
+    global _memory_cache, _memory_cache_stamp, _refreshing
     config = config or load_blackbox_config()
-    with _memory_lock:
-        cached = _memory_cache
+    cached = _latest_cached_ruleset()
     if cached is None:
         cached = _read_cache() or Ruleset()
         with _memory_lock:
             _memory_cache = cached
+            _memory_cache_stamp = _cache_file_stamp()
     age = time.time() - cached.synced_at
     refresh_after = max(1.0, float(config.sync_interval or 1))
     if cached.source_count("public") > 0:
@@ -817,16 +848,16 @@ def peek(config: Optional[BlackboxConfig] = None) -> Ruleset:
     dashboard's catch-up watcher use this read-only path so a large initial DKG
     transfer cannot accidentally fan out additional Blazegraph queries.
     """
-    global _memory_cache
+    global _memory_cache, _memory_cache_stamp
     config = config or load_blackbox_config()
     del config  # Kept for API symmetry and future profile-aware caches.
-    with _memory_lock:
-        cached = _memory_cache
+    cached = _latest_cached_ruleset()
     if cached is None:
         cached = _read_cache() or Ruleset()
         with _memory_lock:
             if _memory_cache is None:
                 _memory_cache = cached
+                _memory_cache_stamp = _cache_file_stamp()
             else:
                 cached = _memory_cache
     return cached
