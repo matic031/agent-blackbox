@@ -1,8 +1,12 @@
 #!/usr/bin/env node
 
 import { access } from 'node:fs/promises';
+import { spawn } from 'node:child_process';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
+
+const BLACKBOX_BLAZEGRAPH_JAVA_OPTS = '-Xms512m -Xmx4g';
+const MINIMUM_BLAZEGRAPH_HEAP_BYTES = 4 * 1024 * 1024 * 1024;
 
 function fail(message) {
   process.stderr.write(`Blazegraph setup failed: ${message}\n`);
@@ -80,6 +84,83 @@ const modulePaths = [
   path.join(dkgRoot, 'packages', 'cli', 'dist', 'daemon', 'blazegraph-docker.js'),
 ];
 
+function runDocker(args, opts = {}) {
+  return new Promise((resolve, reject) => {
+    const child = spawn('docker', args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (chunk) => { stdout += chunk.toString('utf-8'); });
+    child.stderr.on('data', (chunk) => { stderr += chunk.toString('utf-8'); });
+    const timer = opts.timeoutMs
+      ? setTimeout(() => child.kill('SIGKILL'), opts.timeoutMs)
+      : undefined;
+    child.once('error', (error) => {
+      if (timer) clearTimeout(timer);
+      reject(error);
+    });
+    child.once('close', (exitCode) => {
+      if (timer) clearTimeout(timer);
+      resolve({ stdout, stderr, exitCode: exitCode ?? 0 });
+    });
+  });
+}
+
+function heapBytes(javaOpts) {
+  const match = String(javaOpts || '').match(/(?:^|\s)-Xmx(\d+)([kKmMgG]?)(?:\s|$)/);
+  if (!match) return 0;
+  const units = { '': 1, k: 1024, m: 1024 ** 2, g: 1024 ** 3 };
+  return Number(match[1]) * units[match[2].toLowerCase()];
+}
+
+function javaOptsFromInspect(stdout) {
+  try {
+    const containers = JSON.parse(stdout);
+    const env = containers?.[0]?.Config?.Env;
+    if (!Array.isArray(env)) return '';
+    const entry = env.find((value) => String(value).startsWith('JAVA_OPTS='));
+    return entry ? String(entry).slice('JAVA_OPTS='.length) : '';
+  } catch {
+    return '';
+  }
+}
+
+function backupContainerName(name) {
+  return `${name}-pre-4g-${Date.now()}`;
+}
+
+function blackboxDockerRunner(log) {
+  return {
+    async run(args, opts) {
+      if (args[0] === 'run' && !args.some((arg) => String(arg).startsWith('JAVA_OPTS='))) {
+        return runDocker(
+          ['run', '-e', `JAVA_OPTS=${BLACKBOX_BLAZEGRAPH_JAVA_OPTS}`, ...args.slice(1)],
+          opts,
+        );
+      }
+
+      const result = await runDocker([...args], opts);
+      if (args[0] !== 'inspect' || result.exitCode !== 0) return result;
+
+      const javaOpts = javaOptsFromInspect(result.stdout);
+      if (heapBytes(javaOpts) >= MINIMUM_BLAZEGRAPH_HEAP_BYTES) return result;
+
+      const name = String(args[1] || 'dkg-blazegraph');
+      const backup = backupContainerName(name);
+      log(`  Existing container "${name}" uses ${javaOpts || 'the image-default heap'}; replacing it with a 4 GB instance.`);
+      const stopped = await runDocker(['stop', name], { timeoutMs: 30_000 });
+      if (stopped.exitCode !== 0) {
+        throw new Error(`Could not stop undersized Blazegraph container "${name}": ${stopped.stderr.trim()}`);
+      }
+      const renamed = await runDocker(['rename', name, backup], { timeoutMs: 10_000 });
+      if (renamed.exitCode !== 0) {
+        throw new Error(`Could not preserve undersized Blazegraph container "${name}": ${renamed.stderr.trim()}`);
+      }
+      log(`  Preserved the old local store as stopped container "${backup}".`);
+      return { stdout: '', stderr: 'container migrated to a recoverable backup', exitCode: 1 };
+    },
+  };
+}
+
 try {
   let modulePath;
   for (const candidate of modulePaths) {
@@ -98,8 +179,11 @@ try {
   const result = await provisionBlazegraphDocker({
     namespace,
     port,
-    pollTimeoutMs: 120_000,
+    // The first Jetty/WAR boot can take over two minutes on Docker Desktop.
+    // Keep the installer alive while the container is making forward progress.
+    pollTimeoutMs: 300_000,
     log: (message) => process.stderr.write(`${message}\n`),
+    docker: blackboxDockerRunner((message) => process.stderr.write(`${message}\n`)),
   });
   process.stdout.write(`${JSON.stringify(result)}\n`);
 } catch (error) {

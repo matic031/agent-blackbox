@@ -301,6 +301,75 @@ def test_blackbox_sync_recovers_curator_snapshot_then_waits_for_vm(monkeypatch, 
     assert "23,001 public VM" in out
 
 
+def test_blackbox_sync_uses_authoritative_publisher_for_empty_local_store(
+    monkeypatch, capsys
+):
+    events = []
+    public_counts = iter([0, 25_000, 25_000])
+
+    class FakeClient:
+        def __init__(self, url, **_kwargs):
+            self.url = url
+
+        def catchup_status(self, cg_id):
+            events.append(("status", cg_id))
+            return {"jobId": "fresh", "status": "unreachable"}
+
+        def subscribe_context_graph(self, cg_id):
+            events.append(("subscribe", cg_id))
+            return {"catchup": {"jobId": "fresh", "status": "queued"}}
+
+        def catchup_from_peer(self, cg_id, peer_id, *, budget_ms):
+            events.append(("curator", cg_id, peer_id, budget_ms))
+            return {"completed": True, "replacedRoots": 25_000}
+
+    class FakeRuleset:
+        def __init__(self, public):
+            self.public = public
+
+        def counts(self):
+            return {
+                "injection": 0,
+                "escalation": 0,
+                "dependency": self.public,
+                "fileaccess": 0,
+                "skill": 0,
+            }
+
+        def graph_count(self, source):
+            return self.public if source == "public" else 0
+
+        def graph_entries(self, source):
+            if source == "public":
+                return [{"identifier": f"dep:{index}"} for index in range(self.public)]
+            return []
+
+    monkeypatch.setattr(cli_mod, "DkgClient", FakeClient)
+    monkeypatch.setattr(
+        cli_mod,
+        "load_blackbox_config",
+        lambda: config_mod.BlackboxConfig(
+            context_graph_id=constants.DEFAULT_CONTEXT_GRAPH_ID,
+            dkg_url=constants.DEFAULT_DKG_URL,
+            graph_peer_id=constants.DEFAULT_GRAPH_PEER_ID,
+        ),
+    )
+
+    def refresh(_cfg, _client):
+        try:
+            public = next(public_counts)
+        except StopIteration:
+            public = 25_000
+        return FakeRuleset(public)
+
+    monkeypatch.setattr(cli_mod.ruleset, "refresh", refresh)
+
+    args = argparse.Namespace(wait=True, timeout=30, require_rules=True)
+    assert cli_mod._cmd_sync(args) == 0
+    assert len([event for event in events if event[0] == "curator"]) == 1
+    assert "25,000 public VM" in capsys.readouterr().out
+
+
 def test_authoritative_recovery_waits_for_dkg_backpressure(monkeypatch, capsys):
     attempts = []
     states = []

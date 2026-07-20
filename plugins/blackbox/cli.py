@@ -619,8 +619,17 @@ def _cmd_sync(args: argparse.Namespace) -> int:
         base_sync_complete = (
             public_count > 0 if managed_graph else sum(counts.values()) > 0
         ) and fresh_catchup_complete
+        # A clean local store has no public rows yet.  Waiting for
+        # ``base_sync_complete`` before contacting the configured release
+        # publisher deadlocks that exact first-sync case when generic peers do
+        # not hold the graph.  Once the release graph is subscribed, pin the
+        # authoritative publisher immediately; the recovery helper already
+        # waits through DKG backpressure and verifies completion atomically.
+        authoritative_recovery_ready = base_sync_complete or (
+            release_graph and subscribed
+        )
         if (
-            base_sync_complete
+            authoritative_recovery_ready
             and managed_graph
             and getattr(args, "wait", False)
             and authoritative_available
