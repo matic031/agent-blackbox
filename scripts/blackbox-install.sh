@@ -1440,8 +1440,46 @@ sync_ruleset() {
 
     step "Requesting the verified agent-blackbox-vm snapshot ..."
     step "Sync progress will stream below (also saved to $BLACKBOX_SYNC_LOG)."
+    # Never let a previous install's progress line open an empty dashboard.
+    : >"$BLACKBOX_SYNC_LOG"
+    local watch_dir=""
+    local watch_done=""
+    local watch_pid=""
+    if [ "$BLACKBOX_AUTO_DASHBOARD" != "0" ] &&
+        [ "$BLACKBOX_AUTO_DASHBOARD" != "false" ] &&
+        [ "$BLACKBOX_AUTO_DASHBOARD" != "never" ] &&
+        [ "$BLACKBOX_AUTO_DASHBOARD" != "no" ]; then
+        watch_dir="$(mktemp -d "${TMPDIR:-/tmp}/blackbox-first-sync.XXXXXX")"
+        watch_done="$watch_dir/done"
+        (
+            while [ ! -f "$watch_done" ] && kill -0 "$$" 2>/dev/null; do
+                if [ -f "$BLACKBOX_SYNC_LOG" ] &&
+                    grep -Eq '[0-9][0-9,]* verified threats ready' "$BLACKBOX_SYNC_LOG"; then
+                    ok "Verified threats are ready — opening the dashboard while the graph finishes syncing"
+                    start_dashboard
+                    exit 0
+                fi
+                sleep 1
+            done
+        ) &
+        watch_pid=$!
+    fi
+
+    local sync_code=0
     if PYTHONUNBUFFERED=1 "$HERMES_BIN" blackbox sync --wait --timeout "$BLACKBOX_DKG_CATCHUP_TIMEOUT" --require-rules 2>&1 |
-        tee "$BLACKBOX_SYNC_LOG"; then
+        tee -a "$BLACKBOX_SYNC_LOG"; then
+        sync_code=0
+    else
+        sync_code=$?
+    fi
+    if [ -n "$watch_done" ]; then
+        touch "$watch_done"
+        wait "$watch_pid" 2>/dev/null || true
+        rm -f "$watch_done"
+        rmdir "$watch_dir" 2>/dev/null || true
+    fi
+
+    if [ "$sync_code" -eq 0 ]; then
         ok "Ruleset synced — Blackbox is watching with the latest threats"
     else
         BLACKBOX_INSTALL_INCOMPLETE=true

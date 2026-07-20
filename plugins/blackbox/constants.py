@@ -108,10 +108,16 @@ DEFAULT_GRAPH_PEER_ID = "12D3KooWBJskzr2unXQG9mR3LRZFUJoxWr1PN6hTbyWyKndHXjZM"
 #: rejected as an unresolved context graph.
 DEFAULT_GRAPH_METADATA_CONTEXT_GRAPH_ID = "ontology"
 
-#: Keep one durable recovery request short enough for verified dashboard counts
-#: to advance between passes. DKG checkpoints complete exact graphs and resumes
-#: the next request from the safe boundary, so this does not weaken verification.
-DEFAULT_GRAPH_SYNC_PASS_BUDGET_MS = 30_000
+#: Keep the first durable recovery request short so a fresh install gets a
+#: useful verified ruleset quickly. DKG checkpoints complete exact graphs and
+#: resumes the next request from the safe boundary, so this does not weaken
+#: verification.
+INITIAL_GRAPH_SYNC_PASS_BUDGET_MS = 30_000
+
+#: Once the first verified rules are locally usable, prefer DKG's normal
+#: per-peer durable budget. Larger follow-up passes avoid repeatedly paying the
+#: metadata/session/verification overhead that made complete fresh syncs slow.
+DEFAULT_GRAPH_SYNC_PASS_BUDGET_MS = 110_000
 
 #: Previous bootstrap peers transparently replaced during config loading.
 LEGACY_GRAPH_PEER_IDS = frozenset({

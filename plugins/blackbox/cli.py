@@ -526,17 +526,35 @@ def _cmd_sync_impl(args: argparse.Namespace) -> int:
     rs = ruleset.Ruleset()
     public_count = 0
     community_count = 0
+    initial_rules_ready = False
     attempt = 0
     last_subscribe_error = ""
     last_catchup: Dict[str, Any] = {}
 
     def _record_verified_pass(_inserted_triples: int) -> None:
         """Publish only locally committed threat counts between DKG passes."""
-        nonlocal public_count, authoritative_target
+        nonlocal rs, public_count, authoritative_target, initial_rules_ready
         previous_public = public_count
+        became_ready = False
         count_threats = getattr(client, "threat_count", None)
         if callable(count_threats):
             public_count = max(public_count, int(count_threats(cfg.context_graph_id) or 0))
+        if public_count > 0 and not initial_rules_ready:
+            # The DKG request has settled and its atomic store commit is now
+            # queryable. Build one partial verified cache before announcing
+            # readiness so an installer can safely open a useful dashboard
+            # while the same single-flight transfer continues.
+            try:
+                partial_rules = ruleset.refresh(cfg, client)
+            except Exception as exc:
+                logger.debug("blackbox: initial verified rules cache is not ready: %s", exc)
+            else:
+                cached_public = _ruleset_graph_count(partial_rules, "public")
+                if cached_public > 0:
+                    rs = partial_rules
+                    public_count = max(public_count, cached_public)
+                    initial_rules_ready = True
+                    became_ready = True
         authoritative_target = max(authoritative_target, public_count)
         sync_state.write(
             "running",
@@ -546,7 +564,7 @@ def _cmd_sync_impl(args: argparse.Namespace) -> int:
             public_entries=public_count,
             community_entries=community_count,
         )
-        if public_count != previous_public:
+        if initial_rules_ready and (public_count != previous_public or became_ready):
             print(f"  {public_count:,} verified threats ready")
 
     while True:
@@ -934,6 +952,7 @@ def _catchup_authoritative_vm(
             0,
             constants.DEFAULT_GRAPH_METADATA_CONTEXT_GRAPH_ID,
         )
+    public_progress_seen = False
 
     while pending_context_graphs:
         active_context_graph_id = pending_context_graphs[0]
@@ -946,10 +965,15 @@ def _catchup_authoritative_vm(
                 error="authoritative sync deadline reached",
             )
             return False
+        pass_budget_ms = (
+            constants.DEFAULT_GRAPH_SYNC_PASS_BUDGET_MS
+            if public_progress_seen
+            else constants.INITIAL_GRAPH_SYNC_PASS_BUDGET_MS
+        )
         budget_ms = max(
             1_000,
             min(
-                constants.DEFAULT_GRAPH_SYNC_PASS_BUDGET_MS,
+                pass_budget_ms,
                 int(max(1.0, remaining - 10) * 1_000),
             ),
         )
@@ -1118,6 +1142,7 @@ def _catchup_authoritative_vm(
         print(f"  verifiable VM sync advanced ({inserted:,} triples inserted)")
         if on_progress is not None:
             on_progress(inserted)
+        public_progress_seen = True
         # A transport interruption can yield a verified prefix and a successful
         # HTTP response. Repeat the pinned pass until the publisher reports a
         # clean idempotent zero-insert round; only then is recovery settled.

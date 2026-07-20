@@ -295,6 +295,66 @@ def test_unix_installer_runs_one_controlled_sync_before_dashboard() -> None:
     assert 'BLACKBOX_INSTALL_INCOMPLETE=true' in sync_body
     assert 'BLACKBOX_THREAT_GRAPH_INCOMPLETE=true' in sync_body
     assert "one controlled graph catch-up" in sync_body
+    assert "verified threats ready" in sync_body
+    assert "start_dashboard" in sync_body
+    assert ': >"$BLACKBOX_SYNC_LOG"' in sync_body
+    assert 'tee -a "$BLACKBOX_SYNC_LOG"' in sync_body
+    assert sync_body.index("verified threats ready") < sync_body.index("start_dashboard")
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash is unavailable")
+def test_unix_installer_opens_dashboard_after_new_verified_cache_is_ready(
+    tmp_path: Path,
+) -> None:
+    sync_body = _extract_function_body("sync_ruleset")
+    hermes_home = tmp_path / "hermes"
+    log_dir = hermes_home / "logs"
+    log_dir.mkdir(parents=True)
+    sync_log = log_dir / "blackbox-sync-install.log"
+    # A previous successful install must not satisfy the new run's watcher.
+    sync_log.write_text("999 verified threats ready\n", encoding="utf-8")
+    events = tmp_path / "events"
+    fake_hermes = tmp_path / "fake-hermes"
+    fake_hermes.write_text(
+        "#!/bin/bash\n"
+        f"echo sync-started >> {shlex.quote(str(events))}\n"
+        "echo 'starting fresh sync'\n"
+        "sleep 0.2\n"
+        "echo '  10 verified threats ready'\n"
+        "sleep 1.4\n"
+        f"echo sync-finished >> {shlex.quote(str(events))}\n",
+        encoding="utf-8",
+    )
+    fake_hermes.chmod(0o755)
+    command = f"""
+set -euo pipefail
+heading() {{ :; }}
+step() {{ :; }}
+ok() {{ :; }}
+err() {{ :; }}
+restart_blackbox_dkg_for_sync_mode() {{ return 0; }}
+start_dashboard() {{ echo dashboard >> {shlex.quote(str(events))}; }}
+sync_ruleset() {{
+{sync_body}
+}}
+DKG_READY=true
+HERMES_HOME={shlex.quote(str(hermes_home))}
+HERMES_BIN={shlex.quote(str(fake_hermes))}
+BLACKBOX_DKG_CATCHUP_TIMEOUT=30
+BLACKBOX_DKG_STEADY_DURABLE_SYNC_ENABLED=0
+BLACKBOX_AUTO_DASHBOARD=1
+BLACKBOX_INSTALL_INCOMPLETE=false
+BLACKBOX_THREAT_GRAPH_INCOMPLETE=false
+BLACKBOX_SYNC_LOG=''
+sync_ruleset
+"""
+
+    subprocess.run(["bash", "-c", command], check=True, timeout=10)
+    assert events.read_text(encoding="utf-8").splitlines() == [
+        "sync-started",
+        "dashboard",
+        "sync-finished",
+    ]
 
 
 def test_installers_enable_blackbox_noninteractively() -> None:
@@ -1241,6 +1301,7 @@ def test_dkg_config_writer_recovers_invalid_utf8(tmp_path: Path) -> None:
 def test_installers_use_native_dkg_membership_without_sync_overrides() -> None:
     unix = INSTALL_SH.read_text(encoding="utf-8")
     windows = INSTALL_PS1.read_text(encoding="utf-8")
+    unix_main = _extract_function_body("main")
 
     for text in (unix, windows):
         assert "blackbox-clean-dkg-subscriptions.py" not in text
@@ -1290,7 +1351,7 @@ def test_installers_use_native_dkg_membership_without_sync_overrides() -> None:
     assert 'restart_blackbox_dkg_for_sync_mode "$BLACKBOX_DKG_STEADY_DURABLE_SYNC_ENABLED"' in unix
     assert 'Restart-BlackboxDkgForSyncMode -DurableMode "1"' in windows
     assert "Restart-BlackboxDkgForSyncMode -DurableMode $DkgSteadyDurableSyncEnabled" in windows
-    assert unix.index("sync_ruleset\n") < unix.index("start_dashboard\n")
+    assert unix_main.index("sync_ruleset\n") < unix_main.index("start_dashboard\n")
     assert '$DkgCatchupMaxConcurrentPeers = "1"' in windows
     assert '$DkgStoreQueueWaitTimeoutMs = "300000"' in windows
     assert "one large sync at a time" in unix

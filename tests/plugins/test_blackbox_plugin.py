@@ -289,6 +289,7 @@ def test_blackbox_sync_recovers_curator_snapshot_then_waits_for_vm(monkeypatch, 
     last_public = {"value": 6_875}
 
     def refresh(_cfg, _client):
+        events.append(("refresh",))
         try:
             last_public["value"] = next(public_counts)
         except StopIteration:
@@ -304,6 +305,8 @@ def test_blackbox_sync_recovers_curator_snapshot_then_waits_for_vm(monkeypatch, 
     assert len(curator_events) == 3
     assert curator_events[0][1] == constants.DEFAULT_GRAPH_METADATA_CONTEXT_GRAPH_ID
     assert curator_events[1][1] == constants.DEFAULT_CONTEXT_GRAPH_ID
+    curator_indexes = [index for index, event in enumerate(events) if event[0] == "curator"]
+    assert curator_indexes[1] < events.index(("refresh",)) < curator_indexes[2]
     assert not any(event[0] == "subscribe" for event in events)
     assert states[-1][0] == "done"
     assert states[-1][1]["public_entries"] == 23_001
@@ -604,6 +607,42 @@ def test_authoritative_recovery_waits_for_dkg_backpressure(monkeypatch, capsys):
     )
     assert not any(status == "failed" for status, _details in states)
     assert "pausing briefly before a safe resume" in capsys.readouterr().out
+
+
+def test_authoritative_recovery_uses_short_first_pass_then_normal_dkg_budget(
+    monkeypatch,
+):
+    budgets = []
+    durable_rounds = iter([10_134, 250_000, 500_000, 0])
+
+    class FakeClient:
+        def catchup_from_peer(self, _cg_id, peer_id, *, budget_ms):
+            budgets.append(budget_ms)
+            inserted = next(durable_rounds)
+            return {
+                "ok": True,
+                "includeDurable": True,
+                "includeSharedMemory": False,
+                "peersAttempted": 1,
+                "totalDurableInsertedTriples": inserted,
+                "results": [{"peerId": peer_id}],
+            }
+
+    monkeypatch.setattr(cli_mod.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(cli_mod.sync_state, "write", lambda *_args, **_kwargs: {})
+
+    assert cli_mod._catchup_authoritative_vm(
+        FakeClient(),
+        constants.DEFAULT_CONTEXT_GRAPH_ID,
+        constants.DEFAULT_GRAPH_PEER_ID,
+        cli_mod.time.monotonic() + 600,
+    )
+    assert budgets == [
+        constants.INITIAL_GRAPH_SYNC_PASS_BUDGET_MS,
+        constants.INITIAL_GRAPH_SYNC_PASS_BUDGET_MS,
+        constants.DEFAULT_GRAPH_SYNC_PASS_BUDGET_MS,
+        constants.DEFAULT_GRAPH_SYNC_PASS_BUDGET_MS,
+    ]
 
 
 def test_authoritative_recovery_does_not_loop_when_dkg_attempts_no_peer(monkeypatch):
