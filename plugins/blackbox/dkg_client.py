@@ -201,6 +201,20 @@ class DkgClient:
 
     # -- context graph -----------------------------------------------------
 
+    def connect_peer(
+        self,
+        peer_id: str,
+        *,
+        multiaddr: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Establish one explicit route to a graph source peer.
+
+        A direct multiaddr is preferred for cold-start reliability. With no
+        address, DKG resolves the peer through its own Kademlia routing table.
+        """
+        body = {"multiaddr": multiaddr} if multiaddr else {"peerId": peer_id}
+        return self._request("POST", "/api/connect", body, timeout=15.0)
+
     def subscribe_context_graph(self, cg_id: str, *, include_shared_memory: bool = False) -> Dict[str, Any]:
         """Subscribe the node to a context graph and catch up its durable VM.
 
@@ -254,10 +268,10 @@ class DkgClient:
         *,
         budget_ms: int = 300_000,
     ) -> Dict[str, Any]:
-        """Recover the graph's durable VM from its configured publisher.
+        """Recover the graph's durable VM from one configured source peer.
 
         DKG's route retains its historical ``shared-memory`` name, but the
-        explicit flags below skip SWM entirely.  Pinning the publisher avoids
+        explicit flags below skip SWM entirely. Pinning the source avoids
         a generic peer returning a partial or stale graph.  A successful
         already-current recovery legitimately inserts zero triples.
         """
@@ -273,7 +287,10 @@ class DkgClient:
                 "hostCatchupFallback": False,
                 "perPeerDurableBudgetMs": bounded_budget,
             },
-            timeout=(bounded_budget / 1_000) + 10,
+            # DKG may need a short finalization window after its bounded data
+            # phase records resumable progress. Do not let the HTTP client
+            # abandon that response at the exact data-phase boundary.
+            timeout=(bounded_budget / 1_000) + 45,
         )
 
     def context_graph_participants(self, cg_id: str) -> Dict[str, Any]:
@@ -514,6 +531,31 @@ class DkgClient:
             logger.debug("blackbox: query failed: %s", exc)
             return [] if on_error is None else on_error
         return normalize_bindings(result)
+
+    def threat_count(self, cg_id: str) -> int:
+        """Return the locally verified Blackbox threat count with one query."""
+        sparql = """PREFIX defender: <urn:defender:>
+SELECT (COUNT(DISTINCT ?threat) AS ?n) WHERE {
+  ?threat a ?type .
+  VALUES ?type {
+    defender:DependencySignal
+    defender:InjectionSignal
+    defender:SkillSignal
+    defender:IocSignal
+  }
+}"""
+        rows = self.query(
+            sparql,
+            cg_id,
+            view=constants.VIEW_VERIFIABLE_MEMORY,
+            on_error=[],
+        )
+        if not rows:
+            return 0
+        try:
+            return int(extract_binding(rows[0].get("n")) or 0)
+        except (TypeError, ValueError):
+            return 0
 
     def register_agent(self, name: str, framework: str = "hermes") -> Dict[str, Any]:
         """Register a new agent on the node → ``{agentAddress, authToken, ...}``."""

@@ -753,7 +753,7 @@ data["relayReservationCount"] = int(data.get("relayReservationCount") or 4)
 # large-sync slot and can starve the Blazegraph store queue on fresh installs.
 data["syncOnConnectEnabled"] = False
 # Disable automatic retry/fan-out. Blackbox initiates one explicit durable
-# publisher catch-up, so durable sync itself must remain available.
+# graph catch-up, so durable sync itself must remain available.
 data["syncReconcilerEnabled"] = False
 data["durableSyncEnabled"] = False
 data.pop("syncAgentsMeta", None)
@@ -1138,7 +1138,7 @@ function Restart-BlackboxDkgForSyncMode {
 function Sync-Ruleset {
     if (-not $script:DkgReady) { return }
     Write-Heading "Syncing the threat ruleset"
-    Write-Step "Temporarily enabling durable sync for one controlled publisher catch-up ..."
+    Write-Step "Temporarily enabling durable sync for one controlled graph catch-up ..."
     if (-not (Restart-BlackboxDkgForSyncMode -DurableMode "1")) {
         $script:InstallIncomplete = $true
         Write-Err2 "Could not start the controlled DKG sync window."

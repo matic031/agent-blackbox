@@ -217,6 +217,12 @@ def _sync_ruleset_once(load_config: Any, dkg_client_cls: Any, ruleset_mod: Any) 
         if callable(peek):
             cached_counts = _ruleset_sync_counts(peek(cfg))
             if cached_counts["public"]:
+                verified = max(
+                    cached_counts["public"],
+                    int(transfer.get("public_entries") or 0),
+                )
+                cached_counts["total"] += verified - cached_counts["public"]
+                cached_counts["public"] = verified
                 return cached_counts
         public = int(transfer.get("public_entries") or 0)
         return {"total": public, "public": public, "community": 0}
