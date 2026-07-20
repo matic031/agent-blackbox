@@ -705,6 +705,11 @@ def test_agent_cards_distinguish_attached_from_active(monkeypatch):
     monkeypatch.setattr(config, "load_blackbox_config", lambda: cfg)
     monkeypatch.setattr(dkg_client.DkgClient, "reachable", lambda self, timeout=None: False)
     monkeypatch.setattr(audit, "local_active_frameworks", lambda: ["hermes"])
+    monkeypatch.setattr(
+        audit,
+        "read_audit",
+        lambda limit=1_000_000: [{"framework": "hermes", "workspace": "/tmp/.hermes"}],
+    )
     monkeypatch.setattr(audit, "read_findings", lambda limit=100000: [])
     monkeypatch.setattr(
         attach,
