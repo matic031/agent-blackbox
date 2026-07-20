@@ -1093,6 +1093,7 @@ def _catchup_authoritative_vm(
             )
             logger.debug("blackbox: graph source did not attempt VM recovery: %s", error)
             return False
+        backpressure_retries = 0
         inserted = int(result.get("totalDurableInsertedTriples") or 0)
         if active_context_graph_id != context_graph_id:
             if inserted > 0:
