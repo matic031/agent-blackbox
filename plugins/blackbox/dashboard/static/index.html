@@ -1079,23 +1079,6 @@
     font-size: 10.5px;
   }
   .graph-search input::placeholder { color: var(--muted); opacity: .82; }
-  .graph-load-more {
-    appearance: none;
-    min-height: 28px;
-    padding: 4px 9px;
-    border: 1px solid var(--border);
-    border-radius: 7px;
-    color: var(--text);
-    background: var(--graph-control-soft);
-    font: inherit;
-    font-size: 10.5px;
-    font-weight: 700;
-    cursor: pointer;
-    box-shadow: 0 6px 18px rgba(0,0,0,0.18);
-  }
-  .graph-load-more:hover { border-color: var(--border-strong); background: var(--elevated); }
-  .graph-load-more:disabled { cursor: wait; opacity: .62; }
-  .graph-load-more[hidden] { display: none; }
   .graph-detail {
     display: inline-flex;
     align-items: center;
@@ -1126,29 +1109,6 @@
   .graph-detail button.active {
     color: var(--bg);
     background: var(--mint);
-  }
-  .graph-count {
-    border: 1px solid var(--border);
-    background: var(--graph-control-faint);
-    box-shadow: 0 6px 18px rgba(0,0,0,0.16);
-    backdrop-filter: blur(10px);
-    -webkit-backdrop-filter: blur(10px);
-  }
-  .graph-count {
-    min-height: 22px;
-    display: inline-flex;
-    align-items: center;
-    gap: 5px;
-    border-radius: 6px;
-    padding: 3px 8px;
-    color: var(--muted);
-    font-size: 10.5px;
-    font-weight: 600;
-    white-space: nowrap;
-  }
-  .graph-count strong {
-    color: var(--text);
-    font-weight: 700;
   }
 
   /* graph empty-state overlay (centered inside the stage) */
@@ -1719,8 +1679,6 @@
     .section-head { align-items: flex-start; }
     .graph-stage { height: 390px; }
     .graph-search { width: auto; flex: 1 1 180px; min-height: 40px; }
-    .graph-load-more { min-height: 40px; }
-    .graph-count { flex: 1 1 100%; justify-content: center; }
     thead th, tbody td { padding-left: 12px; padding-right: 12px; }
     .stats { grid-template-columns: 1fr; }
     .brand-logo { height: 46px; }
@@ -2440,7 +2398,6 @@
     border-bottom: 1px solid var(--muted);
   }
 
-  .graph-count,
   .graph-detail button,
   .stat .meta,
   .col-time,
@@ -2455,7 +2412,6 @@
   .attach-row,
   .attach-btn,
   .graph-detail,
-  .graph-count,
   .modal-grid,
   .modal-copy,
   .set-track,
@@ -2836,8 +2792,6 @@
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"></circle><path d="m20 20-3.5-3.5"></path></svg>
                 <input type="search" id="graph-search" autocomplete="off" spellcheck="false" placeholder="Find any threat" aria-label="Find a threat in the graph">
               </label>
-              <button type="button" class="graph-load-more" id="graph-load-more" hidden>Load more</button>
-              <span class="graph-count" id="graph-count"></span>
               <div class="graph-detail" role="group" aria-label="Graph mode">
                 <button type="button" id="graph-detail-compact" data-detail="compact">Compact</button>
                 <button type="button" id="graph-detail-explore" data-detail="explore">Explore</button>
@@ -3069,6 +3023,12 @@
     compact: { cap: 96, focusCap: 320 },
     explore: { cap: 180, focusCap: 1000 }
   };
+  var GRAPH_CATEGORY_MIN_LEAVES = 12;
+  var GRAPH_ZOOM_CAPS = [
+    { scale: 1.8, cap: 320 },
+    { scale: 3.2, cap: 700 },
+    { scale: 5.2, cap: 1400 }
+  ];
   var GRAPH_MAX_VISIBLE_LEAVES = 4000;
   var graphDetailMode = { public: "compact", community: "compact" };
   var graphLeafLimit = {
@@ -3076,6 +3036,9 @@
     community: GRAPH_DETAIL_PRESETS.compact.cap
   };
   var graphFocus = { public: null, community: null };
+  var graphZoomBand = { public: {}, community: {} };
+  var graphZoomTimer = null;
+  var graphFocusLoadInFlight = { public: false, community: false };
   var graphRenderMeta = { public: null, community: null, local: null };
 
   // Latest /api/graph-status payload, so the graph renderer can read node
@@ -3328,6 +3291,12 @@
       (query ? "&q=" + encodeURIComponent(query) : "");
   }
 
+  function graphFocusPageUrl(tier, focus, offset) {
+    return graphPageUrl(tier, offset, "", GRAPH_PAGE_SIZE) +
+      "&category=" + encodeURIComponent(focus.cat || "") +
+      (focus.eco ? "&ecosystem=" + encodeURIComponent(focus.eco) : "");
+  }
+
   function graphLoaded(tier) {
     return graphCache[tier] ? asList(graphCache[tier]).length : 0;
   }
@@ -3358,9 +3327,33 @@
     });
   }
 
-  // Polling seeds one page only. Additional pages are an explicit exploration
-  // action, so a 169k-entry cache never downloads or replays layout animations
-  // merely because the dashboard is open.
+  function loadGraphFocusPage(tier, focus) {
+    if (!focus || graphFocusLoadInFlight[tier]) return Promise.resolve(false);
+    var current = graphCache[tier] ? asList(graphCache[tier]) : [];
+    var offset = current.filter(function (t) { return graphMatchesFocus(t, focus); }).length;
+    graphFocusLoadInFlight[tier] = true;
+    return getJSON(graphFocusPageUrl(tier, focus, offset)).then(function (page) {
+      var existing = graphCache[tier] || { tier: tier, threats: [], total: graphTotalForTier(tier) || 0 };
+      var seen = {};
+      asList(existing).forEach(function (t) { if (t && t.identifier) seen[t.identifier] = true; });
+      asList(page).forEach(function (t) {
+        if (!t || !t.identifier || seen[t.identifier]) return;
+        existing.threats.push(t);
+        seen[t.identifier] = true;
+      });
+      graphCache[tier] = existing;
+      graphRevision[tier] += 1;
+      graphFocusLoadInFlight[tier] = false;
+      if (tier === activeTier) renderGraphTab();
+      return true;
+    }, function (err) {
+      graphFocusLoadInFlight[tier] = false;
+      throw err;
+    });
+  }
+
+  // Polling seeds one balanced page only. Deeper category pages are fetched as
+  // the user zooms or explicitly expands a branch.
   function loadGraphTier(tier) {
     if (graphCache[tier]) return Promise.resolve(false);
     return loadGraphPage(tier);
@@ -3864,7 +3857,9 @@
       var activeTotal = focus
         ? list.filter(function (t) { return graphMatchesFocus(t, focus); }).length
         : list.length;
-      var leafBudget = leafLimit >= activeTotal ? activeTotal : GRAPH_MAX_VISIBLE_LEAVES;
+      // Keep a representative ring around every populated category even while
+      // one field is focused. The focused field receives the remaining budget.
+      var leafBudget = GRAPH_MAX_VISIBLE_LEAVES;
       var shownLeaves = 0;
       nodes.push({
         id: centerId, kind: "center",
@@ -3916,6 +3911,7 @@
         var hubId = "__cat__:" + ck;
         var catFocus = { cat: ck };
         var categoryActive = !focus || focus.cat === ck;
+        var categoryLimit = categoryActive ? leafLimit : GRAPH_CATEGORY_MIN_LEAVES;
         nodes.push({
           id: hubId, kind: "hub", cat: ck, label: meta.name, count: items.length,
           color: meta.color, val: graphHubVal(items.length), focus: catFocus,
@@ -3933,7 +3929,7 @@
             byEco[eco].push(t);
           });
           var ecos = Object.keys(byEco).sort(function (a, b) { return byEco[b].length - byEco[a].length; });
-          var perEcoLimit = (!focus || focus.eco) ? leafLimit : Math.max(1, Math.ceil(leafLimit / Math.max(1, ecos.length)));
+          var perEcoLimit = Math.max(1, Math.ceil(categoryLimit / Math.max(1, ecos.length)));
           ecos.forEach(function (eco) {
             var subId = hubId + ":" + eco;
             var ecoFocus = { cat: ck, eco: eco };
@@ -3944,10 +3940,13 @@
               focus: ecoFocus, dimmed: !!focus && !ecoActive
             });
             links.push({ source: subId, target: hubId, kind: "hub" });
-            if (ecoActive) addLeaves(subId, ck, byEco[eco], perEcoLimit, ecoFocus);
+            var ecoLimit = focus && focus.cat === ck && focus.eco === eco
+              ? leafLimit
+              : perEcoLimit;
+            addLeaves(subId, ck, byEco[eco], ecoLimit, ecoFocus);
           });
         } else {
-          if (categoryActive) addLeaves(hubId, ck, items, leafLimit, catFocus);
+          addLeaves(hubId, ck, items, categoryLimit, catFocus);
         }
       });
       graphRenderMeta[tier] = {
@@ -4899,11 +4898,59 @@
         loadGraphPage(activeTier).catch(function () {});
       }
     }
+    function graphFocusAtViewportCenter() {
+      var hubs = graphNodesShown.filter(function (node) {
+        return node && node.kind === "hub" && node.focus && !node.focus.eco &&
+          typeof node.x === "number" && typeof node.y === "number";
+      });
+      if (!hubs.length) return graphFocus[activeTier] || null;
+      var point = { x: 0, y: 0 };
+      var canvas = $("graph-canvas");
+      try {
+        if (fg && canvas && typeof fg.screen2GraphCoords === "function") {
+          point = fg.screen2GraphCoords(canvas.clientWidth / 2, canvas.clientHeight / 2);
+        }
+      } catch (_) {}
+      hubs.sort(function (a, b) {
+        var ad = Math.pow(a.x - point.x, 2) + Math.pow(a.y - point.y, 2);
+        var bd = Math.pow(b.x - point.x, 2) + Math.pow(b.y - point.y, 2);
+        return ad - bd;
+      });
+      return hubs[0].focus;
+    }
+    function expandGraphForZoom(transform) {
+      if (activeTier === "local" || graphSearchQuery[activeTier]) return;
+      var scale = Number(transform && transform.k || 1);
+      var band = 0;
+      GRAPH_ZOOM_CAPS.forEach(function (step, index) {
+        if (scale >= step.scale) band = index + 1;
+      });
+      if (!band) return;
+      if (graphZoomTimer) window.clearTimeout(graphZoomTimer);
+      graphZoomTimer = window.setTimeout(function () {
+        graphZoomTimer = null;
+        var focus = graphFocusAtViewportCenter();
+        if (!focus) return;
+        var focusKey = graphFocusKey(focus);
+        if (band <= (graphZoomBand[activeTier][focusKey] || 0)) return;
+        graphZoomBand[activeTier][focusKey] = band;
+        graphFocus[activeTier] = focus;
+        graphLeafLimit[activeTier] = Math.max(
+          graphCap(activeTier), GRAPH_ZOOM_CAPS[band - 1].cap
+        );
+        invalidateGraphTier(activeTier);
+        renderGraphTab();
+        loadGraphFocusPage(activeTier, focus).catch(function () {});
+      }, 180);
+    }
     function setGraphDetailMode(mode) {
       if (!GRAPH_DETAIL_PRESETS[mode] || activeTier === "local") return;
       graphDetailMode[activeTier] = mode;
       graphLeafLimit[activeTier] = graphPreset(activeTier).cap;
-      if (mode === "compact") graphFocus[activeTier] = null;
+      if (mode === "compact") {
+        graphFocus[activeTier] = null;
+        graphZoomBand[activeTier] = {};
+      }
       else ensureExploreFocus(activeTier);
       if (mode === "explore" && graphFocus[activeTier]) {
         graphLeafLimit[activeTier] = Math.max(graphLeafLimit[activeTier], graphPreset(activeTier).focusCap);
@@ -4923,39 +4970,6 @@
         var btn = $("graph-detail-" + mode);
         if (btn) btn.classList.toggle("active", (graphDetailMode[activeTier] || "compact") === mode);
       });
-      var count = $("graph-count");
-      if (count) {
-        var syncing = isTierPending(activeTier);
-        var query = graphSearchQuery[activeTier];
-        var loaded = graphLoaded(activeTier);
-        var total = graphTotalForTier(activeTier);
-        var view = graphViewData(activeTier);
-        var viewTotal = Number((view && view.total) || graphViewList(activeTier).length);
-        count.style.display = "";
-        if (graphSearchInFlight[activeTier]) {
-          count.innerHTML = LOADER_HTML + '<strong>Searching</strong>';
-        } else if (query) {
-          count.innerHTML = '<strong>' + num(meta.shownLeaves) + ' visible</strong> · ' +
-            num(viewTotal) + ' match' + (viewTotal === 1 ? '' : 'es');
-        } else if (syncing && loaded <= 0 && total <= 0) {
-          count.innerHTML = LOADER_HTML + '<strong>' + esc(tierProgress(activeTier).label || "Syncing") +
-            (catchupElapsed() == null ? '' : ' · ' + fmtElapsedSeconds(catchupElapsed()) + ' elapsed') + '</strong>' +
-            (loaded ? ' · ' + num(loaded) + ' cached' : '');
-        } else {
-          count.innerHTML = '<strong>' + num(meta.shownLeaves) + ' visible</strong> · ' +
-            num(loaded) + ' loaded' + (total != null ? ' of ' + num(total) : '') +
-            (meta.focusLabel ? ' · ' + esc(meta.focusLabel) : '');
-        }
-      }
-      var loadButton = $("graph-load-more");
-      if (loadButton) {
-        var canLoad = !graphSearchQuery[activeTier] && graphHasMore(activeTier);
-        loadButton.hidden = !canLoad;
-        loadButton.disabled = !!graphLoadInFlight[activeTier];
-        loadButton.textContent = graphLoadInFlight[activeTier]
-          ? "Loading…"
-          : "Load " + num(Math.min(GRAPH_PAGE_SIZE, Math.max(0, graphTotalForTier(activeTier) - graphLoaded(activeTier)))) + " more";
-      }
       var searchInput = $("graph-search");
       if (searchInput && document.activeElement !== searchInput) {
         searchInput.value = graphSearchQuery[activeTier] || "";
@@ -5102,6 +5116,7 @@
       .d3VelocityDecay(0.3)
       .enableNodeDrag(true)
       .onNodeClick(onNodeClick)
+      .onZoom(expandGraphForZoom)
         .onNodeHover(function (node) {
           var c = $("graph-canvas");
           if (c) c.style.cursor = (node && (node.kind === "leaf" || node.kind === "lthreat" || node.kind === "hub" || node.kind === "gmore")) ? "pointer" : "default";
@@ -6149,16 +6164,6 @@
 	    var btn = $("graph-detail-" + mode);
 	    if (btn) btn.addEventListener("click", function () { setGraphDetailMode(mode); });
 	  });
-
-  var graphLoadMoreButton = $("graph-load-more");
-  if (graphLoadMoreButton) graphLoadMoreButton.addEventListener("click", function () {
-    if (activeTier === "local" || graphLoadInFlight[activeTier]) return;
-    graphLoadMoreButton.disabled = true;
-    graphLoadMoreButton.textContent = "Loading…";
-    loadGraphPage(activeTier).catch(function () {}).then(function () {
-      updateGraphControls(false, graphRenderMeta[activeTier]);
-    });
-  });
 
   var graphSearchInput = $("graph-search");
   if (graphSearchInput) graphSearchInput.addEventListener("input", function () {

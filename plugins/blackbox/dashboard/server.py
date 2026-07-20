@@ -160,6 +160,42 @@ def _graph_entries(rs: Any, source: str) -> List[Dict[str, Any]]:
     ]
 
 
+def _balanced_graph_entries(
+    entries: List[Dict[str, Any]], minimum_per_category: int = 24
+) -> List[Dict[str, Any]]:
+    """Front-load a small sample of every populated threat category."""
+    category_order = (
+        "dependency", "injection", "escalation", "fileaccess",
+        "skill", "secret", "ioc", "other",
+    )
+    buckets: Dict[str, List[Dict[str, Any]]] = {key: [] for key in category_order}
+    for entry in entries:
+        key = str(entry.get("category") or "other").lower()
+        buckets.setdefault(key, []).append(entry)
+
+    front: List[Dict[str, Any]] = []
+    skipped: Dict[str, int] = {}
+    ordered_keys = category_order + tuple(k for k in buckets if k not in category_order)
+    for key in ordered_keys:
+        skipped[key] = min(len(buckets.get(key, [])), minimum_per_category)
+    for index in range(minimum_per_category):
+        for key in ordered_keys:
+            bucket = buckets.get(key, [])
+            if index < len(bucket):
+                front.append(bucket[index])
+
+    rest: List[Dict[str, Any]] = []
+    consumed: Dict[str, int] = {}
+    for entry in entries:
+        key = str(entry.get("category") or "other").lower()
+        used = consumed.get(key, 0)
+        if used < skipped.get(key, 0):
+            consumed[key] = used + 1
+            continue
+        rest.append(entry)
+    return front + rest
+
+
 def _ruleset_sync_counts(rs: Any) -> Dict[str, int]:
     public = _graph_source_count(rs, "public")
     return {
@@ -1530,6 +1566,8 @@ def create_app(*, manage_guardian: bool = False):
         limit: int = Query(1000, ge=1, le=10000),
         offset: int = Query(0, ge=0),
         q: str = Query("", max_length=200),
+        category: str = Query("", max_length=40),
+        ecosystem: str = Query("", max_length=80),
     ) -> Any:
         """Threats from one graph tier: ``public`` | ``community`` | ``local``."""
         tier, view = _tier_view(tier)
@@ -1567,6 +1605,19 @@ def create_app(*, manage_guardian: bool = False):
                 for item in _graph_entries(rs, tier)
             ]
             needle = str(q or "").strip().casefold()
+            wanted_category = str(category or "").strip().casefold()
+            wanted_ecosystem = str(ecosystem or "").strip().casefold()
+            if wanted_category:
+                all_threats = [
+                    item for item in all_threats
+                    if str(item.get("category") or "other").casefold() == wanted_category
+                ]
+            if wanted_ecosystem:
+                all_threats = [
+                    item for item in all_threats
+                    if (str(item.get("identifier") or "").split(":")[1:2] or [""])[0].casefold()
+                    == wanted_ecosystem
+                ]
             if needle:
                 all_threats = [
                     item for item in all_threats
@@ -1575,6 +1626,8 @@ def create_app(*, manage_guardian: bool = False):
                         for key in ("identifier", "name", "category", "severity")
                     ).casefold()
                 ]
+            elif not wanted_category and not wanted_ecosystem:
+                all_threats = _balanced_graph_entries(all_threats)
             return {
                 "tier": tier,
                 "threats": all_threats[offset:offset + limit],

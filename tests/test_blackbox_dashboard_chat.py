@@ -210,15 +210,42 @@ def test_dashboard_graph_search_filters_the_full_verified_cache(monkeypatch):
     monkeypatch.setattr(config, "load_blackbox_config", lambda: cfg)
     monkeypatch.setattr(ruleset, "peek", lambda _cfg=None: SearchableThreats())
 
-    result = TestClient(server.create_app()).get(
+    client = TestClient(server.create_app())
+    result = client.get(
         "/api/graph?tier=public&limit=100&q=needle"
     ).json()
 
     assert result["total"] == 1
     assert result["threats"][0]["identifier"] == "dep:pypi:needle-package@2.0.0"
 
+    focused = client.get(
+        "/api/graph?tier=public&limit=100&category=dependency&ecosystem=pypi"
+    ).json()
+    assert focused["total"] == 1
+    assert focused["threats"][0]["identifier"] == "dep:pypi:needle-package@2.0.0"
 
-def test_dashboard_graph_pages_are_user_driven_and_keep_scene_state():
+
+def test_dashboard_graph_front_loads_every_populated_category():
+    entries = [
+        {"identifier": f"dep:npm:pkg-{i}", "category": "dependency"}
+        for i in range(100)
+    ] + [
+        {"identifier": "injection:one", "category": "injection"},
+        {"identifier": "skill:one", "category": "skill"},
+        {"identifier": "ioc:one", "category": "ioc"},
+    ]
+
+    balanced = server._balanced_graph_entries(entries)
+
+    assert {item["category"] for item in balanced[:4]} == {
+        "dependency", "injection", "skill", "ioc"
+    }
+    assert {item["identifier"] for item in balanced} == {
+        item["identifier"] for item in entries
+    }
+
+
+def test_dashboard_graph_expands_on_zoom_and_keeps_scene_state():
     html = (
         Path(__file__).resolve().parents[1]
         / "plugins"
@@ -229,9 +256,14 @@ def test_dashboard_graph_pages_are_user_driven_and_keep_scene_state():
     ).read_text(encoding="utf-8")
 
     assert 'id="graph-search"' in html
-    assert 'id="graph-load-more"' in html
+    assert 'id="graph-load-more"' not in html
+    assert 'id="graph-count"' not in html
     assert "if (graphCache[tier]) return Promise.resolve(false);" in html
     assert "return next(nowLoaded);" not in html
+    assert ".onZoom(expandGraphForZoom)" in html
+    assert "GRAPH_CATEGORY_MIN_LEAVES = 12" in html
+    assert "loadGraphFocusPage(activeTier, focus)" in html
+    assert '"&category=" + encodeURIComponent(focus.cat || "")' in html
     assert "priorPositions[node.id]" in html
     assert "graphCanvasSize.width === w && graphCanvasSize.height === h" in html
     assert "compact: { cap: 96, focusCap: 320 }" in html
@@ -609,7 +641,6 @@ def test_dashboard_keeps_verified_snapshot_quiet_during_refresh():
     assert 'var hasVerifiedSnapshot = graphTotalForTier("public") > 0;' in html
     assert 'activeTier === "public" && !hasVerifiedSnapshot' in html
     assert 't === "public" && isTierPending(t)' in html
-    assert "syncing && loaded <= 0 && total <= 0" in html
     assert "' · ' + num(loaded) + ' available'" not in html
 
 
