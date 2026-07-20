@@ -646,6 +646,7 @@ def _fetch_tier(
 
 
 _EMPTY_RULESET_RETRY_S = 30.0
+_NONEMPTY_REFRESH_MIN_S = 15 * 60.0
 
 
 def refresh(config: Optional[BlackboxConfig] = None, client: Optional[DkgClient] = None) -> Ruleset:
@@ -665,6 +666,18 @@ def refresh(config: Optional[BlackboxConfig] = None, client: Optional[DkgClient]
     # admission, and catch-up are DKG daemon responsibilities; a cache read must
     # never restart network recovery.
     empty_success = all(rows == [] for rows in fetched.values())
+
+    if empty_success:
+        # Snapshot replacement is atomic from the user's perspective. A
+        # transient empty query (or a concurrent refresh racing catch-up)
+        # must never erase an already verified, enforceable ruleset.
+        prior = _memory_cache or _read_cache()
+        if prior is not None and prior.source_count("public") > 0:
+            prior.synced_at = time.time()
+            _write_cache(prior)
+            with _memory_lock:
+                _memory_cache = prior
+            return prior
 
     if all(rows is None for rows in fetched.values()):
         # Every tier failed — keep the last-good ruleset instead of emptying.
@@ -777,10 +790,13 @@ def get(config: Optional[BlackboxConfig] = None) -> Ruleset:
         with _memory_lock:
             _memory_cache = cached
     age = time.time() - cached.synced_at
+    refresh_after = max(1.0, float(config.sync_interval or 1))
+    if cached.source_count("public") > 0:
+        refresh_after = max(refresh_after, _NONEMPTY_REFRESH_MIN_S)
     # Atomic check-and-set under the lock so two callers can't both spawn.
     should_spawn = False
     with _memory_lock:
-        if age > max(1, config.sync_interval) and not _refreshing:
+        if age > refresh_after and not _refreshing:
             _refreshing = True
             should_spawn = True
     if should_spawn:

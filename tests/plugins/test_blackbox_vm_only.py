@@ -1,5 +1,6 @@
 """Release contract: curated public VM only; community SWM is coming soon."""
 
+import time
 from argparse import Namespace
 from pathlib import Path
 
@@ -184,6 +185,50 @@ def test_dashboard_does_not_query_rules_while_durable_catchup_runs(monkeypatch):
     }
 
 
+def test_dashboard_keeps_last_verified_rules_while_replacement_snapshot_runs(monkeypatch):
+    class Cfg:
+        dkg_url = "http://127.0.0.1:9320"
+        dkg_home = "/tmp/blackbox"
+        context_graph_id = "public/replacement"
+
+    class Client:
+        def __init__(self, **_kwargs):
+            raise AssertionError("active replacement must use the verified cache")
+
+    cached = ruleset.Ruleset(
+        dependency={
+            "npm:last-good": {
+                "identifier": "npm:last-good",
+                "source": "public",
+            }
+        },
+        graph_threats=[
+            {
+                "identifier": "npm:last-good",
+                "source": "public",
+            }
+        ],
+        synced_at=time.time() - 60,
+    )
+
+    class Rules:
+        @staticmethod
+        def peek(_cfg):
+            return cached
+
+    monkeypatch.setattr(
+        server.sync_state,
+        "read",
+        lambda: {"status": "running", "public_entries": 0},
+    )
+
+    assert server._sync_ruleset_once(lambda: Cfg(), Client, Rules) == {
+        "total": 1,
+        "public": 1,
+        "community": 0,
+    }
+
+
 def test_dashboard_subscribes_at_most_once_when_status_is_unavailable(monkeypatch):
     calls = []
 
@@ -215,6 +260,106 @@ def test_dashboard_subscribes_at_most_once_when_status_is_unavailable(monkeypatc
     server._sync_ruleset_once(lambda: Cfg(), Client, Rules)
 
     assert calls == [Cfg.context_graph_id]
+
+
+def test_dashboard_does_not_resubscribe_terminal_catchup_without_job_id(monkeypatch):
+    class Cfg:
+        dkg_url = "http://127.0.0.1:9320"
+        dkg_home = "/tmp/blackbox"
+        context_graph_id = "public/terminal-no-job-id"
+        sync_interval = 60
+
+    class Client:
+        def __init__(self, **_kwargs):
+            pass
+
+        def catchup_status(self, _cg_id):
+            return {"status": "done"}
+
+        def subscribe_context_graph(self, _cg_id):
+            raise AssertionError("terminal catch-up must not be resubscribed")
+
+    cached = ruleset.Ruleset(
+        dependency={
+            "npm:ready": {
+                "identifier": "npm:ready",
+                "source": "public",
+            }
+        },
+        graph_threats=[
+            {
+                "identifier": "npm:ready",
+                "source": "public",
+            }
+        ],
+        synced_at=time.time(),
+    )
+
+    class Rules:
+        @staticmethod
+        def peek(_cfg):
+            return cached
+
+        @staticmethod
+        def refresh(_cfg, _client):
+            raise AssertionError("fresh terminal cache must not be refreshed")
+
+    monkeypatch.setattr(server.sync_state, "read", lambda: {})
+    server._subscription_attempts.discard(Cfg.context_graph_id)
+
+    assert server._sync_ruleset_once(lambda: Cfg(), Client, Rules)["public"] == 1
+
+
+def test_dashboard_reuses_fresh_large_ruleset_without_querying_blazegraph(monkeypatch):
+    class Cfg:
+        dkg_url = "http://127.0.0.1:9320"
+        dkg_home = "/tmp/blackbox"
+        context_graph_id = "public/fresh-cache"
+        sync_interval = 60
+
+    class Client:
+        def __init__(self, **_kwargs):
+            pass
+
+        def catchup_status(self, _cg_id):
+            return {"status": "done", "jobId": "settled-job"}
+
+        def subscribe_context_graph(self, _cg_id):
+            raise AssertionError("settled catch-up must not be resubscribed")
+
+    cached = ruleset.Ruleset(
+        dependency={
+            "npm:demo": {
+                "identifier": "npm:demo",
+                "source": "public",
+            }
+        },
+        graph_threats=[
+            {
+                "identifier": "npm:demo",
+                "source": "public",
+            }
+        ],
+        synced_at=time.time(),
+    )
+
+    class Rules:
+        @staticmethod
+        def peek(_cfg):
+            return cached
+
+        @staticmethod
+        def refresh(_cfg, _client):
+            raise AssertionError("fresh cache must not trigger a full VM scan")
+
+    monkeypatch.setattr(server.sync_state, "read", lambda: {})
+    server._subscription_attempts.discard(Cfg.context_graph_id)
+
+    assert server._sync_ruleset_once(lambda: Cfg(), Client, Rules) == {
+        "total": 1,
+        "public": 1,
+        "community": 0,
+    }
 
 
 def test_dashboard_community_surfaces_are_static_coming_soon(monkeypatch):

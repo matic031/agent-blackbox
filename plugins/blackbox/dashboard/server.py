@@ -35,6 +35,10 @@ _RESCAN_INTERVAL_SEC = 5.0
 _RECONCILE_INTERVAL_SEC = 60.0
 _RULESET_EMPTY_RETRY_SEC = 10.0
 _RULESET_MIN_RETRY_SEC = 5.0
+# A complete VM refresh pages through every curated rule. On a large graph it
+# can take several minutes and saturate Blazegraph, so never repeat it on the
+# dashboard's short status-poll interval. Manual sync remains available.
+_RULESET_HEAVY_REFRESH_MIN_SEC = 15 * 60.0
 _GUARDIAN_PROFILE = "guardian"
 _GUARDIAN_RUNTIME_HOST = "127.0.0.1"
 _GUARDIAN_RUNTIME_PORT = 9121
@@ -170,6 +174,14 @@ def _sync_ruleset_once(load_config: Any, dkg_client_cls: Any, ruleset_mod: Any) 
     cfg = load_config()
     transfer = sync_state.read()
     if transfer.get("status") == "running":
+        # A replacement snapshot is staged atomically. Keep serving the last
+        # verified cache while it is received instead of replacing the UI and
+        # enforcement rules with the transfer's initial zero-progress count.
+        peek = getattr(ruleset_mod, "peek", None)
+        if callable(peek):
+            cached_counts = _ruleset_sync_counts(peek(cfg))
+            if cached_counts["public"]:
+                return cached_counts
         public = int(transfer.get("public_entries") or 0)
         return {"total": public, "public": public, "community": 0}
     client = dkg_client_cls(url=cfg.dkg_url, dkg_home=cfg.dkg_home)
@@ -181,11 +193,12 @@ def _sync_ruleset_once(load_config: Any, dkg_client_cls: Any, ruleset_mod: Any) 
     catchup_job_id = str(
         catchup.get("jobId") or catchup.get("job_id") or catchup.get("id") or ""
     )
+    catchup_known = bool(catchup_job_id or catchup_state)
     with _join_lock:
-        if catchup_job_id:
+        if catchup_known:
             _subscription_attempts.add(cfg.context_graph_id)
         subscribe = (
-            not catchup_job_id
+            not catchup_known
             and cfg.context_graph_id not in _subscription_attempts
         )
         if subscribe:
@@ -225,6 +238,20 @@ def _sync_ruleset_once(load_config: Any, dkg_client_cls: Any, ruleset_mod: Any) 
         peek = getattr(ruleset_mod, "peek", None)
         rs = peek(cfg) if callable(peek) else ruleset_mod.refresh(cfg, client)
         return _ruleset_sync_counts(rs)
+    peek = getattr(ruleset_mod, "peek", None)
+    if callable(peek):
+        cached = peek(cfg)
+        counts = _ruleset_sync_counts(cached)
+        synced_at = float(getattr(cached, "synced_at", 0.0) or 0.0)
+        configured_interval = float(getattr(cfg, "sync_interval", 0.0) or 0.0)
+        refresh_interval = max(_RULESET_HEAVY_REFRESH_MIN_SEC, configured_interval)
+        if counts["public"] and time.time() - synced_at < refresh_interval:
+            with _join_lock:
+                _connection_states[cfg.context_graph_id] = {
+                    "state": "subscribed",
+                    "updated_at": time.time(),
+                }
+            return counts
     rs = ruleset_mod.refresh(cfg, client)
     counts = _ruleset_sync_counts(rs)
     if counts["public"]:

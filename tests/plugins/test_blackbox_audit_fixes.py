@@ -121,6 +121,33 @@ def test_empty_initial_sync_retries_cache_without_network_orchestration(monkeypa
     assert rs.synced_at == 730.0
 
 
+def test_empty_refresh_keeps_last_verified_rules(monkeypatch):
+    writes = []
+    prior = Ruleset(
+        dependency={
+            "npm:last-good@1.0": {
+                "identifier": "dep:npm:last-good@1.0",
+                "source": "public",
+            }
+        },
+        synced_at=100.0,
+    )
+    monkeypatch.setattr(ruleset_mod, "_write_cache", writes.append)
+    monkeypatch.setattr(ruleset_mod, "_memory_cache", prior)
+    monkeypatch.setattr(ruleset_mod.time, "time", lambda: 1000.0)
+
+    class _Empty:
+        def query(self, sparql, cg_id, view=None, on_error=None):
+            return []
+
+    rs = ruleset_mod.refresh(config_mod.BlackboxConfig(), _Empty())
+
+    assert rs is prior
+    assert rs.synced_at == 1000.0
+    assert len(rs.dependency) == 1
+    assert writes == [prior]
+
+
 def test_missing_community_does_not_restart_dkg_sync(monkeypatch):
     monkeypatch.setattr(ruleset_mod, "_write_cache", lambda rs: None)
     monkeypatch.setattr(ruleset_mod, "_memory_cache", None)
