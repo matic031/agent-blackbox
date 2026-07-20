@@ -165,31 +165,16 @@ def test_catchup_status_encodes_context_graph_id(monkeypatch):
     )
 
 
-def test_connect_peer_prefers_direct_multiaddr(monkeypatch):
-    cap = _capture(monkeypatch)
-    client = dkg_client.DkgClient(url="http://node", token="tok")
-
-    result = client.connect_peer(
-        "publisher-peer",
-        multiaddr="/ip4/203.0.113.4/tcp/37307/p2p/publisher-peer",
-    )
-
-    assert result == {"ok": True}
-    assert cap["method"] == "POST"
-    assert cap["url"] == "http://node/api/connect"
-    assert json.loads(cap["body"]) == {
-        "multiaddr": "/ip4/203.0.113.4/tcp/37307/p2p/publisher-peer"
-    }
-    assert cap["timeout"] == 15.0
-
-
-def test_connect_peer_can_use_dht_resolution(monkeypatch):
+def test_connect_peer_uses_dkg_peer_resolution(monkeypatch):
     cap = _capture(monkeypatch)
     client = dkg_client.DkgClient(url="http://node", token="tok")
 
     client.connect_peer("publisher-peer")
 
+    assert cap["method"] == "POST"
+    assert cap["url"] == "http://node/api/connect"
     assert json.loads(cap["body"]) == {"peerId": "publisher-peer"}
+    assert cap["timeout"] == 15.0
 
 
 def test_authoritative_catchup_pins_publisher_for_durable_vm_recovery(monkeypatch):

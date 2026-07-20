@@ -201,19 +201,11 @@ class DkgClient:
 
     # -- context graph -----------------------------------------------------
 
-    def connect_peer(
-        self,
-        peer_id: str,
-        *,
-        multiaddr: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        """Establish one explicit route to a graph source peer.
-
-        A direct multiaddr is preferred for cold-start reliability. With no
-        address, DKG resolves the peer through its own Kademlia routing table.
-        """
-        body = {"multiaddr": multiaddr} if multiaddr else {"peerId": peer_id}
-        return self._request("POST", "/api/connect", body, timeout=15.0)
+    def connect_peer(self, peer_id: str) -> Dict[str, Any]:
+        """Ask DKG to resolve and connect to one graph source peer."""
+        return self._request(
+            "POST", "/api/connect", {"peerId": peer_id}, timeout=15.0
+        )
 
     def subscribe_context_graph(self, cg_id: str, *, include_shared_memory: bool = False) -> Dict[str, Any]:
         """Subscribe the node to a context graph and catch up its durable VM.

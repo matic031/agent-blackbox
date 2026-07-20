@@ -524,7 +524,6 @@ def _cmd_sync_impl(args: argparse.Namespace) -> int:
             print(status)
 
     rs = ruleset.Ruleset()
-    counts = rs.counts()
     public_count = 0
     community_count = 0
     attempt = 0
@@ -551,7 +550,6 @@ def _cmd_sync_impl(args: argparse.Namespace) -> int:
             print(f"  {public_count:,} verified threats ready")
 
     while True:
-        refreshed_this_iteration = False
         now = time.monotonic()
         if (
             private_graph
@@ -592,7 +590,6 @@ def _cmd_sync_impl(args: argparse.Namespace) -> int:
                 print("  Required verifiable graph sync could not start.")
                 return 2
             rs = ruleset.refresh(cfg, client)
-            refreshed_this_iteration = True
             counts = rs.counts()
             public_count = max(public_count, _ruleset_graph_count(rs, "public"))
             community_count = _ruleset_graph_count(rs, "community")
@@ -604,6 +601,16 @@ def _cmd_sync_impl(args: argparse.Namespace) -> int:
                 # launching the expensive generic all-peer catch-up as well.
                 subscribed = True
                 fresh_catchup_seen = True
+                authoritative_complete = (
+                    authoritative_target > 0 and public_count >= authoritative_target
+                )
+                if authoritative_complete:
+                    sync_complete = True
+                    break
+                # The verified store can become queryable just after the
+                # source request returns. Re-enter the normal polling loop
+                # instead of refreshing the full ruleset twice immediately.
+                continue
 
         may_probe_private = private_graph and not getattr(args, "wait", False)
         if not subscribed and (admitted or not private_graph or may_probe_private):
@@ -665,9 +672,8 @@ def _cmd_sync_impl(args: argparse.Namespace) -> int:
                 # cannot expose useful partial rules and competes with the
                 # Blazegraph write that must finish first. Poll only the cheap
                 # job status until the transfer reaches a terminal state.
-                if not refreshed_this_iteration:
-                    rs = ruleset.peek(cfg)
-            elif not refreshed_this_iteration:
+                rs = ruleset.peek(cfg)
+            else:
                 rs = ruleset.refresh(cfg, client)
         counts = rs.counts()
         public_count = _ruleset_graph_count(rs, "public")
@@ -901,23 +907,14 @@ def _catchup_authoritative_vm(
     print("Syncing the complete verifiable VM snapshot...")
     backpressure_notice_printed = False
     backpressure_retries = 0
-    max_backpressure_retries = 3
     heartbeat_seconds = 10.0
 
     connect = getattr(client, "connect_peer", None)
     if callable(connect):
-        connect_errors = []
-        routes = (None,)
-        if graph_peer_id == constants.DEFAULT_GRAPH_PEER_ID:
-            routes += constants.DEFAULT_GRAPH_RELAY_MULTIADDRS
-        for route in routes:
-            try:
-                connect(graph_peer_id, multiaddr=route)
-                break
-            except DkgError as exc:
-                connect_errors.append(str(exc))
-        else:
-            error = f"verifiable graph source is unreachable: {connect_errors[-1]}"
+        try:
+            connect(graph_peer_id)
+        except DkgError as exc:
+            error = f"verifiable graph source is unreachable: {exc}"
             sync_state.write(
                 "failed",
                 context_graph_id=context_graph_id,
@@ -1032,7 +1029,7 @@ def _catchup_authoritative_vm(
             )
             if (
                 retryable
-                and backpressure_retries < max_backpressure_retries
+                and backpressure_retries < 3
                 and deadline - time.monotonic() > 4
             ):
                 backpressure_retries += 1
@@ -1045,12 +1042,7 @@ def _catchup_authoritative_vm(
                 if not backpressure_notice_printed:
                     print("DKG graph sync is pausing briefly before a safe resume...")
                     backpressure_notice_printed = True
-                time.sleep(
-                    min(
-                        2.0 * (2 ** (backpressure_retries - 1)),
-                        max(0.2, deadline - time.monotonic()),
-                    )
-                )
+                time.sleep(min(2.0, max(0.2, deadline - time.monotonic())))
                 continue
             sync_state.write(
                 "failed",

@@ -405,8 +405,8 @@ def test_required_release_sync_stops_after_one_failed_publisher_connect(
             events.append(("status", cg_id))
             return {}
 
-        def connect_peer(self, peer_id, *, multiaddr=None):
-            events.append(("connect", peer_id, multiaddr))
+        def connect_peer(self, peer_id):
+            events.append(("connect", peer_id))
             raise cli_mod.DkgError("graph route unavailable")
 
         def catchup_from_peer(self, *_args, **_kwargs):
@@ -428,7 +428,7 @@ def test_required_release_sync_stops_after_one_failed_publisher_connect(
 
     args = argparse.Namespace(wait=True, timeout=3_600, require_rules=True)
     assert cli_mod._cmd_sync(args) == 2
-    assert len([event for event in events if event[0] == "connect"]) == 4
+    assert len([event for event in events if event[0] == "connect"]) == 1
     assert "Required verifiable graph sync could not start" in capsys.readouterr().out
 
 
@@ -509,7 +509,7 @@ def test_blackbox_sync_does_not_accept_deferred_catchup_as_complete(
     assert curator_calls[1][0] == constants.DEFAULT_CONTEXT_GRAPH_ID
     # The release graph now takes the configured curator-first path and does
     # not wait for a generic all-peer catch-up to become terminal.
-    assert len(status_calls) >= 2
+    assert len(status_calls) == 1
     assert states[-1][0] == "done"
     assert any(
         status == "running"
@@ -604,44 +604,6 @@ def test_authoritative_recovery_waits_for_dkg_backpressure(monkeypatch, capsys):
     )
     assert not any(status == "failed" for status, _details in states)
     assert "pausing briefly before a safe resume" in capsys.readouterr().out
-
-
-def test_authoritative_recovery_connects_once_and_stops_when_peer_is_unreachable(
-    monkeypatch, capsys
-):
-    events = []
-    states = []
-
-    class FakeClient:
-        def connect_peer(self, peer_id, *, multiaddr=None):
-            events.append(("connect", peer_id, multiaddr))
-            raise cli_mod.DkgError("PEER_NOT_FOUND")
-
-        def catchup_from_peer(self, *_args, **_kwargs):
-            events.append(("catchup",))
-            raise AssertionError("catch-up must not start without a peer route")
-
-    monkeypatch.setattr(
-        cli_mod.sync_state,
-        "write",
-        lambda status, **details: states.append((status, details)) or details,
-    )
-
-    assert not cli_mod._catchup_authoritative_vm(
-        FakeClient(),
-        constants.DEFAULT_CONTEXT_GRAPH_ID,
-        constants.DEFAULT_GRAPH_PEER_ID,
-        cli_mod.time.monotonic() + 60,
-    )
-    assert events == [
-        ("connect", constants.DEFAULT_GRAPH_PEER_ID, None),
-        *[
-            ("connect", constants.DEFAULT_GRAPH_PEER_ID, route)
-            for route in constants.DEFAULT_GRAPH_RELAY_MULTIADDRS
-        ],
-    ]
-    assert states[-1][0] == "failed"
-    assert "verifiable graph source is unreachable" in capsys.readouterr().out
 
 
 def test_authoritative_recovery_does_not_loop_when_dkg_attempts_no_peer(monkeypatch):
