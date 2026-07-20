@@ -595,7 +595,7 @@ def test_dashboard_failed_catchup_with_stale_public_rows_refreshes_join_before_r
     assert server._connection_states[Cfg.context_graph_id]["state"] == "syncing"
 
 
-def test_dashboard_zero_graph_count_spins_only_for_active_catchup():
+def test_dashboard_keeps_verified_snapshot_quiet_during_refresh():
     html = (Path(server.__file__).parent / "static" / "index.html").read_text(
         encoding="utf-8"
     )
@@ -604,9 +604,12 @@ def test_dashboard_zero_graph_count_spins_only_for_active_catchup():
     assert 'p.state === "syncing"' in html
     assert "return !!tier && isTierPending(tier);" in html
     assert "return !(lastStatus && lastStatus.node_reachable === false);" not in html
-    assert '"Fetching a newer " + label + " snapshot"' in html
-    assert 'fmtElapsedSeconds(elapsed) + " elapsed"' in html
+    assert "Fetching a newer" not in html
     assert "current verified snapshot" not in html
+    assert 'var hasVerifiedSnapshot = graphTotalForTier("public") > 0;' in html
+    assert 'activeTier === "public" && !hasVerifiedSnapshot' in html
+    assert 't === "public" && isTierPending(t)' in html
+    assert "syncing && loaded <= 0 && total <= 0" in html
     assert "' · ' + num(loaded) + ' available'" not in html
 
 

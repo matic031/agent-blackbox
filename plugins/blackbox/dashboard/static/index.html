@@ -3181,9 +3181,8 @@
     var tier = countTier(key);
     return !!tier && isTierPending(tier);
   }
-  // Render a count element as either the loader or the number. fmt adds
-  // thousands separators (stat cards); tab chips stay compact/raw. Leaves an
-  // existing loader in place so the poll doesn't restart its spin animation.
+  // Render a count element as either the loader or the number. Once a verified
+  // snapshot exists, keep showing its count while a newer snapshot downloads.
   function showsLoader(el) {
     return !!el.querySelector(".bb-loader");
   }
@@ -3193,12 +3192,8 @@
     if (countSyncing(key, value)) {
       var positive = value != null && Number(value) > 0;
       var shown = positive ? (fmt ? num(value) : String(value)) : "";
-      var prior = el.querySelector(".sync-count-value");
-      if (!showsLoader(el) || (prior && prior.textContent !== shown) || (positive && !prior)) {
-        el.innerHTML = positive
-          ? '<span class="sync-count-value">' + esc(shown) + '</span>' + LOADER_HTML
-          : LOADER_HTML;
-      }
+      if (positive) el.textContent = shown;
+      else if (!showsLoader(el)) el.innerHTML = LOADER_HTML;
     } else {
       el.textContent = fmt ? num(value) : (value == null ? 0 : value);
     }
@@ -3247,7 +3242,8 @@
     var progress = lastStatus && lastStatus.sync_progress;
     var activity = progress && progress.activity;
     var status = String(activity && activity.status || "idle");
-    var visible = activeTier === "public" && (
+    var hasVerifiedSnapshot = graphTotalForTier("public") > 0;
+    var visible = activeTier === "public" && !hasVerifiedSnapshot && (
       status === "running" || status === "waiting" ||
       status === "failed" || status === "offline"
     );
@@ -3284,13 +3280,6 @@
     renderSyncProgress();
     if (activeTier === "community") {
       note.textContent = TIER_NOTE.community;
-      return;
-    }
-    if (activeTier !== "local" && isTierPending(activeTier)) {
-      var elapsed = catchupElapsed();
-      var label = activeTier === "public" ? "verifiable VM" : "community SWM";
-      note.textContent = "Fetching a newer " + label + " snapshot" +
-        (elapsed == null ? "" : " · " + fmtElapsedSeconds(elapsed) + " elapsed");
       return;
     }
     note.textContent = TIER_NOTE[activeTier] || "";
@@ -4948,7 +4937,7 @@
         } else if (query) {
           count.innerHTML = '<strong>' + num(meta.shownLeaves) + ' visible</strong> · ' +
             num(viewTotal) + ' match' + (viewTotal === 1 ? '' : 'es');
-        } else if (syncing) {
+        } else if (syncing && loaded <= 0 && total <= 0) {
           count.innerHTML = LOADER_HTML + '<strong>' + esc(tierProgress(activeTier).label || "Syncing") +
             (catchupElapsed() == null ? '' : ' · ' + fmtElapsedSeconds(catchupElapsed()) + ' elapsed') + '</strong>' +
             (loaded ? ' · ' + num(loaded) + ' cached' : '');
@@ -5183,7 +5172,14 @@
         else lel.textContent = localCache.threatCount || 0;
         return;
       }
-      if (t !== "community") setCount("count-" + t, graphTotalForTier(t), "tab:" + t, false);
+      if (t !== "community") {
+        var tabCount = $("count-" + t);
+        if (t === "public" && isTierPending(t)) {
+          if (tabCount && !showsLoader(tabCount)) tabCount.innerHTML = LOADER_HTML;
+        } else {
+          setCount("count-" + t, graphTotalForTier(t), "tab:" + t, false);
+        }
+      }
     });
 
     var communityLaunch = $("community-launch");
