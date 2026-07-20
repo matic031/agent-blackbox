@@ -217,6 +217,12 @@ def _sync_ruleset_once(load_config: Any, dkg_client_cls: Any, ruleset_mod: Any) 
         if callable(peek):
             cached_counts = _ruleset_sync_counts(peek(cfg))
             if cached_counts["public"]:
+                verified = max(
+                    cached_counts["public"],
+                    int(transfer.get("public_entries") or 0),
+                )
+                cached_counts["total"] += verified - cached_counts["public"]
+                cached_counts["public"] = verified
                 return cached_counts
         public = int(transfer.get("public_entries") or 0)
         return {"total": public, "public": public, "community": 0}
@@ -416,6 +422,27 @@ def _sync_activity(
         or catchup_result.get("error")
         or ""
     )
+
+    # The source-pinned transfer is the authoritative result for this graph.
+    # A generic catch-up job may still retain an older failure after that
+    # transfer completed successfully; do not turn verified local data into a
+    # false dashboard error. A genuinely new queued/running job remains
+    # visible below.
+    if transfer_status == "done" and catchup_status not in {"queued", "running"}:
+        progress.update(
+            status="ready",
+            phase=phase or "complete",
+            label="Threat graphs are ready",
+            detail=f"{public:,} public and {community:,} community threats are queryable.",
+            started_at=transfer.get("started_at"),
+            updated_at=transfer.get("updated_at") or connection.get("updated_at"),
+            current=public,
+            expected=int(transfer.get("expected_public_entries") or public or 0),
+            percent=100.0,
+            indeterminate=False,
+        )
+        return progress
+
     if (
         transfer_status == "failed"
         or catchup_status in {"failed", "cancelled", "denied"}
@@ -437,27 +464,6 @@ def _sync_activity(
             phase="node-unreachable",
             label="DKG node is offline",
             detail="Graph sync will resume when this Blackbox node is reachable.",
-        )
-        return progress
-
-    # A completed curator-pinned transfer is the authoritative result for this
-    # graph.  The dashboard process may still hold a stale ``syncing``
-    # connection hint, and older DKG releases can report the generic catch-up
-    # probe as ``unreachable`` after the snapshot request itself succeeded.
-    # Neither should turn a verified zero-entry SWM into an endless spinner.
-    # A genuinely new queued/running catch-up remains visible below.
-    if transfer_status == "done" and catchup_status not in {"queued", "running"}:
-        progress.update(
-            status="ready",
-            phase=phase or "complete",
-            label="Threat graphs are ready",
-            detail=f"{public:,} public and {community:,} community threats are queryable.",
-            started_at=transfer.get("started_at"),
-            updated_at=transfer.get("updated_at") or connection.get("updated_at"),
-            current=public,
-            expected=int(transfer.get("expected_public_entries") or public or 0),
-            percent=100.0,
-            indeterminate=False,
         )
         return progress
 

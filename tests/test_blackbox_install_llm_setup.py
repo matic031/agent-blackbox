@@ -294,7 +294,7 @@ def test_unix_installer_runs_one_controlled_sync_before_dashboard() -> None:
     ) in sync_body
     assert 'BLACKBOX_INSTALL_INCOMPLETE=true' in sync_body
     assert 'BLACKBOX_THREAT_GRAPH_INCOMPLETE=true' in sync_body
-    assert "one controlled publisher catch-up" in sync_body
+    assert "one controlled graph catch-up" in sync_body
 
 
 def test_installers_enable_blackbox_noninteractively() -> None:
@@ -1281,6 +1281,7 @@ def test_installers_use_native_dkg_membership_without_sync_overrides() -> None:
     assert 'BLACKBOX_DKG_SYNC_GLOBAL_QUEUE_LIMIT="0"' in unix
     assert 'BLACKBOX_DKG_DURABLE_SYNC_ENABLED="${BLACKBOX_DKG_DURABLE_SYNC_ENABLED:-0}"' in unix
     assert 'BLACKBOX_DKG_CATCHUP_MAX_CONCURRENT_PEERS="1"' in unix
+    assert "PYTHONUNBUFFERED=1" in unix
     assert 'BLACKBOX_DKG_STORE_QUEUE_WAIT_TIMEOUT_MS="300000"' in unix
     assert '$DkgSyncGlobalMaxInflight = "1"' in windows
     assert '$DkgSyncGlobalQueueLimit = "0"' in windows

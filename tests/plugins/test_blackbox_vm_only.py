@@ -185,7 +185,7 @@ def test_dashboard_does_not_query_rules_while_durable_catchup_runs(monkeypatch):
     }
 
 
-def test_dashboard_keeps_last_verified_rules_while_replacement_snapshot_runs(monkeypatch):
+def test_dashboard_keeps_old_rules_and_advances_verified_count_during_sync(monkeypatch):
     class Cfg:
         dkg_url = "http://127.0.0.1:9320"
         dkg_home = "/tmp/blackbox"
@@ -219,12 +219,12 @@ def test_dashboard_keeps_last_verified_rules_while_replacement_snapshot_runs(mon
     monkeypatch.setattr(
         server.sync_state,
         "read",
-        lambda: {"status": "running", "public_entries": 0},
+        lambda: {"status": "running", "public_entries": 10},
     )
 
     assert server._sync_ruleset_once(lambda: Cfg(), Client, Rules) == {
-        "total": 1,
-        "public": 1,
+        "total": 10,
+        "public": 10,
         "community": 0,
     }
 

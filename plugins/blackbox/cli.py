@@ -15,7 +15,7 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Callable, Dict, Iterable, List, Optional
 
 from . import attach, audit, constants, llm, quads, ruleset, settings, sync_state
 from .config import BlackboxConfig, load_blackbox_config
@@ -524,12 +524,34 @@ def _cmd_sync_impl(args: argparse.Namespace) -> int:
             print(status)
 
     rs = ruleset.Ruleset()
+    counts = rs.counts()
     public_count = 0
     community_count = 0
     attempt = 0
     last_subscribe_error = ""
     last_catchup: Dict[str, Any] = {}
+
+    def _record_verified_pass(_inserted_triples: int) -> None:
+        """Publish only locally committed threat counts between DKG passes."""
+        nonlocal public_count, authoritative_target
+        previous_public = public_count
+        count_threats = getattr(client, "threat_count", None)
+        if callable(count_threats):
+            public_count = max(public_count, int(count_threats(cfg.context_graph_id) or 0))
+        authoritative_target = max(authoritative_target, public_count)
+        sync_state.write(
+            "running",
+            context_graph_id=cfg.context_graph_id,
+            graph_peer_id=cfg.graph_peer_id,
+            phase="recovering-verifiable-memory",
+            public_entries=public_count,
+            community_entries=community_count,
+        )
+        if public_count != previous_public:
+            print(f"  {public_count:,} verified threats ready")
+
     while True:
+        refreshed_this_iteration = False
         now = time.monotonic()
         if (
             private_graph
@@ -547,9 +569,9 @@ def _cmd_sync_impl(args: argparse.Namespace) -> int:
             if status and attempt % 10 == 0:
                 print(status)
 
-        # The release graph has one configured authoritative publisher. A
-        # fresh node must ask it first instead of downloading unrelated durable
-        # graphs from every generic peer and only falling back minutes later.
+        # The release graph has one known complete source peer. A fresh node
+        # asks it first instead of downloading unrelated durable graphs from
+        # every generic peer and only falling back minutes later.
         # If the direct path fails, the ordinary subscription/catch-up path
         # below remains available for compatibility and recovery.
         if (
@@ -564,12 +586,17 @@ def _cmd_sync_impl(args: argparse.Namespace) -> int:
                 cfg.context_graph_id,
                 cfg.graph_peer_id,
                 deadline,
+                on_progress=_record_verified_pass,
             )
+            if not authoritative_recovered and getattr(args, "require_rules", False):
+                print("  Required verifiable graph sync could not start.")
+                return 2
             rs = ruleset.refresh(cfg, client)
+            refreshed_this_iteration = True
             counts = rs.counts()
-            public_count = _ruleset_graph_count(rs, "public")
+            public_count = max(public_count, _ruleset_graph_count(rs, "public"))
             community_count = _ruleset_graph_count(rs, "community")
-            authoritative_target = public_count
+            authoritative_target = max(authoritative_target, public_count)
             if authoritative_recovered:
                 # The pinned recovery itself is the subscription-equivalent
                 # network step for the release graph. Keep polling the local VM
@@ -638,8 +665,9 @@ def _cmd_sync_impl(args: argparse.Namespace) -> int:
                 # cannot expose useful partial rules and competes with the
                 # Blazegraph write that must finish first. Poll only the cheap
                 # job status until the transfer reaches a terminal state.
-                rs = ruleset.peek(cfg)
-            else:
+                if not refreshed_this_iteration:
+                    rs = ruleset.peek(cfg)
+            elif not refreshed_this_iteration:
                 rs = ruleset.refresh(cfg, client)
         counts = rs.counts()
         public_count = _ruleset_graph_count(rs, "public")
@@ -674,7 +702,7 @@ def _cmd_sync_impl(args: argparse.Namespace) -> int:
                 logger.debug("blackbox: catch-up restart failed: %s", exc)
 
         # A terminal generic catch-up is not success by itself.  A completed,
-        # idempotent publisher-pinned recovery is: it has independently
+        # idempotent source-pinned recovery is: it has independently
         # verified the durable VM snapshot and may satisfy this gate on the
         # following loop iteration.
         authoritative_fallback_ready = authoritative_recovered
@@ -695,9 +723,9 @@ def _cmd_sync_impl(args: argparse.Namespace) -> int:
         ) and fresh_catchup_complete
         # A clean local store has no public rows yet.  Waiting for
         # ``base_sync_complete`` before contacting the configured release
-        # publisher deadlocks that exact first-sync case when generic peers do
+        # source deadlocks that exact first-sync case when generic peers do
         # not hold the graph.  Once the release graph is subscribed, pin the
-        # authoritative publisher immediately; the recovery helper already
+        # authoritative source immediately; the recovery helper already
         # waits through DKG backpressure and verifies completion atomically.
         authoritative_recovery_ready = base_sync_complete or (
             release_graph
@@ -718,12 +746,13 @@ def _cmd_sync_impl(args: argparse.Namespace) -> int:
                 cfg.context_graph_id,
                 cfg.graph_peer_id,
                 deadline,
+                on_progress=_record_verified_pass,
             )
             rs = ruleset.refresh(cfg, client)
             counts = rs.counts()
-            public_count = _ruleset_graph_count(rs, "public")
+            public_count = max(public_count, _ruleset_graph_count(rs, "public"))
             community_count = _ruleset_graph_count(rs, "community")
-            authoritative_target = public_count
+            authoritative_target = max(authoritative_target, public_count)
         if authoritative_recovered and public_count > authoritative_target:
             authoritative_target = public_count
         if authoritative_recovered:
@@ -856,8 +885,10 @@ def _catchup_authoritative_vm(
     context_graph_id: str,
     graph_peer_id: str,
     deadline: float,
+    *,
+    on_progress: Optional[Callable[[int], None]] = None,
 ) -> bool:
-    """Recover and verify the publisher's durable VM snapshot."""
+    """Recover and verify the public graph's durable VM snapshot."""
     catchup = getattr(client, "catchup_from_peer", None)
     if not callable(catchup) or not graph_peer_id:
         return False
@@ -867,10 +898,48 @@ def _catchup_authoritative_vm(
         graph_peer_id=graph_peer_id,
         phase="recovering-verifiable-memory",
     )
-    print("Recovering the complete publisher VM snapshot...")
+    print("Syncing the complete verifiable VM snapshot...")
     backpressure_notice_printed = False
+    backpressure_retries = 0
+    max_backpressure_retries = 3
     heartbeat_seconds = 10.0
-    while True:
+
+    connect = getattr(client, "connect_peer", None)
+    if callable(connect):
+        connect_errors = []
+        routes = (None,)
+        if graph_peer_id == constants.DEFAULT_GRAPH_PEER_ID:
+            routes += constants.DEFAULT_GRAPH_RELAY_MULTIADDRS
+        for route in routes:
+            try:
+                connect(graph_peer_id, multiaddr=route)
+                break
+            except DkgError as exc:
+                connect_errors.append(str(exc))
+        else:
+            error = f"verifiable graph source is unreachable: {connect_errors[-1]}"
+            sync_state.write(
+                "failed",
+                context_graph_id=context_graph_id,
+                graph_peer_id=graph_peer_id,
+                error=error,
+            )
+            print(f"  {error}")
+            return False
+
+    # A fresh DKG edge does not yet know the cleartext graph id's numeric
+    # on-chain binding. The small system ontology graph carries that standard
+    # DKG metadata. Fetch it from the same source first so the VM verifier can
+    # authenticate each graph-scoped assertion as soon as it arrives.
+    pending_context_graphs = [context_graph_id]
+    if context_graph_id == constants.DEFAULT_CONTEXT_GRAPH_ID:
+        pending_context_graphs.insert(
+            0,
+            constants.DEFAULT_GRAPH_METADATA_CONTEXT_GRAPH_ID,
+        )
+
+    while pending_context_graphs:
+        active_context_graph_id = pending_context_graphs[0]
         remaining = deadline - time.monotonic()
         if remaining <= 1:
             sync_state.write(
@@ -882,7 +951,10 @@ def _catchup_authoritative_vm(
             return False
         budget_ms = max(
             1_000,
-            min(300_000, int(max(1.0, remaining - 10) * 1_000)),
+            min(
+                constants.DEFAULT_GRAPH_SYNC_PASS_BUDGET_MS,
+                int(max(1.0, remaining - 10) * 1_000),
+            ),
         )
         try:
             # The DKG endpoint is synchronous and its final verification/store
@@ -895,7 +967,7 @@ def _catchup_authoritative_vm(
             def _recover() -> None:
                 try:
                     outcome.put(("ok", catchup(
-                        context_graph_id,
+                        active_context_graph_id,
                         graph_peer_id,
                         budget_ms=budget_ms,
                     )))
@@ -910,7 +982,7 @@ def _catchup_authoritative_vm(
             worker.start()
             request_deadline = min(
                 deadline,
-                time.monotonic() + (budget_ms / 1_000) + 10.0,
+                time.monotonic() + (budget_ms / 1_000) + 60.0,
             )
             heartbeat = 0
             while True:
@@ -920,7 +992,7 @@ def _catchup_authoritative_vm(
                 )
                 if wait_for <= 0:
                     raise DkgError(
-                        f"publisher VM recovery exceeded its "
+                        f"verifiable VM sync exceeded its "
                         f"{budget_ms / 1_000:.0f}s request budget"
                     )
                 try:
@@ -930,7 +1002,7 @@ def _catchup_authoritative_vm(
                     heartbeat += 1
                     elapsed = int(heartbeat * heartbeat_seconds)
                     print(
-                        f"  publisher VM recovery is still active "
+                        f"  verifiable VM sync is still active "
                         f"({elapsed}s elapsed)...",
                         flush=True,
                     )
@@ -954,9 +1026,16 @@ def _catchup_authoritative_vm(
                     "durable_catchup_all_peers_failed",
                     "store scheduler",
                     "queue wait timeout",
+                    "timed out",
+                    "exceeded its",
                 )
             )
-            if retryable and deadline - time.monotonic() > 4:
+            if (
+                retryable
+                and backpressure_retries < max_backpressure_retries
+                and deadline - time.monotonic() > 4
+            ):
+                backpressure_retries += 1
                 sync_state.write(
                     "running",
                     context_graph_id=context_graph_id,
@@ -964,9 +1043,14 @@ def _catchup_authoritative_vm(
                     phase="waiting-for-dkg-capacity",
                 )
                 if not backpressure_notice_printed:
-                    print("DKG VM sync queue is busy; waiting for safe recovery capacity...")
+                    print("DKG graph sync is pausing briefly before a safe resume...")
                     backpressure_notice_printed = True
-                time.sleep(min(10.0, max(0.2, deadline - time.monotonic())))
+                time.sleep(
+                    min(
+                        2.0 * (2 ** (backpressure_retries - 1)),
+                        max(0.2, deadline - time.monotonic()),
+                    )
+                )
                 continue
             sync_state.write(
                 "failed",
@@ -974,7 +1058,7 @@ def _catchup_authoritative_vm(
                 graph_peer_id=graph_peer_id,
                 error=error,
             )
-            logger.debug("blackbox: authoritative curator recovery failed: %s", exc)
+            logger.debug("blackbox: verifiable graph recovery failed: %s", exc)
             return False
         results = result.get("results") if isinstance(result, dict) else None
         peer_result = next(
@@ -1007,19 +1091,23 @@ def _catchup_authoritative_vm(
             error = str(
                 (result or {}).get("error")
                 or peer_error
-                or "publisher did not accept durable VM recovery"
+                or "graph source did not accept durable VM recovery"
             )
-            if deadline - time.monotonic() <= 4:
-                sync_state.write(
-                    "failed",
-                    context_graph_id=context_graph_id,
-                    graph_peer_id=graph_peer_id,
-                    error=error,
-                )
-                return False
-            time.sleep(min(3.0, max(0.2, deadline - time.monotonic())))
-            continue
+            sync_state.write(
+                "failed",
+                context_graph_id=context_graph_id,
+                graph_peer_id=graph_peer_id,
+                error=error,
+            )
+            logger.debug("blackbox: graph source did not attempt VM recovery: %s", error)
+            return False
         inserted = int(result.get("totalDurableInsertedTriples") or 0)
+        if active_context_graph_id != context_graph_id:
+            if inserted > 0:
+                print(f"  verified graph metadata ready ({inserted:,} triples)")
+            pending_context_graphs.pop(0)
+            backpressure_retries = 0
+            continue
         sync_state.write(
             "running",
             context_graph_id=context_graph_id,
@@ -1032,9 +1120,11 @@ def _catchup_authoritative_vm(
             inserted_durable_triples=inserted,
         )
         if inserted <= 0:
-            print("  publisher durable sync settled (no new triples)")
+            print("  verifiable VM sync settled (no new triples)")
             return True
-        print(f"  publisher durable sync advanced ({inserted:,} triples inserted)")
+        print(f"  verifiable VM sync advanced ({inserted:,} triples inserted)")
+        if on_progress is not None:
+            on_progress(inserted)
         # A transport interruption can yield a verified prefix and a successful
         # HTTP response. Repeat the pinned pass until the publisher reports a
         # clean idempotent zero-insert round; only then is recovery settled.

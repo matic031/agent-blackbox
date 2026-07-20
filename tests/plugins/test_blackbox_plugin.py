@@ -222,7 +222,7 @@ def test_blackbox_sync_waits_for_public_vm_when_community_arrives_first(monkeypa
 def test_blackbox_sync_recovers_curator_snapshot_then_waits_for_vm(monkeypatch, capsys):
     events = []
     public_counts = iter([6_875, 23_001])
-    durable_rounds = iter([244_842, 0])
+    durable_rounds = iter([10_134, 244_842, 0])
 
     class FakeClient:
         def __init__(self, url, **_kwargs):
@@ -301,15 +301,18 @@ def test_blackbox_sync_recovers_curator_snapshot_then_waits_for_vm(monkeypatch, 
     args = argparse.Namespace(wait=True, timeout=30, require_rules=True)
     assert cli_mod._cmd_sync(args) == 0
     curator_events = [event for event in events if event[0] == "curator"]
-    assert len(curator_events) == 2
+    assert len(curator_events) == 3
+    assert curator_events[0][1] == constants.DEFAULT_GRAPH_METADATA_CONTEXT_GRAPH_ID
+    assert curator_events[1][1] == constants.DEFAULT_CONTEXT_GRAPH_ID
     assert not any(event[0] == "subscribe" for event in events)
     assert states[-1][0] == "done"
     assert states[-1][1]["public_entries"] == 23_001
     assert states[-1][1]["expected_public_entries"] == 23_001
     out = capsys.readouterr().out
-    assert "Recovering the complete publisher VM snapshot" in out
-    assert "publisher durable sync advanced" in out
-    assert "publisher durable sync settled" in out
+    assert "Syncing the complete verifiable VM snapshot" in out
+    assert "23,001 verified threats ready" in out
+    assert "verifiable VM sync advanced" in out
+    assert "verifiable VM sync settled" in out
     assert "23,001 public VM" in out
 
 
@@ -317,7 +320,7 @@ def test_blackbox_sync_uses_authoritative_publisher_for_empty_local_store(
     monkeypatch, capsys
 ):
     events = []
-    public_counts = iter([0, 25_000, 25_000])
+    refresh_calls = []
 
     class FakeClient:
         def __init__(self, url, **_kwargs):
@@ -374,18 +377,59 @@ def test_blackbox_sync_uses_authoritative_publisher_for_empty_local_store(
     )
 
     def refresh(_cfg, _client):
-        try:
-            public = next(public_counts)
-        except StopIteration:
-            public = 25_000
-        return FakeRuleset(public)
+        refresh_calls.append(True)
+        return FakeRuleset(25_000)
 
     monkeypatch.setattr(cli_mod.ruleset, "refresh", refresh)
 
     args = argparse.Namespace(wait=True, timeout=30, require_rules=True)
     assert cli_mod._cmd_sync(args) == 0
-    assert len([event for event in events if event[0] == "curator"]) == 1
+    curator_events = [event for event in events if event[0] == "curator"]
+    assert len(curator_events) == 2
+    assert curator_events[0][1] == constants.DEFAULT_GRAPH_METADATA_CONTEXT_GRAPH_ID
+    assert curator_events[1][1] == constants.DEFAULT_CONTEXT_GRAPH_ID
+    assert len(refresh_calls) == 1
     assert "25,000 public VM" in capsys.readouterr().out
+
+
+def test_required_release_sync_stops_after_one_failed_publisher_connect(
+    monkeypatch, capsys
+):
+    events = []
+
+    class FakeClient:
+        def __init__(self, url, **_kwargs):
+            self.url = url
+
+        def catchup_status(self, cg_id):
+            events.append(("status", cg_id))
+            return {}
+
+        def connect_peer(self, peer_id, *, multiaddr=None):
+            events.append(("connect", peer_id, multiaddr))
+            raise cli_mod.DkgError("graph route unavailable")
+
+        def catchup_from_peer(self, *_args, **_kwargs):
+            raise AssertionError("catch-up must not run after connect failure")
+
+        def subscribe_context_graph(self, *_args, **_kwargs):
+            raise AssertionError("required sync must not start a generic fan-out")
+
+    monkeypatch.setattr(cli_mod, "DkgClient", FakeClient)
+    monkeypatch.setattr(
+        cli_mod,
+        "load_blackbox_config",
+        lambda: config_mod.BlackboxConfig(
+            context_graph_id=constants.DEFAULT_CONTEXT_GRAPH_ID,
+            dkg_url=constants.DEFAULT_DKG_URL,
+            graph_peer_id=constants.DEFAULT_GRAPH_PEER_ID,
+        ),
+    )
+
+    args = argparse.Namespace(wait=True, timeout=3_600, require_rules=True)
+    assert cli_mod._cmd_sync(args) == 2
+    assert len([event for event in events if event[0] == "connect"]) == 4
+    assert "Required verifiable graph sync could not start" in capsys.readouterr().out
 
 
 def test_blackbox_sync_does_not_accept_deferred_catchup_as_complete(
@@ -460,7 +504,9 @@ def test_blackbox_sync_does_not_accept_deferred_catchup_as_complete(
 
     args = argparse.Namespace(wait=True, timeout=30, require_rules=True)
     assert cli_mod._cmd_sync(args) == 0
-    assert len(curator_calls) == 1
+    assert len(curator_calls) == 2
+    assert curator_calls[0][0] == constants.DEFAULT_GRAPH_METADATA_CONTEXT_GRAPH_ID
+    assert curator_calls[1][0] == constants.DEFAULT_CONTEXT_GRAPH_ID
     # The release graph now takes the configured curator-first path and does
     # not wait for a generic all-peer catch-up to become terminal.
     assert len(status_calls) >= 2
@@ -557,7 +603,65 @@ def test_authoritative_recovery_waits_for_dkg_backpressure(monkeypatch, capsys):
         for status, details in states
     )
     assert not any(status == "failed" for status, _details in states)
-    assert "waiting for safe recovery capacity" in capsys.readouterr().out
+    assert "pausing briefly before a safe resume" in capsys.readouterr().out
+
+
+def test_authoritative_recovery_connects_once_and_stops_when_peer_is_unreachable(
+    monkeypatch, capsys
+):
+    events = []
+    states = []
+
+    class FakeClient:
+        def connect_peer(self, peer_id, *, multiaddr=None):
+            events.append(("connect", peer_id, multiaddr))
+            raise cli_mod.DkgError("PEER_NOT_FOUND")
+
+        def catchup_from_peer(self, *_args, **_kwargs):
+            events.append(("catchup",))
+            raise AssertionError("catch-up must not start without a peer route")
+
+    monkeypatch.setattr(
+        cli_mod.sync_state,
+        "write",
+        lambda status, **details: states.append((status, details)) or details,
+    )
+
+    assert not cli_mod._catchup_authoritative_vm(
+        FakeClient(),
+        constants.DEFAULT_CONTEXT_GRAPH_ID,
+        constants.DEFAULT_GRAPH_PEER_ID,
+        cli_mod.time.monotonic() + 60,
+    )
+    assert events == [
+        ("connect", constants.DEFAULT_GRAPH_PEER_ID, None),
+        *[
+            ("connect", constants.DEFAULT_GRAPH_PEER_ID, route)
+            for route in constants.DEFAULT_GRAPH_RELAY_MULTIADDRS
+        ],
+    ]
+    assert states[-1][0] == "failed"
+    assert "verifiable graph source is unreachable" in capsys.readouterr().out
+
+
+def test_authoritative_recovery_does_not_loop_when_dkg_attempts_no_peer(monkeypatch):
+    calls = []
+
+    class FakeClient:
+        def catchup_from_peer(self, _cg_id, _peer_id, *, budget_ms):
+            calls.append(budget_ms)
+            return {
+                "ok": False,
+                "includeDurable": True,
+                "includeSharedMemory": False,
+                "peersAttempted": 0,
+                "error": "publisher peer is unavailable",
+            }
+
+    assert not cli_mod._catchup_authoritative_vm(
+        FakeClient(), "owner/public", "publisher", cli_mod.time.monotonic() + 60
+    )
+    assert len(calls) == 1
 
 
 def test_authoritative_recovery_has_wall_clock_guard_and_heartbeats(
@@ -823,8 +927,10 @@ def test_blackbox_sync_uses_curator_when_generic_catchup_peer_fails(monkeypatch,
 
     args = argparse.Namespace(wait=True, timeout=30, require_rules=True)
     assert cli_mod._cmd_sync(args) == 0
-    assert len(events) == 1
-    assert "publisher durable sync settled" in capsys.readouterr().out
+    assert len(events) == 2
+    assert events[0][0] == constants.DEFAULT_GRAPH_METADATA_CONTEXT_GRAPH_ID
+    assert events[1][0] == constants.DEFAULT_CONTEXT_GRAPH_ID
+    assert "verifiable VM sync settled" in capsys.readouterr().out
 
 
 def test_blackbox_request_join_does_not_treat_delivery_as_approval():

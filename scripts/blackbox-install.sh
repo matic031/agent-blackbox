@@ -671,7 +671,7 @@ data["relayReservationCount"] = int(data.get("relayReservationCount") or 4)
 # large-sync slot and can starve the Blazegraph store queue on fresh installs.
 data["syncOnConnectEnabled"] = False
 # Disable automatic retry/fan-out. Blackbox initiates one explicit durable
-# publisher catch-up, so durable sync itself must remain available.
+# graph catch-up, so durable sync itself must remain available.
 data["syncReconcilerEnabled"] = False
 data["durableSyncEnabled"] = False
 data.pop("syncAgentsMeta", None)
@@ -1429,7 +1429,7 @@ sync_ruleset() {
     heading "Syncing the threat ruleset"
     mkdir -p "$HERMES_HOME/logs"
     BLACKBOX_SYNC_LOG="$HERMES_HOME/logs/blackbox-sync-install.log"
-    step "Temporarily enabling durable sync for one controlled publisher catch-up ..."
+    step "Temporarily enabling durable sync for one controlled graph catch-up ..."
     if ! restart_blackbox_dkg_for_sync_mode 1; then
         BLACKBOX_INSTALL_INCOMPLETE=true
         BLACKBOX_THREAT_GRAPH_INCOMPLETE=true
@@ -1438,9 +1438,9 @@ sync_ruleset() {
         return 0
     fi
 
-    step "Requesting the verified snapshot from the configured publisher ..."
+    step "Requesting the verified agent-blackbox-vm snapshot ..."
     step "Sync progress will stream below (also saved to $BLACKBOX_SYNC_LOG)."
-    if "$HERMES_BIN" blackbox sync --wait --timeout "$BLACKBOX_DKG_CATCHUP_TIMEOUT" --require-rules 2>&1 |
+    if PYTHONUNBUFFERED=1 "$HERMES_BIN" blackbox sync --wait --timeout "$BLACKBOX_DKG_CATCHUP_TIMEOUT" --require-rules 2>&1 |
         tee "$BLACKBOX_SYNC_LOG"; then
         ok "Ruleset synced — Blackbox is watching with the latest threats"
     else

@@ -364,6 +364,28 @@ def test_sync_activity_prefers_completed_authoritative_transfer_over_stale_conne
     }
 
 
+def test_sync_activity_prefers_completed_authoritative_transfer_over_stale_catchup_failure():
+    activity = server._sync_activity(
+        public=64_000,
+        community=0,
+        node_reachable=True,
+        catchup={"status": "failed", "error": "all reachable peers failed"},
+        connection={"state": "subscribed", "updated_at": 200.0},
+        transfer={
+            "status": "done",
+            "phase": "complete",
+            "started_at": 100.0,
+            "updated_at": 190.0,
+            "public_entries": 64_000,
+            "expected_public_entries": 64_000,
+        },
+    )
+
+    assert activity["status"] == "ready"
+    assert activity["current"] == 64_000
+    assert activity["percent"] == 100.0
+
+
 def test_sync_activity_keeps_new_catchup_visible_after_authoritative_transfer():
     activity = server._sync_activity(
         public=25_000,

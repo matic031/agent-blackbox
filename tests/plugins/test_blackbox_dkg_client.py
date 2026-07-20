@@ -165,6 +165,33 @@ def test_catchup_status_encodes_context_graph_id(monkeypatch):
     )
 
 
+def test_connect_peer_prefers_direct_multiaddr(monkeypatch):
+    cap = _capture(monkeypatch)
+    client = dkg_client.DkgClient(url="http://node", token="tok")
+
+    result = client.connect_peer(
+        "publisher-peer",
+        multiaddr="/ip4/203.0.113.4/tcp/37307/p2p/publisher-peer",
+    )
+
+    assert result == {"ok": True}
+    assert cap["method"] == "POST"
+    assert cap["url"] == "http://node/api/connect"
+    assert json.loads(cap["body"]) == {
+        "multiaddr": "/ip4/203.0.113.4/tcp/37307/p2p/publisher-peer"
+    }
+    assert cap["timeout"] == 15.0
+
+
+def test_connect_peer_can_use_dht_resolution(monkeypatch):
+    cap = _capture(monkeypatch)
+    client = dkg_client.DkgClient(url="http://node", token="tok")
+
+    client.connect_peer("publisher-peer")
+
+    assert json.loads(cap["body"]) == {"peerId": "publisher-peer"}
+
+
 def test_authoritative_catchup_pins_publisher_for_durable_vm_recovery(monkeypatch):
     cap = _capture(monkeypatch, '{"ok":true,"totalDurableInsertedTriples":23}')
     client = dkg_client.DkgClient(url="http://node", token="tok")
@@ -182,7 +209,7 @@ def test_authoritative_catchup_pins_publisher_for_durable_vm_recovery(monkeypatc
         "hostCatchupFallback": False,
         "perPeerDurableBudgetMs": 300_000,
     }
-    assert cap["timeout"] == 310
+    assert cap["timeout"] == 345
 
 
 def test_context_graph_has_agent_uses_local_participants_metadata(monkeypatch):
@@ -280,6 +307,22 @@ def test_query_normalizes_bindings(monkeypatch):
     rows = client.query("SELECT * WHERE {?s ?p ?o}", "cg")
     assert rows == [{"identifier": '"dep:npm:x@1"'}]
     assert json.loads(cap["body"])["view"] == "verifiable-memory"
+
+
+def test_threat_count_uses_one_verifiable_memory_query(monkeypatch):
+    cap = _capture(
+        monkeypatch,
+        '{"bindings":[{"n":"\\\"123\\\"^^<http://www.w3.org/2001/XMLSchema#integer>"}]}',
+    )
+    client = dkg_client.DkgClient(url="http://node", token="tok")
+
+    assert client.threat_count("owner/agent-blackbox-vm") == 123
+    body = json.loads(cap["body"])
+    assert body["contextGraphId"] == "owner/agent-blackbox-vm"
+    assert body["view"] == dkg_client.constants.VIEW_VERIFIABLE_MEMORY
+    assert "COUNT(DISTINCT ?threat)" in body["sparql"]
+    assert "VALUES ?type" in body["sparql"]
+    assert "UNION" not in body["sparql"]
 
 
 def test_working_memory_query_sends_agent_address(monkeypatch):

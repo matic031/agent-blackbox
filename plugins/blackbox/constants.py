@@ -99,8 +99,34 @@ LEGACY_CONTEXT_GRAPH_IDS = frozenset({
 DEFAULT_DKG_PORT = 9320
 DEFAULT_DKG_URL = f"http://127.0.0.1:{DEFAULT_DKG_PORT}"
 
-#: Publisher peer used for authoritative catch-up of the default threat graph.
+#: Source peer used for verified catch-up of the default threat graph.
 DEFAULT_GRAPH_PEER_ID = "12D3KooWBJskzr2unXQG9mR3LRZFUJoxWr1PN6hTbyWyKndHXjZM"
+
+#: DKG system graph that carries the cleartext graph id -> on-chain id binding.
+#: A fresh client fetches this small graph before the large VM so graph-scoped
+#: assertions can be verified immediately instead of being downloaded and then
+#: rejected as an unresolved context graph.
+DEFAULT_GRAPH_METADATA_CONTEXT_GRAPH_ID = "ontology"
+
+#: Keep one durable recovery request short enough for verified dashboard counts
+#: to advance between passes. DKG checkpoints complete exact graphs and resumes
+#: the next request from the safe boundary, so this does not weaken verification.
+DEFAULT_GRAPH_SYNC_PASS_BUDGET_MS = 30_000
+
+#: Stable public relay paths for cold-start discovery of the default graph
+#: source. These use DKG's bundled Base mainnet relays; clients try them only
+#: when peer-id/DHT resolution has not learned a route yet.
+DEFAULT_GRAPH_RELAY_MULTIADDRS = (
+    "/ip4/168.119.127.54/tcp/9090/p2p/"
+    "12D3KooWMasqzRrim48ZJM64UyTfHufDTmSG3n3jqwsS5phz8m91/p2p-circuit/p2p/"
+    + DEFAULT_GRAPH_PEER_ID,
+    "/ip4/178.156.237.133/tcp/9090/p2p/"
+    "12D3KooWDgTunUpkGaE7dYCaDP1CCBT6Dm2HPMXSZhJn2KXYLH15/p2p-circuit/p2p/"
+    + DEFAULT_GRAPH_PEER_ID,
+    "/ip4/178.105.211.42/tcp/9090/p2p/"
+    "12D3KooWCodgXHMwybaEe93rbKgWMfGXQvUb6cpT3VCrjCbbnyEu/p2p-circuit/p2p/"
+    + DEFAULT_GRAPH_PEER_ID,
+)
 
 #: Previous bootstrap peers transparently replaced during config loading.
 LEGACY_GRAPH_PEER_IDS = frozenset({
