@@ -1126,26 +1126,11 @@ function Install-Dkg {
     }
 }
 
-function Restart-BlackboxDkgForSyncMode {
-    param([string]$DurableMode)
-    $script:DkgDurableSyncEnabled = $DurableMode
-    try { Invoke-BlackboxDkg stop 2>$null | Out-Null } catch { }
-    Invoke-BlackboxDkg start
-    return (Wait-BlackboxDkgRuntime)
-}
-
 # Pull the verified ruleset now so detection is live immediately after install.
 function Sync-Ruleset {
     if (-not $script:DkgReady) { return }
     Write-Heading "Syncing the threat ruleset"
-    Write-Step "Temporarily enabling durable sync for one controlled graph catch-up ..."
-    if (-not (Restart-BlackboxDkgForSyncMode -DurableMode "1")) {
-        $script:InstallIncomplete = $true
-        Write-Err2 "Could not start the controlled DKG sync window."
-        Restart-BlackboxDkgForSyncMode -DurableMode $DkgSteadyDurableSyncEnabled | Out-Null
-        return
-    }
-    Write-Step "Pulling verified threats from the graph (blackbox sync --wait) ..."
+    Write-Step "Requesting one controlled verified graph catch-up ..."
     $out = & $script:HermesBin blackbox sync --wait --timeout $CatchupTimeout --require-rules 2>&1
     $code = $LASTEXITCODE
     if ($out) { $out | ForEach-Object { Write-Host $_ } }
@@ -1157,11 +1142,7 @@ function Sync-Ruleset {
         Write-Step "Blackbox is installed, but setup is incomplete until DKG returns a non-empty ruleset."
         Write-Step "Retry after fixing DKG/catch-up with: blackbox sync --wait --require-rules"
     }
-    Write-Step "Returning DKG to stabilized steady-state settings ..."
-    if (-not (Restart-BlackboxDkgForSyncMode -DurableMode $DkgSteadyDurableSyncEnabled)) {
-        $script:InstallIncomplete = $true
-        Write-Warn2 "DKG did not return to its steady-state sync settings."
-    } elseif ($DkgSteadyDurableSyncEnabled -eq "0") {
+    if ($DkgSteadyDurableSyncEnabled -eq "0") {
         Write-Ok "DKG stabilized: controlled Blackbox auto-sync enabled; one in-flight slot; zero queue"
     }
 }

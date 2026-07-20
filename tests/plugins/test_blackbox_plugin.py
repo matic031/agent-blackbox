@@ -1,6 +1,7 @@
 """Tests for the Blackbox plugin registration + hook contract."""
 
 import argparse
+import json
 import re
 import threading
 
@@ -85,6 +86,94 @@ def test_blackbox_sync_parser_accepts_wait_timeout():
     assert args.wait is True
     assert args.timeout == 45
     assert args.require_rules is True
+
+
+def test_managed_sync_uses_temporary_durable_window_and_restores_steady_state(
+    monkeypatch, tmp_path
+):
+    dkg_home = tmp_path / "dkg-home"
+    dkg_home.mkdir()
+    dkg_bin = tmp_path / "dkg"
+    dkg_bin.write_text("", encoding="utf-8")
+    (dkg_home / "config.json").write_text(
+        json.dumps(
+            {
+                "syncOnConnectEnabled": True,
+                "syncReconcilerEnabled": True,
+                "durableSyncEnabled": True,
+                "syncGlobalMaxInflight": 9,
+                "syncGlobalQueueLimit": 9,
+            }
+        ),
+        encoding="utf-8",
+    )
+    cfg = config_mod.BlackboxConfig(
+        context_graph_id=constants.DEFAULT_CONTEXT_GRAPH_ID,
+        graph_peer_id=constants.DEFAULT_GRAPH_PEER_ID,
+        dkg_home=str(dkg_home),
+        dkg_bin=str(dkg_bin),
+    )
+    states = []
+    current = {}
+    restarts = []
+
+    def write_state(status, **details):
+        current.clear()
+        current.update(status=status, pid=cli_mod.os.getpid(), **details)
+        states.append(dict(current))
+        return dict(current)
+
+    def sync_impl(_args):
+        write_state(
+            "done",
+            context_graph_id=cfg.context_graph_id,
+            graph_peer_id=cfg.graph_peer_id,
+            phase="complete",
+            public_entries=17001,
+        )
+        return 0
+
+    monkeypatch.setenv("BLACKBOX_HOME", str(tmp_path / "blackbox-home"))
+    monkeypatch.setattr(cli_mod, "load_blackbox_config", lambda: cfg)
+    monkeypatch.setattr(cli_mod, "_restart_managed_dkg", lambda _cfg, *, durable: restarts.append(durable))
+    monkeypatch.setattr(cli_mod, "_cmd_sync_impl", sync_impl)
+    monkeypatch.setattr(cli_mod.sync_state, "write", write_state)
+    monkeypatch.setattr(cli_mod.sync_state, "read", lambda: dict(current))
+
+    args = argparse.Namespace(wait=True, timeout=30, require_rules=True)
+    assert cli_mod._cmd_sync(args) == 0
+    assert restarts == [True, False]
+    assert [state["phase"] for state in states] == [
+        "preparing-sync-window",
+        "complete",
+        "restoring-steady-state",
+        "complete",
+    ]
+    persisted = json.loads((dkg_home / "config.json").read_text(encoding="utf-8"))
+    assert persisted["syncOnConnectEnabled"] is False
+    assert persisted["syncReconcilerEnabled"] is False
+    assert persisted["durableSyncEnabled"] is False
+    assert persisted["syncGlobalMaxInflight"] == 1
+    assert persisted["syncGlobalQueueLimit"] == 0
+
+
+def test_managed_dkg_sync_environment_changes_only_durable_mode(tmp_path):
+    (tmp_path / "daemon.pid").write_text(str(cli_mod.os.getpid()), encoding="utf-8")
+    cfg = config_mod.BlackboxConfig(dkg_home=str(tmp_path))
+    active = cli_mod._dkg_sync_environment(cfg, durable=True)
+    steady = cli_mod._dkg_sync_environment(cfg, durable=False)
+
+    assert active["DKG_DURABLE_SYNC_ENABLED"] == "1"
+    assert steady["DKG_DURABLE_SYNC_ENABLED"] == "0"
+    assert active["DKG_CATCHUP_MAX_CONCURRENT_PEERS"] == "1"
+    assert active["DKG_SYNC_TOTAL_TIMEOUT_MS"] == "1800000"
+    assert active["PATH"].split(cli_mod.os.pathsep)[0] == str(
+        cli_mod.Path(cli_mod.sys.executable).resolve().parent
+    )
+    for name, value in cli_mod._DKG_STEADY_SYNC_SETTINGS.items():
+        if name != "DKG_DURABLE_SYNC_ENABLED":
+            assert active[name] == value
+            assert steady[name] == value
 
 
 def test_blackbox_sync_require_rules_fails_empty_ruleset(monkeypatch, capsys):

@@ -7,10 +7,12 @@ and optional LLM review setup. Network reads fail open with a friendly message.
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 import json
 import logging
 import os
 import queue
+import subprocess
 import sys
 import threading
 import time
@@ -22,6 +24,14 @@ from .config import BlackboxConfig, load_blackbox_config
 from .dkg_client import DkgClient, DkgError
 
 logger = logging.getLogger(__name__)
+
+_DKG_STEADY_SYNC_SETTINGS = {
+    "DKG_SYNC_ON_CONNECT_ENABLED": "0",
+    "DKG_SYNC_RECONCILER_ENABLED": "0",
+    "DKG_DURABLE_SYNC_ENABLED": "0",
+    "DKG_SYNC_GLOBAL_MAX_INFLIGHT": "1",
+    "DKG_SYNC_GLOBAL_QUEUE_LIMIT": "0",
+}
 
 _BLACKBOX_CHAT_PROFILE = "guardian"
 _BLACKBOX_SOUL_MARKER = "<!-- managed-by: hermes-blackbox-chat -->"
@@ -440,7 +450,10 @@ def _print_attached_targets() -> None:
 def _cmd_sync(args: argparse.Namespace) -> int:
     """Run a ruleset sync, translating an interactive cancellation cleanly."""
     try:
-        return _cmd_sync_impl(args)
+        cfg = load_blackbox_config()
+        if not _uses_managed_sync_window(cfg, args):
+            return _cmd_sync_impl(args)
+        return _cmd_sync_in_managed_window(cfg, args)
     except KeyboardInterrupt:
         try:
             current_transfer = sync_state.read()
@@ -465,6 +478,215 @@ def _cmd_sync(args: argparse.Namespace) -> int:
             logger.debug("blackbox: failed to record sync cancellation: %s", exc)
         print("Blackbox sync cancelled.", file=sys.stderr)
         return 130
+
+
+def _uses_managed_sync_window(cfg: BlackboxConfig, args: argparse.Namespace) -> bool:
+    """Return whether this is a blocking sync for Blackbox's managed DKG."""
+    return bool(
+        getattr(args, "wait", False)
+        and cfg.context_graph_id == constants.DEFAULT_CONTEXT_GRAPH_ID
+        and cfg.graph_peer_id
+        and Path(cfg.dkg_bin).is_file()
+        and Path(cfg.dkg_home).is_dir()
+    )
+
+
+@contextmanager
+def _managed_sync_lock():
+    """Hold the one cross-process slot used by dashboard and manual syncs."""
+    path = constants.blackbox_home() / "sync-window.lock"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle = path.open("a+b")
+    acquired = False
+    try:
+        if os.name == "nt":  # pragma: no cover - exercised on Windows
+            import msvcrt
+
+            if path.stat().st_size == 0:
+                handle.write(b"0")
+                handle.flush()
+            handle.seek(0)
+            try:
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                acquired = True
+            except OSError:
+                pass
+        else:
+            import fcntl
+
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                acquired = True
+            except BlockingIOError:
+                pass
+        yield acquired
+    finally:
+        if acquired:
+            if os.name == "nt":  # pragma: no cover - exercised on Windows
+                import msvcrt
+
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        handle.close()
+
+
+def _dkg_sync_environment(cfg: BlackboxConfig, *, durable: bool) -> Dict[str, str]:
+    env = os.environ.copy()
+    env.update(_DKG_STEADY_SYNC_SETTINGS)
+    env["DKG_HOME"] = str(cfg.dkg_home)
+    env["DKG_DURABLE_SYNC_ENABLED"] = "1" if durable else "0"
+    env.setdefault("DKG_CATCHUP_MAX_CONCURRENT_PEERS", "1")
+    env.setdefault("DKG_STORE_QUEUE_WAIT_TIMEOUT_MS", "300000")
+    env.setdefault("DKG_SYNC_TOTAL_TIMEOUT_MS", "1800000")
+    env.setdefault("DKG_SWM_RECOVERY_TIMEOUT_MS", "3600000")
+    # Native DKG dependencies are tied to the Node ABI used at installation.
+    # A dashboard launched from another runtime can have a different ``node``
+    # first on PATH, so preserve the executable of the currently managed node.
+    try:
+        import psutil
+
+        pid = int((Path(cfg.dkg_home) / "daemon.pid").read_text(encoding="utf-8").strip())
+        node_executable = Path(psutil.Process(pid).exe())
+        if node_executable.is_file():
+            env["PATH"] = str(node_executable.parent) + os.pathsep + env.get("PATH", "")
+    except (OSError, TypeError, ValueError, psutil.Error):
+        pass
+    return env
+
+
+def _set_persisted_dkg_steady_state(cfg: BlackboxConfig) -> None:
+    """Keep the managed node's on-disk defaults in the stabilized state."""
+    path = Path(cfg.dkg_home) / "config.json"
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data.update(
+        {
+            "syncOnConnectEnabled": False,
+            "syncReconcilerEnabled": False,
+            "durableSyncEnabled": False,
+            "syncGlobalMaxInflight": 1,
+            "syncGlobalQueueLimit": 0,
+        }
+    )
+    tmp = path.with_suffix(f".tmp-{os.getpid()}")
+    tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def _restart_managed_dkg(cfg: BlackboxConfig, *, durable: bool) -> None:
+    """Restart the managed node in a controlled sync or steady-state mode."""
+    env = _dkg_sync_environment(cfg, durable=durable)
+    command = str(cfg.dkg_bin)
+    try:
+        subprocess.run(
+            [command, "stop"],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+        started = subprocess.run(
+            [command, "start"],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise RuntimeError(f"could not restart the managed DKG node: {exc}") from exc
+
+    client = DkgClient(url=cfg.dkg_url, dkg_home=cfg.dkg_home)
+    deadline = time.monotonic() + 90
+    while time.monotonic() < deadline:
+        try:
+            client.status(timeout=2)
+            return
+        except DkgError:
+            time.sleep(1)
+    detail = (started.stderr or started.stdout or "").strip()
+    raise RuntimeError(
+        "managed DKG node did not become ready"
+        + (f": {detail[-500:]}" if detail else "")
+    )
+
+
+def _terminal_sync_details(state: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        key: value
+        for key, value in state.items()
+        if key not in {"status", "started_at", "updated_at", "pid"}
+    }
+
+
+def _cmd_sync_in_managed_window(cfg: BlackboxConfig, args: argparse.Namespace) -> int:
+    """Run one durable catch-up, restoring stabilized settings before completion."""
+    with _managed_sync_lock() as acquired:
+        if not acquired:
+            print("Blackbox sync is already running; no second transfer was queued.")
+            return 0
+
+        sync_state.write(
+            "running",
+            context_graph_id=cfg.context_graph_id,
+            graph_peer_id=cfg.graph_peer_id,
+            phase="preparing-sync-window",
+            public_entries=0,
+            community_entries=0,
+        )
+        terminal_state: Dict[str, Any] = {}
+        result = 2
+        failure: Optional[BaseException] = None
+        restore_failure: Optional[Exception] = None
+        try:
+            _set_persisted_dkg_steady_state(cfg)
+            _restart_managed_dkg(cfg, durable=True)
+            result = _cmd_sync_impl(args)
+            terminal_state = sync_state.read()
+        except BaseException as exc:
+            failure = exc
+            terminal_state = sync_state.read()
+        finally:
+            details = _terminal_sync_details(terminal_state)
+            details.update(
+                context_graph_id=cfg.context_graph_id,
+                graph_peer_id=cfg.graph_peer_id,
+                phase="restoring-steady-state",
+            )
+            sync_state.write("running", **details)
+            try:
+                _set_persisted_dkg_steady_state(cfg)
+                _restart_managed_dkg(cfg, durable=False)
+                _set_persisted_dkg_steady_state(cfg)
+            except Exception as restore_exc:
+                restore_failure = restore_exc
+
+        if restore_failure is not None:
+            failed_details = _terminal_sync_details(terminal_state)
+            failed_details.update(
+                context_graph_id=cfg.context_graph_id,
+                graph_peer_id=cfg.graph_peer_id,
+                phase="restoring-steady-state",
+                error=f"DKG steady-state restore failed: {restore_failure}",
+            )
+            sync_state.write("failed", **failed_details)
+            print(f"Blackbox sync safety restore failed: {restore_failure}", file=sys.stderr)
+            return 2
+
+        if failure is not None:
+            raise failure
+        status = str(terminal_state.get("status") or "")
+        if status == "running" or not status:
+            status = "done" if result == 0 else "failed"
+        final_details = _terminal_sync_details(terminal_state)
+        if status == "failed" and not final_details.get("error"):
+            final_details["error"] = "required threat graph sync did not complete"
+        sync_state.write(status, **final_details)
+        return result
 
 
 def _cmd_sync_impl(args: argparse.Namespace) -> int:

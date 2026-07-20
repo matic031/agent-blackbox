@@ -287,14 +287,10 @@ def test_unix_installer_runs_one_controlled_sync_before_dashboard() -> None:
     assert 'BLACKBOX_DETACHED_PID=$!' in run_body
     assert 'kill -0 "$pid"' in health_body
     assert "run_detached" not in sync_body
-    assert "restart_blackbox_dkg_for_sync_mode 1" in sync_body
-    assert (
-        'restart_blackbox_dkg_for_sync_mode '
-        '"$BLACKBOX_DKG_STEADY_DURABLE_SYNC_ENABLED"'
-    ) in sync_body
+    assert "restart_blackbox_dkg_for_sync_mode" not in sync_body
     assert 'BLACKBOX_INSTALL_INCOMPLETE=true' in sync_body
     assert 'BLACKBOX_THREAT_GRAPH_INCOMPLETE=true' in sync_body
-    assert "one controlled graph catch-up" in sync_body
+    assert "one controlled verified graph catch-up" in sync_body
     assert "verified threats ready" in sync_body
     assert "start_dashboard" in sync_body
     assert ': >"$BLACKBOX_SYNC_LOG"' in sync_body
@@ -1347,10 +1343,8 @@ def test_installers_use_native_dkg_membership_without_sync_overrides() -> None:
     assert '$DkgSyncGlobalMaxInflight = "1"' in windows
     assert '$DkgSyncGlobalQueueLimit = "0"' in windows
     assert 'else { "0" }' in windows
-    assert "restart_blackbox_dkg_for_sync_mode 1" in unix
-    assert 'restart_blackbox_dkg_for_sync_mode "$BLACKBOX_DKG_STEADY_DURABLE_SYNC_ENABLED"' in unix
-    assert 'Restart-BlackboxDkgForSyncMode -DurableMode "1"' in windows
-    assert "Restart-BlackboxDkgForSyncMode -DurableMode $DkgSteadyDurableSyncEnabled" in windows
+    assert "restart_blackbox_dkg_for_sync_mode" not in unix
+    assert "Restart-BlackboxDkgForSyncMode" not in windows
     assert unix_main.index("sync_ruleset\n") < unix_main.index("start_dashboard\n")
     assert '$DkgCatchupMaxConcurrentPeers = "1"' in windows
     assert '$DkgStoreQueueWaitTimeoutMs = "300000"' in windows

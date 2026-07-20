@@ -42,6 +42,10 @@ def write(status: str, **details: Any) -> Dict[str, Any]:
         "pid": os.getpid(),
         **details,
     }
+    if status == "running" and previous.get("status") == "running":
+        for key in ("public_entries", "expected_public_entries", "community_entries"):
+            if key not in details and key in previous:
+                state[key] = previous[key]
     if status == "running" and previous.get("status") != "running":
         state["started_at"] = now
     tmp = path.with_suffix(f".tmp-{os.getpid()}")

@@ -1224,6 +1224,13 @@ def create_app(*, manage_guardian: bool = False):
         authoritative_sync = sync_state.read()
         authoritative_running = authoritative_sync.get("status") == "running"
         authoritative_done = authoritative_sync.get("status") == "done"
+        # This count is measured from locally committed rows and can advance
+        # ahead of the materialized ruleset cache during a large snapshot.
+        if authoritative_running:
+            try:
+                public = max(public, int(authoritative_sync.get("public_entries") or 0))
+            except (TypeError, ValueError):
+                pass
         if authoritative_running:
             # The curator-pinned durable transfer is intentionally separate
             # from DKG's generic catch-up job. Keep the loader honest while a

@@ -1618,9 +1618,8 @@
     vertical-align: middle;
   }
 
-  /* Sync loader — a calm spinning ring shown in place of a count (or in the
-     graph body) while a tier is still catching up from the network, so a fresh
-     node reads as "syncing" rather than a settled 0. */
+  /* Sync loader — a calm spinning ring shown beside the latest committed
+     count (or in the graph body) while a tier catches up from the network. */
   .bb-loader {
     display: inline-block;
     flex: 0 0 auto;
@@ -3240,6 +3239,10 @@
       percentText = percent.toFixed(percent % 1 ? 1 : 0) + "%";
     } else {
       $("sync-progress-bar").style.width = "";
+      var verifiedCount = graphTotalForTier("public");
+      if (verifiedCount != null && Number(verifiedCount) > 0) {
+        percentText = num(verifiedCount) + " verified";
+      }
     }
     $("sync-progress-percent").textContent = percentText;
 
@@ -5210,12 +5213,9 @@
         return;
       }
       if (t !== "community") {
-        var tabCount = $("count-" + t);
-        if (t === "public" && isTierPending(t)) {
-          if (tabCount && !showsLoader(tabCount)) tabCount.innerHTML = LOADER_HTML;
-        } else {
-          setCount("count-" + t, graphTotalForTier(t), "tab:" + t, false);
-        }
+        // ``setCount`` keeps the latest committed number and adds the loader
+        // while a newer verified snapshot is arriving.
+        setCount("count-" + t, graphTotalForTier(t), "tab:" + t, false);
       }
     });
 

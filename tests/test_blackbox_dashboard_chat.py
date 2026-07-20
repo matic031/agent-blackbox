@@ -115,6 +115,7 @@ def test_dashboard_keeps_partial_vm_count_loading_during_curator_transfer(monkey
         "started_at": 100.0,
         "passes": 2,
         "inserted_triples": 160_000,
+        "public_entries": 460,
     }
     monkeypatch.setattr(config, "load_blackbox_config", lambda: cfg)
     monkeypatch.setattr(ruleset, "peek", lambda _cfg=None: PartialRuleset())
@@ -130,9 +131,9 @@ def test_dashboard_keeps_partial_vm_count_loading_during_curator_transfer(monkey
 
     status = TestClient(server.create_app()).get("/api/graph-status").json()
 
-    assert status["curated"] == 246
+    assert status["curated"] == 460
     assert status["sync_progress"]["public"] == {
-        "count": 246,
+        "count": 460,
         "state": "syncing",
         "label": "VM syncing",
     }
@@ -142,6 +143,20 @@ def test_dashboard_keeps_partial_vm_count_loading_during_curator_transfer(monkey
         "finished_at": None,
     }
     assert status["sync_progress"]["authoritative"] == state
+
+
+def test_running_sync_state_keeps_latest_committed_count(monkeypatch, tmp_path):
+    from plugins.blackbox import sync_state
+
+    state_path = tmp_path / "authoritative-sync.json"
+    monkeypatch.setattr(sync_state, "_path", lambda: state_path)
+
+    sync_state.write("running", phase="recovering", public_entries=460_000)
+    sync_state.write("running", phase="waiting-for-capacity")
+
+    state = sync_state.read()
+    assert state["phase"] == "waiting-for-capacity"
+    assert state["public_entries"] == 460_000
 
 
 def test_dashboard_automatic_sync_runs_canonical_verified_cli(monkeypatch):

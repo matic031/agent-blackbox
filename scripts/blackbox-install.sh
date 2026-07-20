@@ -1414,14 +1414,6 @@ install_dkg() {
     fi
 }
 
-restart_blackbox_dkg_for_sync_mode() {
-    local durable_mode="$1"
-    BLACKBOX_DKG_DURABLE_SYNC_ENABLED="$durable_mode"
-    blackbox_dkg stop >/dev/null 2>&1 || true
-    blackbox_dkg start || true
-    wait_for_blackbox_dkg_runtime
-}
-
 # Pull the verified ruleset from the graph now, so detection is live immediately
 # after install rather than after the user runs a manual sync.
 sync_ruleset() {
@@ -1429,16 +1421,7 @@ sync_ruleset() {
     heading "Syncing the threat ruleset"
     mkdir -p "$HERMES_HOME/logs"
     BLACKBOX_SYNC_LOG="$HERMES_HOME/logs/blackbox-sync-install.log"
-    step "Temporarily enabling durable sync for one controlled graph catch-up ..."
-    if ! restart_blackbox_dkg_for_sync_mode 1; then
-        BLACKBOX_INSTALL_INCOMPLETE=true
-        BLACKBOX_THREAT_GRAPH_INCOMPLETE=true
-        err "Could not start the controlled DKG sync window."
-        restart_blackbox_dkg_for_sync_mode "$BLACKBOX_DKG_STEADY_DURABLE_SYNC_ENABLED" || true
-        return 0
-    fi
-
-    step "Requesting the verified agent-blackbox-vm snapshot ..."
+    step "Requesting one controlled verified graph catch-up ..."
     step "Sync progress will stream below (also saved to $BLACKBOX_SYNC_LOG)."
     # Never let a previous install's progress line open an empty dashboard.
     : >"$BLACKBOX_SYNC_LOG"
@@ -1488,11 +1471,7 @@ sync_ruleset() {
         step "Blackbox is installed, but setup is incomplete until DKG returns a non-empty ruleset."
         step "Retry after fixing DKG/catch-up with: blackbox sync --wait --require-rules"
     fi
-    step "Returning DKG to stabilized steady-state settings ..."
-    if ! restart_blackbox_dkg_for_sync_mode "$BLACKBOX_DKG_STEADY_DURABLE_SYNC_ENABLED"; then
-        BLACKBOX_INSTALL_INCOMPLETE=true
-        warn "DKG did not return to its steady-state sync settings."
-    elif [ "$BLACKBOX_DKG_STEADY_DURABLE_SYNC_ENABLED" = "0" ]; then
+    if [ "$BLACKBOX_DKG_STEADY_DURABLE_SYNC_ENABLED" = "0" ]; then
         ok "DKG stabilized: controlled Blackbox auto-sync enabled; one in-flight slot; zero queue"
     fi
     return 0
