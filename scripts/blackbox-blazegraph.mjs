@@ -6,6 +6,7 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 const BLACKBOX_BLAZEGRAPH_JAVA_OPTS = '-Xms512m -Xmx4g';
+const BLACKBOX_BLAZEGRAPH_CPUS = '4';
 const MINIMUM_BLAZEGRAPH_HEAP_BYTES = 4 * 1024 * 1024 * 1024;
 
 function fail(message) {
@@ -133,7 +134,14 @@ function blackboxDockerRunner(log) {
     async run(args, opts) {
       if (args[0] === 'run' && !args.some((arg) => String(arg).startsWith('JAVA_OPTS='))) {
         return runDocker(
-          ['run', '-e', `JAVA_OPTS=${BLACKBOX_BLAZEGRAPH_JAVA_OPTS}`, ...args.slice(1)],
+          [
+            'run',
+            '--cpus',
+            BLACKBOX_BLAZEGRAPH_CPUS,
+            '-e',
+            `JAVA_OPTS=${BLACKBOX_BLAZEGRAPH_JAVA_OPTS}`,
+            ...args.slice(1),
+          ],
           opts,
         );
       }
@@ -142,7 +150,17 @@ function blackboxDockerRunner(log) {
       if (args[0] !== 'inspect' || result.exitCode !== 0) return result;
 
       const javaOpts = javaOptsFromInspect(result.stdout);
-      if (heapBytes(javaOpts) >= MINIMUM_BLAZEGRAPH_HEAP_BYTES) return result;
+      if (heapBytes(javaOpts) >= MINIMUM_BLAZEGRAPH_HEAP_BYTES) {
+        const name = String(args[1] || 'dkg-blazegraph');
+        const limited = await runDocker(
+          ['update', '--cpus', BLACKBOX_BLAZEGRAPH_CPUS, name],
+          { timeoutMs: 10_000 },
+        );
+        if (limited.exitCode !== 0) {
+          throw new Error(`Could not apply the Blackbox CPU limit to "${name}": ${limited.stderr.trim()}`);
+        }
+        return result;
+      }
 
       const name = String(args[1] || 'dkg-blazegraph');
       const backup = backupContainerName(name);

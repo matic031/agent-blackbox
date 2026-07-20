@@ -238,11 +238,16 @@ def test_blackbox_sync_recovers_curator_snapshot_then_waits_for_vm(monkeypatch, 
         def catchup_from_peer(self, cg_id, peer_id, *, budget_ms):
             events.append(("curator", cg_id, peer_id, budget_ms))
             return {
-                "completed": True,
-                "replacedRoots": 18,
-                "insertedDataQuads": 244_842,
-                "insertedMetaQuads": 1_234,
+                "ok": True,
+                "includeDurable": True,
+                "includeSharedMemory": False,
+                "peersAttempted": 1,
+                "totalDurableInsertedTriples": 244_842,
+                "results": [{"peerId": peer_id, "durableInsertedTriples": 244_842}],
             }
+
+        def threat_count(self, cg_id, *, peer_id=None):
+            return 23_001
 
     class FakeRuleset:
         def __init__(self, public):
@@ -298,8 +303,8 @@ def test_blackbox_sync_recovers_curator_snapshot_then_waits_for_vm(monkeypatch, 
     assert states[-1][1]["public_entries"] == 23_001
     assert states[-1][1]["expected_public_entries"] == 23_001
     out = capsys.readouterr().out
-    assert "Recovering the complete curator snapshot needed for public VM sync" in out
-    assert "curator snapshot verified" in out
+    assert "Recovering the complete publisher VM snapshot" in out
+    assert "publisher VM verified" in out
     assert "23,001 public VM" in out
 
 
@@ -323,7 +328,13 @@ def test_blackbox_sync_uses_authoritative_publisher_for_empty_local_store(
 
         def catchup_from_peer(self, cg_id, peer_id, *, budget_ms):
             events.append(("curator", cg_id, peer_id, budget_ms))
-            return {"completed": True, "replacedRoots": 25_000}
+            return {
+                "ok": True, "includeDurable": True, "includeSharedMemory": False,
+                "peersAttempted": 1, "results": [{"peerId": peer_id}],
+            }
+
+        def threat_count(self, cg_id, *, peer_id=None):
+            return 25_000
 
     class FakeRuleset:
         def __init__(self, public):
@@ -398,7 +409,13 @@ def test_blackbox_sync_accepts_deferred_after_verified_authoritative_vm(
 
         def catchup_from_peer(self, cg_id, peer_id, *, budget_ms):
             curator_calls.append((cg_id, peer_id, budget_ms))
-            return {"completed": True, "replacedRoots": 4}
+            return {
+                "ok": True, "includeDurable": True, "includeSharedMemory": False,
+                "peersAttempted": 1, "results": [{"peerId": peer_id}],
+            }
+
+        def threat_count(self, cg_id, *, peer_id=None):
+            return 4
 
     class FakeRuleset:
         def counts(self):
@@ -459,7 +476,13 @@ def test_authoritative_recovery_waits_for_dkg_backpressure(monkeypatch, capsys):
                     "Sync backpressure rejected swm-recovery:curator "
                     "(global inflight=1/1, queued=2/2)"
                 )
-            return {"completed": True, "replacedRoots": 4}
+            return {
+                "ok": True, "includeDurable": True, "includeSharedMemory": False,
+                "peersAttempted": 1, "results": [{"peerId": peer_id}],
+            }
+
+        def threat_count(self, cg_id, *, peer_id=None):
+            return 4
 
     monkeypatch.setattr(cli_mod.time, "sleep", lambda _seconds: None)
     monkeypatch.setattr(
@@ -649,7 +672,13 @@ def test_blackbox_sync_uses_curator_when_generic_catchup_peer_fails(monkeypatch,
 
         def catchup_from_peer(self, cg_id, peer_id, *, budget_ms):
             events.append((cg_id, peer_id, budget_ms))
-            return {"completed": True, "replacedRoots": 1}
+            return {
+                "ok": True, "includeDurable": True, "includeSharedMemory": False,
+                "peersAttempted": 1, "results": [{"peerId": peer_id}],
+            }
+
+        def threat_count(self, cg_id, *, peer_id=None):
+            return 3
 
     class FakeRuleset:
         def __init__(self, public):
@@ -697,7 +726,7 @@ def test_blackbox_sync_uses_curator_when_generic_catchup_peer_fails(monkeypatch,
     args = argparse.Namespace(wait=True, timeout=30, require_rules=True)
     assert cli_mod._cmd_sync(args) == 0
     assert len(events) == 1
-    assert "curator snapshot verified" in capsys.readouterr().out
+    assert "publisher VM verified" in capsys.readouterr().out
 
 
 def test_blackbox_request_join_does_not_treat_delivery_as_approval():

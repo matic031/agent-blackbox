@@ -786,6 +786,7 @@ def test_dkg_config_writer_supports_oxigraph_fallback_without_losing_blazegraph_
             "oxigraph-server",
             "",
             "false",
+            "umanitek/blackbox-vm",
         ],
         check=True,
         capture_output=True,
@@ -1082,7 +1083,7 @@ def test_blazegraph_helper_sizes_heap_and_preserves_undersized_store(tmp_path: P
     assert calls[0] == "inspect dkg-blazegraph-test"
     assert calls[1] == "stop dkg-blazegraph-test"
     assert calls[2].startswith("rename dkg-blazegraph-test dkg-blazegraph-test-pre-4g-")
-    assert calls[3] == "run -e JAVA_OPTS=-Xms512m -Xmx4g -d blazegraph"
+    assert calls[3] == "run --cpus 4 -e JAVA_OPTS=-Xms512m -Xmx4g -d blazegraph"
     assert json.loads(completed.stdout)["url"] == calls[3]
 
 
@@ -1160,7 +1161,8 @@ def test_installers_use_native_dkg_membership_without_sync_overrides() -> None:
 
     for text in (unix, windows):
         assert "blackbox-clean-dkg-subscriptions.py" not in text
-        assert "DKG_CATCHUP_MAX_CONCURRENT_PEERS" not in text
+        assert "DKG_CATCHUP_MAX_CONCURRENT_PEERS" in text
+        assert "DKG_STORE_QUEUE_WAIT_TIMEOUT_MS" in text
         assert "DKG_SYNC_PAGE_TIMEOUT_MS" not in text
         assert "DKG_SYNC_TOTAL_TIMEOUT_MS" in text
         assert "DKG_SYNC_MIN_GRAPH_BUDGET_MS" not in text
@@ -1173,6 +1175,8 @@ def test_installers_use_native_dkg_membership_without_sync_overrides() -> None:
         assert 'data.pop("syncGlobalMaxInflight", None)' in text
         assert 'data.pop("syncGlobalQueueLimit", None)' in text
         assert 'data.pop("restrictAutoSubscribeContextGraphs", None)' in text
+        assert 'data["syncSharedMemoryOnConnect"] = False' in text
+        assert 'data["syncContextGraphPriorities"] = priorities' in text
         assert '"backend": "blazegraph"' in text
         assert '"options": {"url": store_url, "managedByDkg": store_managed, "timeout": 900000}' in text
         assert "DKG_ACCEPT_STORE_RESET" in text
@@ -1185,7 +1189,11 @@ def test_installers_use_native_dkg_membership_without_sync_overrides() -> None:
         assert "Blazegraph is unavailable or returned an error" in text
 
     assert 'BLACKBOX_DKG_SYNC_GLOBAL_MAX_INFLIGHT="1"' in unix
+    assert 'BLACKBOX_DKG_CATCHUP_MAX_CONCURRENT_PEERS="1"' in unix
+    assert 'BLACKBOX_DKG_STORE_QUEUE_WAIT_TIMEOUT_MS="300000"' in unix
     assert '$DkgSyncGlobalMaxInflight = "1"' in windows
+    assert '$DkgCatchupMaxConcurrentPeers = "1"' in windows
+    assert '$DkgStoreQueueWaitTimeoutMs = "300000"' in windows
     assert "one large sync at a time" in unix
     assert "one large sync at a time" in windows
 

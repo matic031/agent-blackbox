@@ -1,17 +1,12 @@
 /**
  * Graph-synced rule cache.
  *
- * The ruleset is the ONLY source of detection truth, merged from two tiers
- * with strict precedence (mirrors Python `ruleset.py`):
+ * The ruleset is the ONLY source of detection truth (mirrors Python
+ * `ruleset.py`):
  *
  *   - `verifiable-memory` (the curated public threat graph) → rules tagged
  *     `source: "public"`. The source of truth: matches are CONFIRMED and, in
  *     block mode, blockable.
- *   - `shared-working-memory` (the community pool) → rules tagged
- *     `source: "community"`. Checked only when the public graph doesn't
- *     already cover the identifier: matches flag but NEVER block — anyone can
- *     write to the community pool, so it must not be able to stop tool calls.
- *
  * Each tier pulls both legacy Guardian threats and Defender signal entities, normalized into a
  * `Ruleset` and cached to a JSON file (source tags included) under the
  * OpenClaw state dir with a TTL. On an empty graph the ruleset is empty and
@@ -80,10 +75,9 @@ SELECT ?s ?p ?o WHERE {
 }`.trim();
 }
 
-/** Tier sync order: public curated graph first (source of truth), then community. */
+/** Agent Blackbox is VM-only until community support ships. */
 const TIERS: ReadonlyArray<readonly [DkgView, RuleSource]> = [
   ["verifiable-memory", "public"],
-  ["shared-working-memory", "community"],
 ];
 
 export function resolveStateDir(explicit?: string): string {
@@ -367,16 +361,23 @@ export class RulesetCache {
     try {
       const parsed = JSON.parse(readFileSync(this.cachePath, "utf8")) as Partial<Ruleset>;
       if (parsed && Array.isArray(parsed.injection)) {
+        const publicOnly = <T extends { source?: RuleSource }>(rows: T[] | undefined): T[] =>
+          (rows ?? []).filter((row) => row.source !== "community");
+        const dependencies = Object.fromEntries(
+          Object.entries(parsed.dependency ?? {}).filter(
+            ([, rule]) => rule?.source !== "community",
+          ),
+        );
         // Backfill arrays absent from caches written before fileaccess/skill
-        // support so the detectors never see `undefined`.
+        // support and drop SWM rows written by pre-VM-only releases.
         return {
           ...emptyRuleset(),
           ...parsed,
-          injection: parsed.injection ?? [],
-          escalation: parsed.escalation ?? [],
-          dependency: parsed.dependency ?? {},
-          fileaccess: parsed.fileaccess ?? [],
-          skill: parsed.skill ?? [],
+          injection: publicOnly(parsed.injection),
+          escalation: publicOnly(parsed.escalation),
+          dependency: dependencies,
+          fileaccess: publicOnly(parsed.fileaccess),
+          skill: publicOnly(parsed.skill),
         } as Ruleset;
       }
     } catch {
@@ -400,11 +401,8 @@ export class RulesetCache {
 
   /**
    * Force a synchronous sync from the node. Fail-open (returns current on
-   * error). Two queries per sync: verifiable-memory first (rows tagged
-   * `source: "public"`), then shared-working-memory (`source: "community"`);
-   * public wins identifier collisions. If NOTHING comes back (both tiers
-   * empty/unreachable) the last-good ruleset keeps serving. Mirrors Python
-   * `ruleset.refresh`.
+   * error). One query per sync reads verifiable-memory. If nothing comes back,
+   * the last-good public ruleset keeps serving. Mirrors Python `ruleset.refresh`.
    */
   async sync(): Promise<Ruleset> {
     if (this.refreshing) return this.ruleset;

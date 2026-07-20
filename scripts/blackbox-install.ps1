@@ -75,6 +75,8 @@ $DkgDaemonUrl = "http://127.0.0.1:$DkgPort"
 $DkgStoreQueueLimit = if ($env:BLACKBOX_DKG_STORE_QUEUE_LIMIT) { [int]$env:BLACKBOX_DKG_STORE_QUEUE_LIMIT } else { 512 }
 $DkgListContextGraphsProjection = if ($env:BLACKBOX_DKG_LIST_CONTEXT_GRAPHS_PROJECTION) { $env:BLACKBOX_DKG_LIST_CONTEXT_GRAPHS_PROJECTION } else { "1" }
 $DkgSyncGlobalMaxInflight = "1"
+$DkgCatchupMaxConcurrentPeers = "1"
+$DkgStoreQueueWaitTimeoutMs = "300000"
 $script:DkgNodeOptions = ""
 $NodeMajor   = if ($env:BLACKBOX_NODE_MAJOR)  { [int]$env:BLACKBOX_NODE_MAJOR } else { 22 }
 $ContextGraphId = if ($env:BLACKBOX_CONTEXT_GRAPH_ID) { $env:BLACKBOX_CONTEXT_GRAPH_ID } else { "0x37b1Fdfd134e2b17583bCBdD3034F91504cD9C70/agent-blackbox-vm" }
@@ -254,6 +256,8 @@ function Invoke-BlackboxDkg {
         "DKG_STORE_QUEUE_LIMIT",
         "DKG_LIST_CONTEXT_GRAPHS_PROJECTION",
         "DKG_SYNC_GLOBAL_MAX_INFLIGHT",
+        "DKG_CATCHUP_MAX_CONCURRENT_PEERS",
+        "DKG_STORE_QUEUE_WAIT_TIMEOUT_MS",
         "DKG_SYNC_TOTAL_TIMEOUT_MS",
         "DKG_SWM_RECOVERY_TIMEOUT_MS",
         "NODE_OPTIONS",
@@ -275,6 +279,8 @@ function Invoke-BlackboxDkg {
         $env:DKG_STORE_QUEUE_LIMIT = "$DkgStoreQueueLimit"
         $env:DKG_LIST_CONTEXT_GRAPHS_PROJECTION = "$DkgListContextGraphsProjection"
         $env:DKG_SYNC_GLOBAL_MAX_INFLIGHT = "$DkgSyncGlobalMaxInflight"
+        $env:DKG_CATCHUP_MAX_CONCURRENT_PEERS = "$DkgCatchupMaxConcurrentPeers"
+        $env:DKG_STORE_QUEUE_WAIT_TIMEOUT_MS = "$DkgStoreQueueWaitTimeoutMs"
         $env:DKG_SYNC_TOTAL_TIMEOUT_MS = "1800000"
         $env:DKG_SWM_RECOVERY_TIMEOUT_MS = "3600000"
         $env:NODE_OPTIONS = $script:DkgNodeOptions
@@ -307,7 +313,7 @@ function Prepare-BlackboxDkgRuntimeFingerprint {
         Write-Warn2 "Could not resolve the Node.js runtime for DKG fingerprinting."
         return $false
     }
-    $fingerprintOutput = @(& $script:VenvPython $fingerprinter compute $DkgCliDir $DkgHome $nodeCommand.Source $DkgBin $DkgStoreQueueLimit $DkgListContextGraphsProjection $DkgSyncGlobalMaxInflight $script:DkgNodeOptions 2>&1)
+    $fingerprintOutput = @(& $script:VenvPython $fingerprinter compute $DkgCliDir $DkgHome $nodeCommand.Source $DkgBin $DkgStoreQueueLimit $DkgListContextGraphsProjection $DkgSyncGlobalMaxInflight $script:DkgNodeOptions $DkgCatchupMaxConcurrentPeers $DkgStoreQueueWaitTimeoutMs 2>&1)
     if ($LASTEXITCODE -ne 0) {
         $script:InstallIncomplete = $true
         if ($fingerprintOutput) {
@@ -608,6 +614,16 @@ function Initialize-BlackboxStore {
         $script:DkgStoreUrl = $existingUrl
         $script:DkgStoreManagedByDkg = $true
         if (Test-BlackboxBlazegraph) { return $true }
+        if ($script:DkgAlreadyRunning) {
+            Write-Step "Pausing DKG so its overloaded store can pass recovery checks ..."
+            Invoke-BlackboxDkg stop
+            if ($LASTEXITCODE -eq 0) {
+                $script:DkgAlreadyRunning = $false
+                if (Test-BlackboxBlazegraph) { return $true }
+            } else {
+                Write-Warn2 "Could not pause the Blackbox DKG daemon before store recovery."
+            }
+        }
         Write-Warn2 "The managed Blazegraph endpoint is down; attempting Docker recovery."
     }
     if (-not (Test-DockerForBlazegraph)) {
@@ -669,6 +685,7 @@ api_port = int(sys.argv[2])
 store_backend = sys.argv[3]
 store_url = sys.argv[4]
 store_managed = sys.argv[5].lower() == "true"
+context_graph_id = sys.argv[6]
 home.mkdir(parents=True, exist_ok=True)
 cfg_path = home / "config.json"
 original = None
@@ -705,6 +722,12 @@ data.pop("syncAgentsMeta", None)
 data.pop("syncGlobalMaxInflight", None)
 data.pop("syncGlobalQueueLimit", None)
 data.pop("restrictAutoSubscribeContextGraphs", None)
+data["syncSharedMemoryOnConnect"] = False
+priorities = data.get("syncContextGraphPriorities")
+if not isinstance(priorities, dict):
+    priorities = {}
+priorities.update({context_graph_id: 100, "agents": -100, "ontology": -100})
+data["syncContextGraphPriorities"] = priorities
 data.setdefault("autoUpdate", {"enabled": False})
 data["chain"] = {
     "type": "evm",
@@ -754,7 +777,7 @@ print("switched" if switched else ("changed" if changed else "unchanged"))
     $writerFile = Join-Path $env:TEMP "blackbox_dkg_config.py"
     Set-Content -Path $writerFile -Value $writer -Encoding UTF8
     try {
-        $configState = & $VenvPython $writerFile $DkgHome $DkgPort $script:DkgSelectedStoreBackend $DkgStoreUrl $DkgStoreManagedByDkg
+        $configState = & $VenvPython $writerFile $DkgHome $DkgPort $script:DkgSelectedStoreBackend $DkgStoreUrl $DkgStoreManagedByDkg $ContextGraphId
         if ($LASTEXITCODE -ne 0) { throw "dkg config exit $LASTEXITCODE" }
         $configResult = $configState | Select-Object -Last 1
         if ($configResult -eq "switched") {
@@ -1077,7 +1100,6 @@ function Install-Dkg {
             Invoke-BlackboxDkg stop
             if ($LASTEXITCODE -ne 0) { throw "dkg stop exit $LASTEXITCODE" }
             Invoke-BlackboxDkg start
-            if ($LASTEXITCODE -ne 0) { throw "dkg start exit $LASTEXITCODE" }
             if (-not (Wait-BlackboxDkgRuntime)) { throw "DKG runtime verification failed" }
             Remove-Item $script:DkgStoreResetMarker -Force -ErrorAction SilentlyContinue
             Write-Ok "Blackbox DKG node restarted with the current sync settings"
@@ -1106,7 +1128,6 @@ function Install-Dkg {
     Write-Step "  (non-interactive; subscribing and reading need no wallet funding)"
     try {
         Invoke-BlackboxDkg start
-        if ($LASTEXITCODE -ne 0) { throw "dkg exit $LASTEXITCODE" }
         if (-not (Wait-BlackboxDkgRuntime)) { throw "DKG runtime verification failed" }
         Remove-Item $script:DkgStoreResetMarker -Force -ErrorAction SilentlyContinue
         Write-Ok "DKG node bootstrapped on $Network"

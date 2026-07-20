@@ -1,7 +1,7 @@
 {
   "id": "blackbox",
   "name": "Agent Blackbox",
-  "description": "Detects prompt-injection, escalation, dependency, file-access, and skill threats from tool calls and prompts, and reports sightings to the local DKG threat graph. Audit-only by default; blocking is opt-in.",
+  "description": "Detects prompt-injection, escalation, dependency, file-access, and skill threats from the curated Verifiable Memory graph. Findings stay local; sharing is coming soon.",
   "activation": {
     "onStartup": true
   },
@@ -24,7 +24,7 @@
         "type": "string",
         "enum": ["audit", "block"],
         "default": "audit",
-        "description": "audit = observe + report only; block = also block tool calls and runs at or above blockSeverity."
+        "description": "audit = observe locally; block = also block tool calls and runs at or above blockSeverity."
       },
       "contextGraphId": {
         "type": "string",
@@ -48,13 +48,13 @@
       },
       "report": {
         "type": "boolean",
-        "default": true,
-        "description": "Share sightings to shared working memory (SWM) when a threat matches."
+        "default": false,
+        "description": "Coming soon. Findings currently stay local."
       },
       "dailyReportLimit": {
         "type": "number",
-        "default": 9999,
-        "description": "Anti-bot cap on outbound sighting reports per day."
+        "default": 0,
+        "description": "Coming soon. Outbound sighting reports are currently disabled."
       },
       "reportMinSeverity": {
         "type": "string",

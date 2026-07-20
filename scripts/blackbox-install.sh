@@ -65,6 +65,8 @@ BLACKBOX_DKG_DAEMON_URL="http://127.0.0.1:$BLACKBOX_DKG_PORT"
 BLACKBOX_DKG_STORE_QUEUE_LIMIT="${BLACKBOX_DKG_STORE_QUEUE_LIMIT:-512}"
 BLACKBOX_DKG_LIST_CONTEXT_GRAPHS_PROJECTION="${BLACKBOX_DKG_LIST_CONTEXT_GRAPHS_PROJECTION:-1}"
 BLACKBOX_DKG_SYNC_GLOBAL_MAX_INFLIGHT="1"
+BLACKBOX_DKG_CATCHUP_MAX_CONCURRENT_PEERS="1"
+BLACKBOX_DKG_STORE_QUEUE_WAIT_TIMEOUT_MS="300000"
 BLACKBOX_DKG_NODE_OPTIONS=""
 NODE_MAJOR="${BLACKBOX_NODE_MAJOR:-22}"
 BLACKBOX_CONTEXT_GRAPH_ID="${BLACKBOX_CONTEXT_GRAPH_ID:-0x37b1Fdfd134e2b17583bCBdD3034F91504cD9C70/agent-blackbox-vm}"
@@ -164,6 +166,8 @@ blackbox_dkg() {
     DKG_STORE_QUEUE_LIMIT="$BLACKBOX_DKG_STORE_QUEUE_LIMIT" \
     DKG_LIST_CONTEXT_GRAPHS_PROJECTION="$BLACKBOX_DKG_LIST_CONTEXT_GRAPHS_PROJECTION" \
     DKG_SYNC_GLOBAL_MAX_INFLIGHT="$BLACKBOX_DKG_SYNC_GLOBAL_MAX_INFLIGHT" \
+    DKG_CATCHUP_MAX_CONCURRENT_PEERS="$BLACKBOX_DKG_CATCHUP_MAX_CONCURRENT_PEERS" \
+    DKG_STORE_QUEUE_WAIT_TIMEOUT_MS="$BLACKBOX_DKG_STORE_QUEUE_WAIT_TIMEOUT_MS" \
     DKG_SYNC_TOTAL_TIMEOUT_MS="1800000" \
     DKG_SWM_RECOVERY_TIMEOUT_MS="3600000" \
     NODE_OPTIONS="$BLACKBOX_DKG_NODE_OPTIONS" \
@@ -188,7 +192,9 @@ prepare_blackbox_dkg_runtime_fingerprint() {
     if ! BLACKBOX_DKG_RUNTIME_FINGERPRINT="$("$VENV_DIR/bin/python" "$fingerprinter" compute \
         "$BLACKBOX_DKG_CLI_DIR" "$BLACKBOX_DKG_HOME" "$node_bin" "$BLACKBOX_DKG_BIN" \
         "$BLACKBOX_DKG_STORE_QUEUE_LIMIT" "$BLACKBOX_DKG_LIST_CONTEXT_GRAPHS_PROJECTION" \
-        "$BLACKBOX_DKG_SYNC_GLOBAL_MAX_INFLIGHT" "$BLACKBOX_DKG_NODE_OPTIONS")"; then
+        "$BLACKBOX_DKG_SYNC_GLOBAL_MAX_INFLIGHT" "$BLACKBOX_DKG_NODE_OPTIONS" \
+        "$BLACKBOX_DKG_CATCHUP_MAX_CONCURRENT_PEERS" \
+        "$BLACKBOX_DKG_STORE_QUEUE_WAIT_TIMEOUT_MS")"; then
         BLACKBOX_INSTALL_INCOMPLETE=true
         BLACKBOX_THREAT_GRAPH_INCOMPLETE=true
         warn "Could not fingerprint the configured DKG runtime; setup is incomplete."
@@ -484,6 +490,17 @@ PYEOF
         if check_blackbox_blazegraph; then
             return 0
         fi
+        if [ "$BLACKBOX_DKG_ALREADY_RUNNING" = true ]; then
+            step "Pausing DKG so its overloaded store can pass recovery checks ..."
+            if blackbox_dkg stop; then
+                BLACKBOX_DKG_ALREADY_RUNNING=false
+                if check_blackbox_blazegraph; then
+                    return 0
+                fi
+            else
+                warn "Could not pause the Blackbox DKG daemon before store recovery."
+            fi
+        fi
         warn "The managed Blazegraph endpoint is down; attempting Docker recovery."
     fi
     if ! require_docker_for_blazegraph; then
@@ -549,7 +566,7 @@ check_blackbox_blazegraph() {
 
 ensure_blackbox_dkg_config() {
     local config_state
-    config_state="$("$VENV_DIR/bin/python" - "$BLACKBOX_DKG_HOME" "$BLACKBOX_DKG_PORT" "$BLACKBOX_DKG_SELECTED_STORE_BACKEND" "$BLACKBOX_DKG_STORE_URL" "$BLACKBOX_DKG_STORE_MANAGED_BY_DKG" <<'PYEOF'
+    config_state="$("$VENV_DIR/bin/python" - "$BLACKBOX_DKG_HOME" "$BLACKBOX_DKG_PORT" "$BLACKBOX_DKG_SELECTED_STORE_BACKEND" "$BLACKBOX_DKG_STORE_URL" "$BLACKBOX_DKG_STORE_MANAGED_BY_DKG" "$BLACKBOX_CONTEXT_GRAPH_ID" <<'PYEOF'
 import json
 import os
 import secrets
@@ -562,6 +579,7 @@ api_port = int(sys.argv[2])
 store_backend = sys.argv[3]
 store_url = sys.argv[4]
 store_managed = sys.argv[5].lower() == "true"
+context_graph_id = sys.argv[6]
 home.mkdir(parents=True, exist_ok=True)
 cfg_path = home / "config.json"
 original = None
@@ -602,6 +620,12 @@ data.pop("syncAgentsMeta", None)
 data.pop("syncGlobalMaxInflight", None)
 data.pop("syncGlobalQueueLimit", None)
 data.pop("restrictAutoSubscribeContextGraphs", None)
+data["syncSharedMemoryOnConnect"] = False
+priorities = data.get("syncContextGraphPriorities")
+if not isinstance(priorities, dict):
+    priorities = {}
+priorities.update({context_graph_id: 100, "agents": -100, "ontology": -100})
+data["syncContextGraphPriorities"] = priorities
 data.setdefault("autoUpdate", {"enabled": False})
 data["chain"] = {
     "type": "evm",
@@ -1333,7 +1357,10 @@ install_dkg() {
             return 0
         fi
         step "Restarting the Blackbox-owned DKG node to activate sync and relay updates ..."
-        if blackbox_dkg stop && blackbox_dkg start && wait_for_blackbox_dkg_runtime; then
+        if blackbox_dkg stop; then
+            blackbox_dkg start || true
+        fi
+        if wait_for_blackbox_dkg_runtime; then
             rm -f "$BLACKBOX_DKG_STORE_RESET_MARKER"
             ok "Blackbox DKG node restarted with the current sync settings"
             if ! record_blackbox_dkg_runtime_fingerprint; then
@@ -1360,7 +1387,11 @@ install_dkg() {
     step "  DKG CLI:  $BLACKBOX_DKG_BIN"
     step "  Store:    $(blackbox_store_description)"
     step "  (non-interactive; subscribing and reading need no wallet funding)"
-    if blackbox_dkg start && wait_for_blackbox_dkg_runtime; then
+    # DKG's launcher can give up its 15-second startup wait just before a
+    # healthy daemon finishes loading a large Blazegraph namespace. The
+    # commit-aware readiness check below is the authoritative result.
+    blackbox_dkg start || true
+    if wait_for_blackbox_dkg_runtime; then
         rm -f "$BLACKBOX_DKG_STORE_RESET_MARKER"
         ok "DKG node bootstrapped on $DKG_NETWORK"
         if ! record_blackbox_dkg_runtime_fingerprint; then

@@ -667,20 +667,18 @@ def _cmd_sync_impl(args: argparse.Namespace) -> int:
             and not authoritative_attempted
         ):
             authoritative_attempted = True
-            authoritative_recovered = _catchup_authoritative_vm(
+            recovered_target = _catchup_authoritative_vm(
                 client,
                 cfg.context_graph_id,
                 cfg.graph_peer_id,
                 deadline,
             )
+            authoritative_recovered = recovered_target is not None
             rs = ruleset.refresh(cfg, client)
             counts = rs.counts()
             public_count = _ruleset_graph_count(rs, "public")
             community_count = _ruleset_graph_count(rs, "community")
-            authoritative_target = max(
-                public_count,
-                _ruleset_graph_union_count(rs, public_count, community_count),
-            )
+            authoritative_target = int(recovered_target or 0)
         if authoritative_recovered:
             authoritative_complete = (
                 authoritative_target > 0 and public_count >= authoritative_target
@@ -694,7 +692,7 @@ def _cmd_sync_impl(args: argparse.Namespace) -> int:
                 context_graph_id=cfg.context_graph_id,
                 graph_peer_id=cfg.graph_peer_id,
                 phase=(
-                    "reconciling-public-memory"
+                    "refreshing-verifiable-memory"
                     if not authoritative_complete
                     else "network-catchup"
                 ),
@@ -720,7 +718,7 @@ def _cmd_sync_impl(args: argparse.Namespace) -> int:
                     "failed",
                     context_graph_id=cfg.context_graph_id,
                     graph_peer_id=cfg.graph_peer_id,
-                    phase="reconciling-public-memory",
+                    phase="refreshing-verifiable-memory",
                     public_entries=public_count,
                     expected_public_entries=authoritative_target,
                     community_entries=community_count,
@@ -806,57 +804,27 @@ def _ruleset_graph_count(rs: Any, source: str) -> int:
     return sum(int(value or 0) for value in rs.counts().values())
 
 
-def _ruleset_graph_union_count(
-    rs: Any,
-    public_count: int,
-    community_count: int,
-) -> int:
-    """Expected VM rows represented by the recovered curator snapshot.
-
-    Publisher batches remain visible in SWM while their finalized VM copies
-    reconcile.  Their identifier union therefore describes the complete
-    public snapshot without double-counting entries already present in VM.
-    Older cached/test rulesets may not expose graph entries; retain a safe
-    count-only fallback for those callers.
-    """
-    reader = getattr(rs, "graph_entries", None)
-    if not callable(reader):
-        return max(0, int(public_count)) + max(0, int(community_count))
-    identifiers = set()
-    for source in ("public", "community"):
-        try:
-            entries = reader(source) or []
-        except Exception:
-            entries = []
-        for entry in entries:
-            if not isinstance(entry, dict):
-                continue
-            identifier = str(entry.get("identifier") or "").strip()
-            if identifier:
-                identifiers.add(identifier)
-    if identifiers:
-        return len(identifiers)
-    return max(0, int(public_count)) + max(0, int(community_count))
-
-
 def _catchup_authoritative_vm(
     client: DkgClient,
     context_graph_id: str,
     graph_peer_id: str,
     deadline: float,
-) -> bool:
-    """Recover the curator's complete SWM snapshot for VM reconciliation."""
+) -> Optional[int]:
+    """Recover and verify the publisher's durable VM snapshot."""
     catchup = getattr(client, "catchup_from_peer", None)
-    if not callable(catchup) or not graph_peer_id:
-        return True
+    threat_count = getattr(client, "threat_count", None)
+    if not callable(catchup) or not callable(threat_count) or not graph_peer_id:
+        return None
     sync_state.write(
         "running",
         context_graph_id=context_graph_id,
         graph_peer_id=graph_peer_id,
-        phase="recovering-shared-memory",
+        phase="recovering-verifiable-memory",
     )
-    print("Recovering the complete curator snapshot needed for public VM sync...")
+    print("Recovering the complete publisher VM snapshot...")
     backpressure_notice_printed = False
+    last_local = 0
+    last_expected = 0
     while True:
         remaining = deadline - time.monotonic()
         if remaining <= 1:
@@ -866,17 +834,27 @@ def _catchup_authoritative_vm(
                 graph_peer_id=graph_peer_id,
                 error="authoritative sync deadline reached",
             )
-            return False
+            return None
         budget_ms = max(
             1_000,
-            min(3_600_000, int(max(1.0, remaining - 10) * 1_000)),
+            min(300_000, int(max(1.0, remaining - 10) * 1_000)),
         )
         try:
             result = catchup(context_graph_id, graph_peer_id, budget_ms=budget_ms)
-            break
         except DkgError as exc:
             error = str(exc)
-            if "backpressure" in error.lower() and deadline - time.monotonic() > 4:
+            retryable = any(
+                marker in error.lower()
+                for marker in (
+                    "backpressure",
+                    '"retryable":true',
+                    '"retryable": true',
+                    "durable_catchup_all_peers_failed",
+                    "store scheduler",
+                    "queue wait timeout",
+                )
+            )
+            if retryable and deadline - time.monotonic() > 4:
                 sync_state.write(
                     "running",
                     context_graph_id=context_graph_id,
@@ -884,7 +862,7 @@ def _catchup_authoritative_vm(
                     phase="waiting-for-dkg-capacity",
                 )
                 if not backpressure_notice_printed:
-                    print("DKG snapshot queue is busy; waiting for safe recovery capacity...")
+                    print("DKG VM sync queue is busy; waiting for safe recovery capacity...")
                     backpressure_notice_printed = True
                 time.sleep(min(10.0, max(0.2, deadline - time.monotonic())))
                 continue
@@ -895,33 +873,76 @@ def _catchup_authoritative_vm(
                 error=error,
             )
             logger.debug("blackbox: authoritative curator recovery failed: %s", exc)
-            return False
-    if not isinstance(result, dict) or result.get("completed") is not True:
-        error = str(
-            (result or {}).get("error")
-            or "curator recovery returned an incomplete snapshot"
+            return None
+        results = result.get("results") if isinstance(result, dict) else None
+        peer_result = next(
+            (
+                item
+                for item in (results or [])
+                if isinstance(item, dict)
+                and str(item.get("peerId") or "") == graph_peer_id
+            ),
+            None,
         )
+        peer_error = ""
+        if isinstance(peer_result, dict):
+            peer_error = str(
+                peer_result.get("durableError")
+                or peer_result.get("error")
+                or peer_result.get("errors")
+                or ""
+            )
+        attempted = bool(
+            isinstance(result, dict)
+            and result.get("ok") is True
+            and result.get("includeDurable") is True
+            and result.get("includeSharedMemory") is False
+            and int(result.get("peersAttempted") or 0) >= 1
+            and isinstance(peer_result, dict)
+            and not peer_error
+        )
+        if not attempted:
+            error = str(
+                (result or {}).get("error")
+                or peer_error
+                or "publisher did not accept durable VM recovery"
+            )
+            if deadline - time.monotonic() <= 4:
+                sync_state.write(
+                    "failed",
+                    context_graph_id=context_graph_id,
+                    graph_peer_id=graph_peer_id,
+                    error=error,
+                )
+                return None
+            time.sleep(min(3.0, max(0.2, deadline - time.monotonic())))
+            continue
+        try:
+            last_expected = int(threat_count(context_graph_id, peer_id=graph_peer_id))
+            last_local = int(threat_count(context_graph_id))
+        except DkgError as exc:
+            logger.debug("blackbox: publisher VM count verification failed: %s", exc)
+        if last_expected > 0 and last_local >= last_expected:
+            sync_state.write(
+                "running",
+                context_graph_id=context_graph_id,
+                graph_peer_id=graph_peer_id,
+                phase="refreshing-verifiable-memory",
+                public_entries=last_local,
+                expected_public_entries=last_expected,
+                inserted_durable_triples=int(result.get("totalDurableInsertedTriples") or 0),
+            )
+            print(f"  publisher VM verified ({last_local:,}/{last_expected:,} threats)")
+            return last_expected
         sync_state.write(
-            "failed",
+            "running",
             context_graph_id=context_graph_id,
             graph_peer_id=graph_peer_id,
-            error=error,
+            phase="waiting-for-verifiable-memory",
+            public_entries=last_local,
+            expected_public_entries=last_expected,
         )
-        return False
-    sync_state.write(
-        "running",
-        context_graph_id=context_graph_id,
-        graph_peer_id=graph_peer_id,
-        phase="reconciling-public-memory",
-        replaced_roots=int(result.get("replacedRoots") or 0),
-        inserted_data_quads=int(result.get("insertedDataQuads") or 0),
-        inserted_meta_quads=int(result.get("insertedMetaQuads") or 0),
-    )
-    print(
-        "  curator snapshot verified; DKG is reconciling its public VM "
-        f"({int(result.get('replacedRoots') or 0):,} roots recovered)"
-    )
-    return True
+        time.sleep(min(3.0, max(0.2, deadline - time.monotonic())))
 
 
 def _catchup_denied(catchup: Dict[str, Any]) -> bool:

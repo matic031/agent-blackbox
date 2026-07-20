@@ -17,6 +17,7 @@ DASHBOARD_HTML = (
     / "static"
     / "index.html"
 )
+OPENCLAW_DIR = Path(__file__).resolve().parents[2] / "integrations" / "openclaw"
 
 
 def test_refresh_queries_only_verifiable_memory(monkeypatch, tmp_path):
@@ -67,6 +68,21 @@ def test_dashboard_settings_fallback_keeps_community_sharing_off():
     assert "out.report = false;" in html
     assert 'report: true, report_min_severity: "high"' not in html
     assert "out.report = data.report !== false;" not in html
+
+
+def test_openclaw_runtime_is_vm_only_and_reporting_cannot_be_reenabled():
+    ruleset_src = (OPENCLAW_DIR / "src" / "ruleset.ts").read_text(encoding="utf-8")
+    config_src = (OPENCLAW_DIR / "src" / "config.ts").read_text(encoding="utf-8")
+    client_src = (OPENCLAW_DIR / "src" / "dkgClient.ts").read_text(encoding="utf-8")
+
+    tiers = ruleset_src.split("const TIERS", 1)[1].split("];", 1)[0]
+    assert '["verifiable-memory", "public"]' in tiers
+    assert "shared-working-memory" not in tiers
+    assert 'view: DkgView = "verifiable-memory"' in client_src
+    assert "report: false" in config_src
+    assert "dailyReportLimit: 0" in config_src
+    assert "report: bool(env.BLACKBOX_REPORT)" not in config_src
+    assert 'row.source !== "community"' in ruleset_src
 
 
 def test_report_command_submits_nothing(monkeypatch, capsys):

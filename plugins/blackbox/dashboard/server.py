@@ -448,7 +448,9 @@ def _sync_activity(
 
     if transfer_status == "running":
         labels = {
-            "recovering-shared-memory": "Receiving curator snapshot",
+            "recovering-verifiable-memory": "Receiving publisher VM",
+            "waiting-for-verifiable-memory": "Verifying publisher VM",
+            "refreshing-verifiable-memory": "Refreshing verified threats",
             "reconciling-public-memory": "Indexing verified public threats",
         }
         progress.update(
@@ -458,7 +460,7 @@ def _sync_activity(
             started_at=transfer.get("started_at"),
             updated_at=transfer.get("updated_at"),
         )
-        if phase == "reconciling-public-memory" and expected > 0:
+        if phase in {"reconciling-public-memory", "refreshing-verifiable-memory", "waiting-for-verifiable-memory"} and expected > 0:
             bounded = max(0, min(current, expected))
             progress.update(
                 detail=f"{bounded:,} of {expected:,} verified public threats are queryable.",
@@ -871,7 +873,7 @@ def create_app(*, manage_guardian: bool = False):
                     _RULESET_MIN_RETRY_SEC,
                     float(cfg.sync_interval or _RULESET_EMPTY_RETRY_SEC) - elapsed,
                 )
-                if public == 0 or community == 0:
+                if public == 0:
                     wait = min(_RULESET_EMPTY_RETRY_SEC, wait)
                 if total != last_total:
                     logger.info(

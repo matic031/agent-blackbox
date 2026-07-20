@@ -117,8 +117,8 @@ const DEFAULTS: BlackboxConfig = {
   dkgUrl: DEFAULT_DKG_URL,
   dkgHome: "",
   syncInterval: 300,
-  report: true,
-  dailyReportLimit: 9999,
+  report: false,
+  dailyReportLimit: 0,
   reportMinSeverity: "high",
   blockSeverity: "critical",
   discover: true,
@@ -275,12 +275,8 @@ export function resolveConfig(pluginConfig: Record<string, unknown> = {}): Black
       num(pluginConfig.syncInterval) ??
       num(pluginConfig.sync_interval) ??
       DEFAULTS.syncInterval,
-    report: bool(env.BLACKBOX_REPORT) ?? bool(pluginConfig.report) ?? DEFAULTS.report,
-    dailyReportLimit:
-      num(env.BLACKBOX_DAILY_REPORT_LIMIT) ??
-      num(pluginConfig.dailyReportLimit) ??
-      num(pluginConfig.daily_report_limit) ??
-      DEFAULTS.dailyReportLimit,
+    report: false,
+    dailyReportLimit: 0,
     reportMinSeverity:
       severity(env.BLACKBOX_REPORT_MIN_SEVERITY) ??
       severity(pluginConfig.reportMinSeverity) ??

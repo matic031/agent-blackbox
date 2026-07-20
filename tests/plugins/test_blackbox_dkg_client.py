@@ -165,20 +165,24 @@ def test_catchup_status_encodes_context_graph_id(monkeypatch):
     )
 
 
-def test_authoritative_catchup_pins_curator_for_atomic_swm_recovery(monkeypatch):
-    cap = _capture(monkeypatch, '{"completed":true,"replacedRoots":23}')
+def test_authoritative_catchup_pins_publisher_for_durable_vm_recovery(monkeypatch):
+    cap = _capture(monkeypatch, '{"ok":true,"totalDurableInsertedTriples":23}')
     client = dkg_client.DkgClient(url="http://node", token="tok")
 
     result = client.catchup_from_peer("owner/private", "curator-peer", budget_ms=9_999_999)
 
-    assert result == {"completed": True, "replacedRoots": 23}
+    assert result == {"ok": True, "totalDurableInsertedTriples": 23}
     assert cap["method"] == "POST"
-    assert cap["url"] == "http://node/api/context-graph/recover-shared-memory"
+    assert cap["url"] == "http://node/api/shared-memory/catchup"
     assert json.loads(cap["body"]) == {
         "contextGraphId": "owner/private",
-        "remotePeerId": "curator-peer",
+        "peerId": "curator-peer",
+        "includeSharedMemory": False,
+        "includeDurable": True,
+        "hostCatchupFallback": False,
+        "perPeerDurableBudgetMs": 300_000,
     }
-    assert cap["timeout"] == 3610
+    assert cap["timeout"] == 310
 
 
 def test_context_graph_has_agent_uses_local_participants_metadata(monkeypatch):
@@ -265,16 +269,38 @@ def test_restart_context_graph_catchup_uses_official_unsubscribe_then_subscribe(
     ]
     assert [json.loads(call["body"]) for call in cap["calls"]] == [
         {"contextGraphId": "cg"},
-        {"contextGraphId": "cg", "includeSharedMemory": True},
+        {"contextGraphId": "cg", "includeSharedMemory": False},
     ]
 
 
 def test_query_normalizes_bindings(monkeypatch):
     body = json.dumps({"bindings": [{"identifier": '"dep:npm:x@1"'}]})
-    _capture(monkeypatch, body=body)
+    cap = _capture(monkeypatch, body=body)
     client = dkg_client.DkgClient(url="http://node", token="t")
     rows = client.query("SELECT * WHERE {?s ?p ?o}", "cg")
     assert rows == [{"identifier": '"dep:npm:x@1"'}]
+    assert json.loads(cap["body"])["view"] == "verifiable-memory"
+
+
+def test_threat_count_verifies_pinned_publisher_and_local_vm(monkeypatch):
+    cap = _capture_sequence(
+        monkeypatch,
+        [
+            '{"status":"OK","bindings":"[{\\"n\\":{\\"value\\":\\"25000\\"}}]"}',
+            '{"bindings":[{"n":{"value":"25000"}}]}',
+        ],
+    )
+    client = dkg_client.DkgClient(url="http://node", token="tok")
+
+    assert client.threat_count("cg", peer_id="publisher") == 25_000
+    assert client.threat_count("cg") == 25_000
+    assert cap["calls"][0]["url"] == "http://node/api/query-remote"
+    remote = json.loads(cap["calls"][0]["body"])
+    assert remote["peerId"] == "publisher"
+    assert remote["lookupType"] == "SPARQL_QUERY"
+    assert remote["contextGraphId"] == "cg"
+    assert cap["calls"][1]["url"] == "http://node/api/query"
+    assert json.loads(cap["calls"][1]["body"])["view"] == "verifiable-memory"
 
 
 def test_working_memory_query_sends_agent_address(monkeypatch):
