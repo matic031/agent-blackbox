@@ -190,7 +190,11 @@ def test_windows_installer_creates_global_blackbox_launcher() -> None:
     assert text.index("Install-BlackboxCommand") < text.rindex("Install-Dkg")
 
 
-def _select_unix_install_root(home: Path, explicit: Path | None = None) -> Path:
+def _select_unix_install_root(
+    home: Path,
+    explicit: Path | None = None,
+    invocation_dir: Path | None = None,
+) -> Path:
     """Evaluate only the install-root preamble with an isolated fake home."""
     text = INSTALL_SH.read_text(encoding="utf-8")
     preamble = text.split('DKG_NETWORK="${BLACKBOX_DKG_NETWORK', 1)[0]
@@ -203,6 +207,7 @@ def _select_unix_install_root(home: Path, explicit: Path | None = None) -> Path:
         capture_output=True,
         text=True,
         env=env,
+        cwd=invocation_dir or home,
     )
     return Path(result.stdout)
 
@@ -319,7 +324,7 @@ def test_unix_installer_uses_isolated_blackbox_dkg_node() -> None:
     assert 'BLACKBOX_DKG_PORT="${BLACKBOX_DKG_PORT:-9320}"' in text
     assert 'BLACKBOX_DKG_STORE_PORT="${BLACKBOX_DKG_STORE_PORT:-9999}"' in text
     assert 'BLACKBOX_DKG_STORE_URL="${BLACKBOX_DKG_STORE_URL:-}"' in text
-    assert 'BLACKBOX_INSTALL_ROOT="$HOME/agent-blackbox"' in text
+    assert 'BLACKBOX_INSTALL_ROOT="$PWD/agent-blackbox"' in text
     assert 'BLACKBOX_DKG_HOME="$BLACKBOX_INSTALL_ROOT/.dkg"' in text
     assert 'BLACKBOX_DKG_CLI_DIR="$BLACKBOX_INSTALL_ROOT/dkg"' in text
     assert 'BLACKBOX_DKG_BIN="$BLACKBOX_DKG_CLI_DIR/node_modules/.bin/dkg"' in text
@@ -496,9 +501,10 @@ def test_unix_installer_uses_agent_blackbox_checkout(
 
     assert _select_unix_install_root(home) == home / "agent-blackbox"
 
-    repo_checkout = home / "agent-blackbox"
-    (repo_checkout / ".git").mkdir(parents=True)
-    assert _select_unix_install_root(home) == repo_checkout
+    repo_checkout = tmp_path / "existing-checkout"
+    (repo_checkout / "plugins" / "blackbox").mkdir(parents=True)
+    (repo_checkout / "pyproject.toml").write_text("[project]\nname='blackbox'\n")
+    assert _select_unix_install_root(home, invocation_dir=repo_checkout) == repo_checkout
 
     explicit = tmp_path / "custom-blackbox"
     assert _select_unix_install_root(home, explicit) == explicit
@@ -507,8 +513,8 @@ def test_unix_installer_uses_agent_blackbox_checkout(
 def test_windows_installer_uses_agent_blackbox_checkout() -> None:
     text = INSTALL_PS1.read_text(encoding="utf-8")
 
-    assert 'Test-Path "$env:USERPROFILE\\agent-blackbox\\.git"' in text
-    assert '$DefaultRepoDir = "$env:USERPROFILE\\agent-blackbox"' in text
+    assert 'Join-Path ([string](Get-Location)) "agent-blackbox"' in text
+    assert '$env:USERPROFILE\\agent-blackbox' not in text
 
 
 # The four mainnet-base core relays written to config.relayPeers.

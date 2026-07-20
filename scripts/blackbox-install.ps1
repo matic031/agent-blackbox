@@ -38,14 +38,18 @@ $RepoUrl     = if ($env:BLACKBOX_REPO_URL)    { $env:BLACKBOX_REPO_URL }    else
 $RepoBranch  = if ($env:BLACKBOX_REPO_BRANCH) { $env:BLACKBOX_REPO_BRANCH } else { "main" }
 $HermesHome  = if ($env:HERMES_HOME)          { $env:HERMES_HOME }          else { "$env:USERPROFILE\.hermes" }
 # Keep the managed npm DKG package and state in the Agent Blackbox checkout. When
-# invoked from a clone, use that clone; when piped through iex, use the checkout
-# Resolve-Repo creates at BLACKBOX_INSTALL_DIR.
+# invoked from a clone, use that clone; when piped through iex, default to an
+# agent-blackbox child of the invocation directory. BLACKBOX_INSTALL_DIR remains
+# the explicit override.
 if ($env:BLACKBOX_INSTALL_DIR) {
     $DefaultRepoDir = $env:BLACKBOX_INSTALL_DIR
-} elseif (Test-Path "$env:USERPROFILE\agent-blackbox\.git") {
-    $DefaultRepoDir = "$env:USERPROFILE\agent-blackbox"
+} elseif (
+    (Test-Path "$(Get-Location)\pyproject.toml") -and
+    (Test-Path "$(Get-Location)\plugins\blackbox")
+) {
+    $DefaultRepoDir = [string](Get-Location)
 } else {
-    $DefaultRepoDir = "$env:USERPROFILE\agent-blackbox"
+    $DefaultRepoDir = Join-Path ([string](Get-Location)) "agent-blackbox"
 }
 if ($PSCommandPath) {
     $candidateRepoDir = Split-Path -Parent (Split-Path -Parent $PSCommandPath)
@@ -767,6 +771,28 @@ print("switched" if switched else ("changed" if changed else "unchanged"))
 }
 
 # ── Locate (or fetch) the repo ──────────────────────────────────────────────
+function Test-BlackboxRepoCheckout {
+    param([string]$Path)
+    if (-not (Test-Path "$Path\.git")) { return $false }
+    if (-not (Test-Path "$Path\pyproject.toml")) { return $false }
+    if (-not (Test-Path "$Path\plugins\blackbox")) { return $false }
+    try {
+        & git -C $Path rev-parse --verify HEAD *> $null
+        return $LASTEXITCODE -eq 0
+    } catch {
+        return $false
+    }
+}
+
+function Move-BrokenBlackboxRepoAside {
+    param([string]$Path)
+    $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
+    $backup = "$Path.broken-$stamp-$PID"
+    Write-Warn2 "Existing install at $Path is incomplete or not an Agent Blackbox checkout."
+    Move-Item -LiteralPath $Path -Destination $backup
+    Write-Step "Preserved it at $backup"
+}
+
 function Resolve-Repo {
     $scriptDir = Split-Path -Parent $PSCommandPath
     if ($scriptDir) {
@@ -782,14 +808,24 @@ function Resolve-Repo {
         exit 1
     }
     $script:RepoDir = $DefaultRepoDir
-    if (Test-Path "$RepoDir\.git") {
+    if ((Test-Path $RepoDir) -and -not (Test-BlackboxRepoCheckout $RepoDir)) {
+        Move-BrokenBlackboxRepoAside $RepoDir
+    }
+    if (Test-BlackboxRepoCheckout $RepoDir) {
         Write-Step "Updating existing clone at $RepoDir"
-        git -C $RepoDir fetch --depth 1 origin $RepoBranch 2>$null
-        git -C $RepoDir checkout $RepoBranch 2>$null
-        git -C $RepoDir pull --ff-only 2>$null
+        & git -C $RepoDir fetch --depth 1 origin $RepoBranch
+        if ($LASTEXITCODE -ne 0) { throw "Could not fetch $RepoBranch from $RepoUrl" }
+        & git -C $RepoDir checkout $RepoBranch
+        if ($LASTEXITCODE -ne 0) { throw "Could not check out $RepoBranch in $RepoDir" }
+        & git -C $RepoDir pull --ff-only origin $RepoBranch
+        if ($LASTEXITCODE -ne 0) { throw "Could not fast-forward $RepoDir to origin/$RepoBranch" }
     } else {
         Write-Step "Cloning $RepoUrl -> $RepoDir"
-        git clone --depth 1 --branch $RepoBranch $RepoUrl $RepoDir
+        & git clone --depth 1 --branch $RepoBranch $RepoUrl $RepoDir
+        if ($LASTEXITCODE -ne 0) { throw "Could not clone $RepoUrl into $RepoDir" }
+    }
+    if (-not (Test-BlackboxRepoCheckout $RepoDir)) {
+        throw "$RepoDir is not a complete Agent Blackbox Python project"
     }
     Write-Ok "Repo ready at $RepoDir"
 }

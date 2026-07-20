@@ -25,13 +25,14 @@ REPO_BRANCH="${BLACKBOX_REPO_BRANCH:-main}"
 HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
 # Keep the managed npm DKG package and node state inside the Agent Blackbox
 # checkout. For a local script this is the current repository; for curl | bash
-# it is the checkout the installer creates at BLACKBOX_INSTALL_DIR.
+# the default is ./agent-blackbox beneath the directory where the user invoked
+# the installer. BLACKBOX_INSTALL_DIR remains the explicit override.
 if [ -n "${BLACKBOX_INSTALL_DIR:-}" ]; then
     BLACKBOX_INSTALL_ROOT="$BLACKBOX_INSTALL_DIR"
-elif [ -e "$HOME/agent-blackbox/.git" ]; then
-    BLACKBOX_INSTALL_ROOT="$HOME/agent-blackbox"
+elif [ -f "$PWD/pyproject.toml" ] && [ -d "$PWD/plugins/blackbox" ]; then
+    BLACKBOX_INSTALL_ROOT="$PWD"
 else
-    BLACKBOX_INSTALL_ROOT="$HOME/agent-blackbox"
+    BLACKBOX_INSTALL_ROOT="$PWD/agent-blackbox"
 fi
 BLACKBOX_INSTALL_SCRIPT="${BASH_SOURCE[0]:-}"
 if [ -n "$BLACKBOX_INSTALL_SCRIPT" ] && [ -f "$BLACKBOX_INSTALL_SCRIPT" ]; then
@@ -729,6 +730,22 @@ fi
 
 # ── Locate (or fetch) the repo ──────────────────────────────────────────────
 # When run from a clone, use it in-place. When piped from curl, clone REPO_URL.
+blackbox_repo_is_valid() {
+    local repo="$1"
+    [ -d "$repo/.git" ] &&
+        git -C "$repo" rev-parse --verify HEAD >/dev/null 2>&1 &&
+        [ -f "$repo/pyproject.toml" ] &&
+        [ -d "$repo/plugins/blackbox" ]
+}
+
+move_broken_blackbox_repo_aside() {
+    local repo="$1"
+    local backup="${repo}.broken-$(date +%Y%m%d-%H%M%S)-$$"
+    warn "Existing install at $repo is incomplete or not an Agent Blackbox checkout."
+    mv -- "$repo" "$backup"
+    step "Preserved it at $backup"
+}
+
 resolve_repo() {
     local script_src="${BASH_SOURCE[0]:-}"
     if [ -n "$script_src" ] && [ -f "$script_src" ]; then
@@ -746,14 +763,30 @@ resolve_repo() {
         exit 1
     fi
     REPO_DIR="$BLACKBOX_INSTALL_ROOT"
-    if [ -d "$REPO_DIR/.git" ]; then
+    if [ -e "$REPO_DIR" ] && ! blackbox_repo_is_valid "$REPO_DIR"; then
+        move_broken_blackbox_repo_aside "$REPO_DIR"
+    fi
+    if blackbox_repo_is_valid "$REPO_DIR"; then
         step "Updating existing clone at $REPO_DIR"
-        git -C "$REPO_DIR" fetch --depth 1 origin "$REPO_BRANCH" >/dev/null 2>&1 || true
-        git -C "$REPO_DIR" checkout "$REPO_BRANCH" >/dev/null 2>&1 || true
-        git -C "$REPO_DIR" pull --ff-only >/dev/null 2>&1 || true
+        if ! git -C "$REPO_DIR" fetch --depth 1 origin "$REPO_BRANCH"; then
+            err "Could not fetch $REPO_BRANCH from $REPO_URL."
+            return 1
+        fi
+        if ! git -C "$REPO_DIR" checkout "$REPO_BRANCH"; then
+            err "Could not check out $REPO_BRANCH in $REPO_DIR. Resolve local changes and re-run."
+            return 1
+        fi
+        if ! git -C "$REPO_DIR" pull --ff-only origin "$REPO_BRANCH"; then
+            err "Could not fast-forward $REPO_DIR to origin/$REPO_BRANCH."
+            return 1
+        fi
     else
         step "Cloning $REPO_URL → $REPO_DIR"
         git clone --depth 1 --branch "$REPO_BRANCH" "$REPO_URL" "$REPO_DIR"
+    fi
+    if ! blackbox_repo_is_valid "$REPO_DIR"; then
+        err "$REPO_DIR is not a complete Agent Blackbox Python project."
+        return 1
     fi
     ok "Repo ready at $REPO_DIR"
 }
