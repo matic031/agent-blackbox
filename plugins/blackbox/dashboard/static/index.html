@@ -191,6 +191,15 @@
     -webkit-font-smoothing: antialiased;
     text-rendering: optimizeLegibility;
   }
+  body.settings-scroll-locked {
+    position: fixed;
+    top: var(--settings-scroll-top, 0);
+    left: 0;
+    right: 0;
+    width: 100%;
+    overflow: hidden;
+    padding-right: var(--settings-scrollbar-width, 0px);
+  }
 
   ::selection { color: var(--bg); background: var(--text); }
   :focus-visible { outline-color: var(--text); }
@@ -6498,9 +6507,26 @@
   }
 
   // ---- open / close (mirrors the threat-modal conventions) ----
+  var settingsPageScrollY = 0;
+  function lockSettingsPageScroll() {
+    if (document.body.classList.contains("settings-scroll-locked")) return;
+    settingsPageScrollY = window.scrollY || window.pageYOffset || 0;
+    var scrollbarWidth = Math.max(0, window.innerWidth - document.documentElement.clientWidth);
+    document.body.style.setProperty("--settings-scroll-top", (-settingsPageScrollY) + "px");
+    document.body.style.setProperty("--settings-scrollbar-width", scrollbarWidth + "px");
+    document.body.classList.add("settings-scroll-locked");
+  }
+  function unlockSettingsPageScroll() {
+    if (!document.body.classList.contains("settings-scroll-locked")) return;
+    document.body.classList.remove("settings-scroll-locked");
+    document.body.style.removeProperty("--settings-scroll-top");
+    document.body.style.removeProperty("--settings-scrollbar-width");
+    window.scrollTo(0, settingsPageScrollY);
+  }
   function openSettings() {
     var overlay = $("settings-modal");
     if (!overlay) return;
+    lockSettingsPageScroll();
     overlay.classList.add("open");
     overlay.setAttribute("aria-hidden", "false");
     if (setState) renderAllSettings(); else setStatus("Loading settings…");
@@ -6513,6 +6539,7 @@
     if (!overlay) return;
     overlay.classList.remove("open");
     overlay.setAttribute("aria-hidden", "true");
+    unlockSettingsPageScroll();
     var gear = $("settings-open");
     if (gear) gear.focus();
   }
@@ -6919,11 +6946,9 @@
     </div>
 
     <div class="set-body">
-      <!-- Appearance is browser-local and applies immediately. -->
+      <!-- Appearance applies immediately. -->
       <div class="set-group">
-        <div class="set-glabel">Appearance
-          <span class="set-gnote">saved in this browser</span>
-        </div>
+        <div class="set-glabel">Appearance</div>
         <div class="set-row">
           <div class="set-rl">
             <div class="set-rt">Theme</div>
