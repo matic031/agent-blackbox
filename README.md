@@ -30,6 +30,11 @@ before damage is done.
 
 ## Install
 
+Docker is required for the default Blazegraph store. On macOS, the installer
+starts Docker Desktop automatically when it is installed but stopped. On Linux,
+start Docker Engine first. To install without Docker, download the script and
+run it with `--store oxigraph`.
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/umanitek/agent-blackbox/main/scripts/blackbox-install.sh | bash
 ```

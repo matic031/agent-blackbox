@@ -1017,6 +1017,81 @@ def test_installers_offer_both_store_backends_and_actionable_docker_setup() -> N
     assert "Installation stopped before changing the DKG store" in windows
 
 
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash is unavailable")
+def test_piped_installer_oxigraph_prompt_handles_missing_controlling_tty() -> None:
+    command = f"""
+confirm_oxigraph_fallback() {{
+{_extract_function_body("confirm_oxigraph_fallback")}
+}}
+warn() {{ printf 'warn:%s\\n' "$1"; }}
+step() {{ printf 'step:%s\\n' "$1"; }}
+confirm_oxigraph_fallback "Docker unavailable"
+"""
+    completed = subprocess.run(
+        ["bash", "-c", command],
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 1
+    assert "No interactive terminal is available" in completed.stdout
+    assert "Device not configured" not in completed.stderr
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash is unavailable")
+def test_macos_installer_starts_installed_docker_desktop(tmp_path: Path) -> None:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    docker_state = tmp_path / "docker-attempts"
+    docker = fake_bin / "docker"
+    docker.write_text(
+        "#!/bin/sh\n"
+        f"state={shlex.quote(str(docker_state))}\n"
+        "n=0; [ ! -f \"$state\" ] || n=$(cat \"$state\")\n"
+        "n=$((n + 1)); printf '%s' \"$n\" >\"$state\"\n"
+        "[ \"$n\" -ge 2 ]\n",
+        encoding="utf-8",
+    )
+    docker.chmod(0o755)
+    opened = tmp_path / "opened"
+    open_cmd = fake_bin / "open"
+    open_cmd.write_text(
+        f"#!/bin/sh\nprintf started >{shlex.quote(str(opened))}\n",
+        encoding="utf-8",
+    )
+    open_cmd.chmod(0o755)
+    app = tmp_path / "home" / "Applications" / "Docker.app"
+    app.mkdir(parents=True)
+
+    command = f"""
+require_docker_for_blazegraph() {{
+{_extract_function_body("require_docker_for_blazegraph")}
+}}
+ok() {{ printf 'ok:%s\\n' "$1"; }}
+step() {{ printf 'step:%s\\n' "$1"; }}
+warn() {{ printf 'warn:%s\\n' "$1"; }}
+docker_setup_hint() {{ return 1; }}
+sleep() {{ :; }}
+OS=macos
+HOME={shlex.quote(str(tmp_path / "home"))}
+PATH={shlex.quote(str(fake_bin) + os.pathsep + os.environ.get("PATH", ""))}
+BLACKBOX_DOCKER_REQUIRED=false
+require_docker_for_blazegraph
+"""
+    completed = subprocess.run(
+        ["bash", "-c", command],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    assert opened.read_text(encoding="utf-8") == "started"
+    assert "starting it now" in completed.stdout
+    assert "Docker Desktop is ready" in completed.stdout
+
+
 def test_blazegraph_helper_uses_built_dkg_provisioner(tmp_path: Path) -> None:
     node = shutil.which("node")
     if not node:

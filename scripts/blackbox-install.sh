@@ -389,6 +389,28 @@ docker_setup_hint() {
 }
 
 require_docker_for_blazegraph() {
+    if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+        ok "Docker engine is ready for Blazegraph"
+        return 0
+    fi
+    if [ "$OS" = "macos" ] && command -v docker >/dev/null 2>&1 &&
+        [ -d "/Applications/Docker.app" -o -d "$HOME/Applications/Docker.app" ]; then
+        step "Docker Desktop is installed but stopped; starting it now ..."
+        open -gja Docker >/dev/null 2>&1 || true
+        local waited=0
+        while [ "$waited" -lt 120 ]; do
+            if docker info >/dev/null 2>&1; then
+                ok "Docker Desktop is ready for Blazegraph"
+                return 0
+            fi
+            sleep 5
+            waited=$((waited + 5))
+            if [ $((waited % 15)) -eq 0 ]; then
+                step "Waiting for Docker Desktop (${waited}s) ..."
+            fi
+        done
+        warn "Docker Desktop did not become ready within 120 seconds."
+    fi
     if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
         BLACKBOX_DOCKER_REQUIRED=true
         docker_setup_hint
@@ -411,13 +433,18 @@ confirm_oxigraph_fallback() {
     warn "$reason"
     step "Recommended default: stop here, install/start or repair Docker, then re-run Blackbox with Blazegraph."
     step "Alternative: type y to continue now with the DKG-managed Oxigraph store."
-    if [ ! -r /dev/tty ]; then
+    # /dev/tty can exist and pass -r/-w while the piped `curl | bash`
+    # process has no controlling terminal. Probe by opening it once and keep
+    # that descriptor for both prompt and response so no shell-level
+    # "Device not configured" errors leak into the install.
+    if ! { exec 9<>/dev/tty; } 2>/dev/null; then
         warn "No interactive terminal is available, so Oxigraph was not selected."
         step "To choose it explicitly, re-run the installer with: --store oxigraph"
         return 1
     fi
-    printf "Continue with Oxigraph instead? [y/N] " > /dev/tty
-    IFS= read -r answer < /dev/tty || answer=""
+    printf "Continue with Oxigraph instead? [y/N] " >&9
+    IFS= read -r answer <&9 || answer=""
+    exec 9>&-
     case "$answer" in
         y|Y|yes|YES|Yes) return 0 ;;
         *)
@@ -1411,15 +1438,14 @@ sync_ruleset() {
         return 0
     fi
 
-    step "Requesting access, subscribing, and refreshing through the DKG API ..."
-    local sync_out
-    if sync_out="$("$HERMES_BIN" blackbox sync --wait --timeout "$BLACKBOX_DKG_CATCHUP_TIMEOUT" --require-rules 2>&1)"; then
-        printf '%s\n' "$sync_out"
+    step "Requesting the verified snapshot from the configured publisher ..."
+    step "Sync progress will stream below (also saved to $BLACKBOX_SYNC_LOG)."
+    if "$HERMES_BIN" blackbox sync --wait --timeout "$BLACKBOX_DKG_CATCHUP_TIMEOUT" --require-rules 2>&1 |
+        tee "$BLACKBOX_SYNC_LOG"; then
         ok "Ruleset synced — Blackbox is watching with the latest threats"
     else
         BLACKBOX_INSTALL_INCOMPLETE=true
         BLACKBOX_THREAT_GRAPH_INCOMPLETE=true
-        printf '%s\n' "$sync_out"
         err "Initial threat-graph sync did not load any rules."
         step "Blackbox is installed, but setup is incomplete until DKG returns a non-empty ruleset."
         step "Retry after fixing DKG/catch-up with: blackbox sync --wait --require-rules"

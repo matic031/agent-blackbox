@@ -10,7 +10,9 @@ import argparse
 import json
 import logging
 import os
+import queue
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
@@ -545,6 +547,37 @@ def _cmd_sync_impl(args: argparse.Namespace) -> int:
             if status and attempt % 10 == 0:
                 print(status)
 
+        # The release graph has one configured authoritative publisher. A
+        # fresh node must ask it first instead of downloading unrelated durable
+        # graphs from every generic peer and only falling back minutes later.
+        # If the direct path fails, the ordinary subscription/catch-up path
+        # below remains available for compatibility and recovery.
+        if (
+            release_graph
+            and getattr(args, "wait", False)
+            and authoritative_available
+            and not authoritative_attempted
+        ):
+            authoritative_attempted = True
+            authoritative_recovered = _catchup_authoritative_vm(
+                client,
+                cfg.context_graph_id,
+                cfg.graph_peer_id,
+                deadline,
+            )
+            rs = ruleset.refresh(cfg, client)
+            counts = rs.counts()
+            public_count = _ruleset_graph_count(rs, "public")
+            community_count = _ruleset_graph_count(rs, "community")
+            authoritative_target = public_count
+            if authoritative_recovered:
+                # The pinned recovery itself is the subscription-equivalent
+                # network step for the release graph. Keep polling the local VM
+                # until its freshly materialized rows are queryable, without
+                # launching the expensive generic all-peer catch-up as well.
+                subscribed = True
+                fresh_catchup_seen = True
+
         may_probe_private = private_graph and not getattr(args, "wait", False)
         if not subscribed and (admitted or not private_graph or may_probe_private):
             try:
@@ -691,6 +724,8 @@ def _cmd_sync_impl(args: argparse.Namespace) -> int:
             public_count = _ruleset_graph_count(rs, "public")
             community_count = _ruleset_graph_count(rs, "community")
             authoritative_target = public_count
+        if authoritative_recovered and public_count > authoritative_target:
+            authoritative_target = public_count
         if authoritative_recovered:
             authoritative_complete = (
                 authoritative_target > 0 and public_count >= authoritative_target
@@ -834,6 +869,7 @@ def _catchup_authoritative_vm(
     )
     print("Recovering the complete publisher VM snapshot...")
     backpressure_notice_printed = False
+    heartbeat_seconds = 10.0
     while True:
         remaining = deadline - time.monotonic()
         if remaining <= 1:
@@ -849,7 +885,64 @@ def _catchup_authoritative_vm(
             min(300_000, int(max(1.0, remaining - 10) * 1_000)),
         )
         try:
-            result = catchup(context_graph_id, graph_peer_id, budget_ms=budget_ms)
+            # The DKG endpoint is synchronous and its final verification/store
+            # phase can outlive a socket inactivity timeout. Run it behind a
+            # daemon-thread wall-clock guard so a misbehaving daemon cannot pin
+            # a fresh install forever. Polling also gives operators visible
+            # proof of life while the request is legitimately busy.
+            outcome: "queue.Queue[tuple[str, Any]]" = queue.Queue(maxsize=1)
+
+            def _recover() -> None:
+                try:
+                    outcome.put(("ok", catchup(
+                        context_graph_id,
+                        graph_peer_id,
+                        budget_ms=budget_ms,
+                    )))
+                except BaseException as exc:  # delivered back to the caller
+                    outcome.put(("error", exc))
+
+            worker = threading.Thread(
+                target=_recover,
+                name="blackbox-curator-vm-recovery",
+                daemon=True,
+            )
+            worker.start()
+            request_deadline = min(
+                deadline,
+                time.monotonic() + (budget_ms / 1_000) + 10.0,
+            )
+            heartbeat = 0
+            while True:
+                wait_for = min(
+                    heartbeat_seconds,
+                    max(0.0, request_deadline - time.monotonic()),
+                )
+                if wait_for <= 0:
+                    raise DkgError(
+                        f"publisher VM recovery exceeded its "
+                        f"{budget_ms / 1_000:.0f}s request budget"
+                    )
+                try:
+                    outcome_kind, outcome_value = outcome.get(timeout=wait_for)
+                    break
+                except queue.Empty:
+                    heartbeat += 1
+                    elapsed = int(heartbeat * heartbeat_seconds)
+                    print(
+                        f"  publisher VM recovery is still active "
+                        f"({elapsed}s elapsed)...",
+                        flush=True,
+                    )
+                    sync_state.write(
+                        "running",
+                        context_graph_id=context_graph_id,
+                        graph_peer_id=graph_peer_id,
+                        phase="recovering-verifiable-memory",
+                    )
+            if outcome_kind == "error":
+                raise outcome_value
+            result = outcome_value
         except DkgError as exc:
             error = str(exc)
             retryable = any(

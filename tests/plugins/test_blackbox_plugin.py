@@ -2,6 +2,7 @@
 
 import argparse
 import re
+import threading
 
 import pytest
 
@@ -301,6 +302,7 @@ def test_blackbox_sync_recovers_curator_snapshot_then_waits_for_vm(monkeypatch, 
     assert cli_mod._cmd_sync(args) == 0
     curator_events = [event for event in events if event[0] == "curator"]
     assert len(curator_events) == 2
+    assert not any(event[0] == "subscribe" for event in events)
     assert states[-1][0] == "done"
     assert states[-1][1]["public_entries"] == 23_001
     assert states[-1][1]["expected_public_entries"] == 23_001
@@ -459,7 +461,9 @@ def test_blackbox_sync_does_not_accept_deferred_catchup_as_complete(
     args = argparse.Namespace(wait=True, timeout=30, require_rules=True)
     assert cli_mod._cmd_sync(args) == 0
     assert len(curator_calls) == 1
-    assert len(status_calls) >= 3
+    # The release graph now takes the configured curator-first path and does
+    # not wait for a generic all-peer catch-up to become terminal.
+    assert len(status_calls) >= 2
     assert states[-1][0] == "done"
     assert any(
         status == "running"
@@ -554,6 +558,50 @@ def test_authoritative_recovery_waits_for_dkg_backpressure(monkeypatch, capsys):
     )
     assert not any(status == "failed" for status, _details in states)
     assert "waiting for safe recovery capacity" in capsys.readouterr().out
+
+
+def test_authoritative_recovery_has_wall_clock_guard_and_heartbeats(
+    monkeypatch, capsys
+):
+    states = []
+    release = threading.Event()
+
+    class FakeClient:
+        def catchup_from_peer(self, _cg_id, _peer_id, *, budget_ms):
+            release.wait(1.0)
+            return {}
+
+    class EmptyQueue:
+        def put(self, _value):
+            return None
+
+        def get(self, *, timeout):
+            raise cli_mod.queue.Empty
+
+    clock = {"value": 0.0}
+
+    def monotonic():
+        clock["value"] += 11.0
+        return clock["value"]
+
+    monkeypatch.setattr(cli_mod.queue, "Queue", lambda **_kwargs: EmptyQueue())
+    monkeypatch.setattr(cli_mod.time, "monotonic", monotonic)
+    monkeypatch.setattr(
+        cli_mod.sync_state,
+        "write",
+        lambda status, **details: states.append((status, details)) or details,
+    )
+
+    try:
+        assert not cli_mod._catchup_authoritative_vm(
+            FakeClient(), "owner/public", "curator", 45.0
+        )
+    finally:
+        release.set()
+
+    output = capsys.readouterr().out
+    assert "still active" in output
+    assert any(status == "failed" for status, _details in states)
 
 
 def test_blackbox_sync_ctrl_c_records_cancellation_and_returns_130(monkeypatch, capsys):
