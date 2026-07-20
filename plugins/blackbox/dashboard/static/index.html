@@ -265,6 +265,13 @@
     gap: 8px;
     flex-shrink: 0;
   }
+  .header-action-menu {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .header-action-label { display: none; }
+  .header-menu-toggle { display: none; }
   .status-pill {
     display: inline-flex;
     align-items: center;
@@ -335,6 +342,17 @@
     font-variant-numeric: tabular-nums;
   }
   .notify-badge[hidden] { display: none; }
+  .header-menu-alert {
+    position: absolute;
+    top: 7px;
+    right: 7px;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--signal);
+    box-shadow: 0 0 0 2px var(--panel);
+  }
+  .header-menu-alert[hidden] { display: none; }
   /* Right-aligned header cluster: agent count + manual refresh. */
   .head-right { display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
   .section-head.agents-head { align-items: center; }
@@ -670,6 +688,36 @@
     align-items: center;
     gap: 8px;
   }
+  .stat.roadmap {
+    border-color: color-mix(in srgb, var(--signal) 22%, var(--border));
+    background:
+      linear-gradient(135deg, color-mix(in srgb, var(--signal) 4%, var(--panel)), var(--panel) 68%);
+  }
+  .stat.roadmap::after {
+    content: "";
+    position: absolute;
+    inset: 0 auto 0 0;
+    width: 2px;
+    background: var(--signal);
+    opacity: 0.72;
+  }
+  .stat-soon {
+    display: inline-flex;
+    align-items: center;
+    min-height: 25px;
+    padding: 5px 8px;
+    border: 1px solid color-mix(in srgb, var(--signal) 38%, transparent);
+    border-radius: 2px;
+    color: var(--signal);
+    background: var(--signal-soft);
+    font-family: var(--mono-font);
+    font-size: 9px;
+    font-weight: 700;
+    line-height: 1;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    white-space: nowrap;
+  }
   .stat .value {
     font-family: var(--mono-font);
     font-size: 30px;
@@ -853,6 +901,23 @@
   }
   .tab:not(.active) .tab-count {
     background: var(--wash-6);
+  }
+  .tab-soon {
+    padding: 3px 6px;
+    border: 1px solid color-mix(in srgb, var(--signal) 38%, transparent);
+    border-radius: 2px;
+    color: var(--signal);
+    background: var(--signal-soft);
+    font-size: 7px;
+    font-weight: 700;
+    letter-spacing: 0.1em;
+    line-height: 1.2;
+    white-space: nowrap;
+  }
+  .tab.active .tab-soon {
+    color: var(--signal);
+    border-color: color-mix(in srgb, var(--signal) 46%, transparent);
+    background: var(--signal-soft);
   }
 
   /* ---------- Threat graph (force-directed) ---------- */
@@ -1057,6 +1122,148 @@
   }
   .graph-empty strong { color: var(--text); font-weight: 600; display: block; margin-bottom: 5px; font-size: 14px; }
   .graph-empty .e-msg { max-width: 380px; line-height: 1.55; }
+
+  /* Community graph launch teaser. It is an intentional product preview, not
+     an empty/loading graph: users can discover the roadmap without mistaking
+     zero data for a failed sync. */
+  .community-launch {
+    position: absolute;
+    inset: 0;
+    z-index: 3;
+    display: grid;
+    grid-template-columns: minmax(0, 1.05fr) minmax(280px, 0.95fr);
+    align-items: stretch;
+    overflow: hidden;
+    background: var(--panel);
+  }
+  .community-launch[hidden] { display: none; }
+  .community-launch::before {
+    content: "";
+    position: absolute;
+    inset: 0 auto 0 0;
+    width: 3px;
+    background: var(--mint);
+  }
+  .community-launch-copy {
+    position: relative;
+    z-index: 2;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    justify-content: center;
+    min-width: 0;
+    padding: clamp(30px, 5vw, 58px);
+  }
+  .community-launch-eyebrow {
+    display: inline-flex;
+    align-items: center;
+    gap: 9px;
+    color: var(--mint);
+    font-family: var(--mono-font);
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+  }
+  .community-launch-eyebrow::before {
+    content: "";
+    width: 18px;
+    height: 1px;
+    background: currentColor;
+  }
+  .community-launch h3 {
+    max-width: 540px;
+    margin: 18px 0 13px;
+    color: var(--text);
+    font-size: clamp(27px, 3.5vw, 42px);
+    font-weight: 650;
+    line-height: 1.03;
+    letter-spacing: -0.04em;
+  }
+  .community-launch h3 > span { display: block; }
+  .community-launch-title-accent { color: var(--signal); white-space: nowrap; }
+  .community-launch-lede {
+    max-width: 520px;
+    margin: 0;
+    color: var(--muted);
+    font-size: 13px;
+    line-height: 1.65;
+  }
+  .community-launch-now {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    margin-top: 24px;
+    padding-top: 17px;
+    border-top: 1px solid var(--border);
+    color: var(--muted-strong);
+    font-family: var(--mono-font);
+    font-size: 9px;
+    line-height: 1.5;
+    letter-spacing: 0.04em;
+  }
+  .community-launch-now svg { width: 15px; height: 15px; flex: 0 0 auto; color: var(--mint); }
+  .community-launch-art {
+    position: relative;
+    min-width: 0;
+    display: grid;
+    place-items: center;
+    overflow: hidden;
+  }
+  .community-launch-art::before {
+    content: none;
+  }
+  #graph-panel.community-preview {
+    overflow: hidden;
+    border-color: var(--border);
+    background: var(--panel);
+  }
+  #graph-panel.community-preview .graph-stage,
+  #graph-panel.community-preview .community-launch {
+    background: var(--panel);
+  }
+  #graph-panel.community-preview .community-launch::before { content: none; }
+  .community-network {
+    position: relative;
+    z-index: 1;
+    width: min(88%, 430px);
+    height: auto;
+    color: var(--mint);
+    overflow: visible;
+  }
+  .community-network .link { fill: none; stroke: currentColor; stroke-width: 1; stroke-dasharray: none; opacity: 0.13; }
+  .community-network .signal-route {
+    fill: none;
+    stroke: var(--signal);
+    stroke-width: 2.4;
+    stroke-linecap: round;
+    stroke-dasharray: 9 91;
+    filter: drop-shadow(0 0 4px color-mix(in srgb, var(--signal) 70%, transparent));
+    animation: community-signal-flow 5.8s linear infinite;
+  }
+  .community-network .signal-spoke { animation-duration: 4.5s; }
+  .community-network .signal-spoke-1 { animation-delay: -0.9s; }
+  .community-network .signal-spoke-2 { animation-delay: -1.8s; }
+  .community-network .signal-spoke-3 { animation-delay: -2.7s; }
+  .community-network .signal-spoke-4 { animation-delay: -3.6s; }
+  .community-network .signal-spoke-5 { animation-delay: -4.5s; }
+  .community-network .node { fill: var(--panel); stroke: currentColor; stroke-width: 1.4; }
+  .community-network .node-core { fill: currentColor; }
+  .community-network .agent-halo {
+    fill: color-mix(in srgb, var(--signal) 7%, transparent);
+    stroke: color-mix(in srgb, var(--signal) 28%, transparent);
+    stroke-width: 1;
+  }
+  .community-network .agent-node {
+    fill: var(--panel);
+    stroke: var(--signal);
+    stroke-width: 2.4;
+    filter: drop-shadow(0 0 9px color-mix(in srgb, var(--signal) 38%, transparent));
+  }
+  .community-network .agent-core { fill: var(--signal); }
+  @keyframes community-signal-flow {
+    to { stroke-dashoffset: -100; }
+  }
 
   /* custom hover tooltip (force-graph nodeLabel injects .graph-tip) */
   .graph-stage .scene-tooltip,
@@ -1466,12 +1673,18 @@
     .graph-head-right { width: 100%; }
     .graph-head-right .tabs { width: auto; flex: 1 1 auto; }
     .tabs { width: 100%; }
-    .tab { flex: 1 1 0; justify-content: center; padding: 7px 10px; }
+    .graph-head-right .tabs {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+    .tab { width: 100%; flex-direction: column; justify-content: center; gap: 4px; padding: 7px 10px; }
     .graph-controls { left: 10px; right: 10px; }
     /* keep the gear reachable on narrow screens; only the text pills collapse */
     .status-pills .status-pill { display: none; }
     .first-detection-main { grid-template-columns: 1fr; }
     .first-detection-action { width: 100%; }
+    .community-launch { grid-template-columns: minmax(0, 1.15fr) minmax(220px, 0.85fr); }
+    .community-launch-copy { padding: 34px; }
   }
   @media (max-width: 520px) {
     .wrap, .header-inner, .banner { padding-left: 16px; padding-right: 16px; }
@@ -1682,6 +1895,21 @@
   .set-row .set-rl .set-rt { font-size: 13px; color: var(--text); font-weight: 550; }
   .set-row .set-rl .set-rh { font-size: 11.5px; color: var(--muted); margin-top: 2px; line-height: 1.45; }
   .set-row .set-rc { flex: 0 0 auto; display: flex; align-items: center; gap: 10px; }
+  .set-soon {
+    display: inline-flex;
+    align-items: center;
+    padding: 4px 8px;
+    border: 1px solid color-mix(in srgb, var(--mint) 30%, transparent);
+    border-radius: 999px;
+    color: var(--mint);
+    background: color-mix(in srgb, var(--mint) 7%, transparent);
+    font-family: var(--mono-font);
+    font-size: 8px;
+    font-weight: 700;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    white-space: nowrap;
+  }
 
   /* segmented control (audit | block) — same look as .sort-seg */
   .set-seg { display: inline-flex; padding: 3px; background: var(--elevated); border: 1px solid var(--border); border-radius: 3px; }
@@ -2251,11 +2479,112 @@
   }
 
   @media (max-width: 860px) {
-    .header-inner { padding-left: 24px; padding-right: 24px; }
+    .header-inner { position: relative; padding-left: 24px; padding-right: 24px; }
+    .header-menu-toggle {
+      position: relative;
+      display: inline-flex;
+      width: 44px;
+      height: 44px;
+      padding: 0;
+      align-items: center;
+      justify-content: center;
+      border: 1px solid var(--border);
+      border-radius: 2px;
+      background: var(--panel);
+      color: var(--text);
+      cursor: pointer;
+      transition: color .2s ease, border-color .2s ease, background .2s ease, transform .25s cubic-bezier(.2,.8,.2,1);
+    }
+    .header-menu-toggle:hover { border-color: var(--border-strong); background: var(--elevated); }
+    .header-menu-toggle:active { transform: scale(.94); }
+    .header-menu-toggle:focus-visible { outline: 2px solid var(--text); outline-offset: 2px; }
+    .header-menu-toggle .burger-lines {
+      position: relative;
+      width: 20px;
+      height: 14px;
+      display: block;
+    }
+    .header-menu-toggle .burger-line {
+      position: absolute;
+      left: 0;
+      width: 20px;
+      height: 2px;
+      border-radius: 999px;
+      background: currentColor;
+      transform-origin: center;
+      transition: top .28s cubic-bezier(.68,-.55,.27,1.55), transform .28s cubic-bezier(.68,-.55,.27,1.55), opacity .16s ease;
+    }
+    .header-menu-toggle .burger-line:nth-child(1) { top: 0; }
+    .header-menu-toggle .burger-line:nth-child(2) { top: 6px; }
+    .header-menu-toggle .burger-line:nth-child(3) { top: 12px; }
+    .header-menu-toggle[aria-expanded="true"] {
+      color: var(--signal);
+      border-color: rgba(255,79,0,.58);
+      background: var(--signal-soft);
+    }
+    .header-menu-toggle[aria-expanded="true"] .burger-line:nth-child(1) { top: 6px; transform: rotate(45deg); }
+    .header-menu-toggle[aria-expanded="true"] .burger-line:nth-child(2) { opacity: 0; transform: scaleX(0); }
+    .header-menu-toggle[aria-expanded="true"] .burger-line:nth-child(3) { top: 6px; transform: rotate(-45deg); }
+    .header-action-menu {
+      position: absolute;
+      top: calc(100% + 10px);
+      right: 24px;
+      z-index: 20;
+      width: min(250px, calc(100vw - 48px));
+      padding: 8px;
+      display: flex;
+      flex-direction: column;
+      align-items: stretch;
+      gap: 4px;
+      border: 1px solid var(--border-strong);
+      border-radius: 4px;
+      background: var(--panel);
+      box-shadow: 0 18px 52px rgba(0,0,0,.32);
+      opacity: 0;
+      visibility: hidden;
+      pointer-events: none;
+      transform: translateY(-12px) scale(.94);
+      transform-origin: top right;
+      transition: opacity .2s ease, visibility 0s linear .28s, transform .32s cubic-bezier(.16,1,.3,1);
+    }
+    .header-action-menu.open {
+      opacity: 1;
+      visibility: visible;
+      pointer-events: auto;
+      transform: none;
+      transition-delay: 0s;
+    }
+    .header-action-menu .gear-btn {
+      width: 100%;
+      height: 48px;
+      padding: 0 14px;
+      justify-content: flex-start;
+      gap: 12px;
+      border-color: transparent;
+      background: transparent;
+      opacity: 0;
+      transform: translateY(-8px);
+      transition: color .15s ease, border-color .15s ease, background .15s ease, opacity .22s ease, transform .32s cubic-bezier(.16,1,.3,1);
+    }
+    .header-action-menu.open .gear-btn { opacity: 1; transform: none; }
+    .header-action-menu.open .gear-btn:nth-child(1) { transition-delay: .04s; }
+    .header-action-menu.open .gear-btn:nth-child(2) { transition-delay: .08s; }
+    .header-action-menu.open .gear-btn:nth-child(3) { transition-delay: .12s; }
+    .header-action-menu .gear-btn:hover { transform: translateX(3px); }
+    .header-action-menu .gear-btn svg { width: 19px; height: 19px; }
+    .header-action-label {
+      display: inline;
+      font-family: var(--mono-font);
+      font-size: 10px;
+      font-weight: 600;
+      letter-spacing: .12em;
+      text-transform: uppercase;
+    }
   }
 
   @media (max-width: 520px) {
     .header-inner { min-height: 72px; padding-left: 16px; padding-right: 16px; }
+    .header-action-menu { right: 16px; width: calc(100vw - 32px); }
     .brand-wordmark { min-width: 0; font-size: 25px; }
     .status-pills { gap: 6px; }
     .gear-btn, .chat-close, .modal-close { width: 44px; height: 44px; }
@@ -2268,7 +2597,19 @@
     .graph-head-right .refresh-btn { position: absolute; top: 0; right: 0; }
     .tab { min-width: 0; min-height: 44px; gap: 4px; padding: 7px 4px; font-size: 9px; }
     .tab .tab-count { padding: 0 4px; }
+    .tab-soon { padding: 2px 4px; font-size: 6px; letter-spacing: 0.06em; }
     .graph-stage { height: 330px; }
+    .community-launch { grid-template-columns: 1fr; }
+    .community-launch-copy {
+      align-items: center;
+      justify-content: center;
+      padding: 22px;
+      text-align: center;
+    }
+    .community-launch h3 { max-width: 100%; margin-top: 13px; font-size: clamp(24px, 7.2vw, 28px); }
+    .community-launch-lede { font-size: 12px; line-height: 1.55; }
+    .community-launch-now { width: 100%; justify-content: center; margin-top: 16px; padding-top: 13px; }
+    .community-launch-art { display: none; }
     .sync-progress-meta { gap: 8px; }
     .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
     .stat, .stat:nth-last-child(-n + 2) { grid-column: auto; min-height: 124px; padding: 14px; }
@@ -2353,7 +2694,9 @@
       animation-iteration-count: 1 !important;
       transition-duration: 0.01ms !important;
     }
+    .community-network .signal-route { animation: none; stroke-dashoffset: 0; }
     .record-dot { opacity: 1; }
+    .header-action-menu .gear-btn { opacity: 1; transform: none; }
   }
 </style>
 </head>
@@ -2368,16 +2711,25 @@
       <div class="status-pills" aria-live="polite">
         <span class="status-pill offline" id="pill-node" hidden title="The local DKG node is not responding">node offline</span>
         <span class="status-pill mode-audit" id="pill-mode" hidden>audit mode</span>
-        <button type="button" class="gear-btn threat-notify-btn" id="threat-notify" aria-label="No unread threats" title="Threat notifications">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9"/><path d="M10 21h4"/></svg>
-          <span class="notify-badge" id="threat-notify-count" hidden>0</span>
+        <button type="button" class="header-menu-toggle" id="header-menu-toggle" aria-label="Open dashboard menu" aria-expanded="false" aria-controls="header-action-menu">
+          <span class="burger-lines" aria-hidden="true"><span class="burger-line"></span><span class="burger-line"></span><span class="burger-line"></span></span>
+          <span class="header-menu-alert" id="header-menu-alert" hidden></span>
         </button>
-        <button type="button" class="gear-btn chat-btn" id="chat-open" aria-label="Toggle Blackbox assistant" aria-expanded="false" title="Blackbox assistant">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a4 4 0 0 1-4 4H8l-5 3V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4z"/><path d="M8 9h8M8 13h5"/></svg>
-        </button>
-        <button type="button" class="gear-btn" id="settings-open" aria-label="Open detection settings" title="Detection settings">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
-        </button>
+        <div class="header-action-menu" id="header-action-menu" aria-hidden="false">
+          <button type="button" class="gear-btn threat-notify-btn" id="threat-notify" aria-label="No unread threats" title="Threat notifications">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9"/><path d="M10 21h4"/></svg>
+            <span class="header-action-label">Threats</span>
+            <span class="notify-badge" id="threat-notify-count" hidden>0</span>
+          </button>
+          <button type="button" class="gear-btn chat-btn" id="chat-open" aria-label="Toggle Blackbox assistant" aria-expanded="false" title="Blackbox assistant">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a4 4 0 0 1-4 4H8l-5 3V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4z"/><path d="M8 9h8M8 13h5"/></svg>
+            <span class="header-action-label">Assistant</span>
+          </button>
+          <button type="button" class="gear-btn" id="settings-open" aria-label="Open detection settings" title="Detection settings">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09A1.65 1.65 0 0 0 19.4 15z"/></svg>
+            <span class="header-action-label">Settings</span>
+          </button>
+        </div>
       </div>
     </div>
   </header>
@@ -2427,19 +2779,19 @@
             <button class="tab active" id="tab-public" role="tab" aria-selected="true" data-tier="public" title="Verified by Umanitek.">
               Verifiable<span class="tab-count" id="count-public"><span class="bb-loader"></span></span>
             </button>
-            <button class="tab" id="tab-community" role="tab" aria-selected="false" data-tier="community" title="Reported by agents across the network.">
-              Community<span class="tab-count" id="count-community"><span class="bb-loader"></span></span>
+            <button class="tab" id="tab-community" role="tab" aria-selected="false" data-tier="community" title="Preview the upcoming community threat graph.">
+              Community<span class="tab-soon">Coming soon</span>
             </button>
             <button class="tab" id="tab-local" role="tab" aria-selected="false" data-tier="local" title="Your local threat audit trail.">
               Local<span class="tab-count" id="count-local"><span class="bb-loader"></span></span>
             </button>
           </div>
-          <button type="button" class="gear-btn refresh-btn" id="graph-refresh" aria-label="Sync graphs" title="Sync the verifiable and community graphs from the network">
+          <button type="button" class="gear-btn refresh-btn" id="graph-refresh" aria-label="Sync verifiable graph" title="Sync Umanitek-verified threats from the network">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 4v6h-6"/><path d="M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
           </button>
         </div>
       </div>
-      <div class="panel">
+      <div class="panel" id="graph-panel">
         <div class="sync-progress indeterminate" id="sync-progress" aria-live="polite" hidden>
           <div class="sync-progress-head">
             <span class="sync-progress-title"><span class="bb-loader" id="sync-progress-loader"></span><span id="sync-progress-title">Syncing threat graph</span></span>
@@ -2462,6 +2814,36 @@
             <div class="graph-empty" id="graph-empty">
               <svg class="e-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
               <div class="e-msg">Loading threats&hellip;</div>
+            </div>
+            <div class="community-launch" id="community-launch" hidden>
+              <div class="community-launch-copy">
+                <div class="community-launch-eyebrow">Community graph · Coming soon</div>
+                <h3><span>One agent sees it.</span><span class="community-launch-title-accent">Every agent gets safer.</span></h3>
+                <p class="community-launch-lede">A shared layer of verified threat signals will help agents protect each other across the network.</p>
+                <div class="community-launch-now">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="10" width="14" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg>
+                  Nothing is shared yet. Your findings and threat reports stay private.
+                </div>
+              </div>
+              <div class="community-launch-art" aria-hidden="true">
+                <svg class="community-network" viewBox="0 0 420 360">
+                  <path class="link" d="M210 180 210 45M210 180 338 138M210 180 289 289M210 180 131 289M210 180 82 138M210 45 338 138 289 289 131 289 82 138Z"/>
+                  <path class="signal-route" pathLength="100" d="M210 45 338 138 289 289 131 289 82 138Z"/>
+                  <path class="signal-route signal-spoke signal-spoke-1" pathLength="100" d="M210 45 210 180"/>
+                  <path class="signal-route signal-spoke signal-spoke-2" pathLength="100" d="M338 138 210 180"/>
+                  <path class="signal-route signal-spoke signal-spoke-3" pathLength="100" d="M289 289 210 180"/>
+                  <path class="signal-route signal-spoke signal-spoke-4" pathLength="100" d="M131 289 210 180"/>
+                  <path class="signal-route signal-spoke signal-spoke-5" pathLength="100" d="M82 138 210 180"/>
+                  <circle class="node" cx="210" cy="45" r="10"/><circle class="node-core" cx="210" cy="45" r="3"/>
+                  <circle class="node" cx="338" cy="138" r="10"/><circle class="node-core" cx="338" cy="138" r="3"/>
+                  <circle class="node" cx="289" cy="289" r="10"/><circle class="node-core" cx="289" cy="289" r="3"/>
+                  <circle class="node" cx="131" cy="289" r="10"/><circle class="node-core" cx="131" cy="289" r="3"/>
+                  <circle class="node" cx="82" cy="138" r="10"/><circle class="node-core" cx="82" cy="138" r="3"/>
+                  <circle class="agent-halo" cx="210" cy="180" r="34"/>
+                  <circle class="agent-node" cx="210" cy="180" r="18"/>
+                  <circle class="agent-core" cx="210" cy="180" r="5"/>
+                </svg>
+              </div>
             </div>
             <button type="button" class="graph-fullscreen" id="graph-fullscreen" aria-label="View graph fullscreen" aria-pressed="false" title="View graph fullscreen">
               <svg class="fullscreen-enter" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M8 21H5a2 2 0 0 1-2-2v-3M16 21h3a2 2 0 0 0 2-2v-3"/></svg>
@@ -2486,26 +2868,10 @@
       <div class="stat">
         <div class="label">
           <svg class="s-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
-          Threats synced
+          Verified threats synced
         </div>
         <div class="value mint" id="stat-threats"><span class="skel"></span></div>
-        <div class="meta">from the threat graph</div>
-      </div>
-      <div class="stat">
-        <div class="label">
-          <svg class="s-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
-          Community pool
-        </div>
-        <div class="value" id="stat-community"><span class="skel"></span></div>
-        <div class="meta">identifiers flagged by agents</div>
-      </div>
-      <div class="stat">
-        <div class="label">
-          <svg class="s-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 2 11 13M22 2l-7 20-4-9-9-4 20-7z"/></svg>
-          Reports sent
-        </div>
-        <div class="value" id="stat-reports"><span class="skel"></span></div>
-        <div class="meta">sightings shared to graph</div>
+        <div class="meta">from Umanitek's curated graph</div>
       </div>
       <div class="stat">
         <div class="label">
@@ -2514,6 +2880,22 @@
         </div>
         <div class="value" id="stat-sync" style="font-size:22px;"><span class="skel"></span></div>
         <div class="meta" id="stat-sync-meta">from local DKG node</div>
+      </div>
+      <div class="stat roadmap">
+        <div class="label">
+          <svg class="s-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+          Community pool
+        </div>
+        <div class="value"><span class="stat-soon">Coming soon</span></div>
+        <div class="meta">identifiers flagged by agents</div>
+      </div>
+      <div class="stat roadmap">
+        <div class="label">
+          <svg class="s-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 2 11 13M22 2l-7 20-4-9-9-4 20-7z"/></svg>
+          Threat sharing
+        </div>
+        <div class="value"><span class="stat-soon">Coming soon</span></div>
+        <div class="meta">sightings shared to graph</div>
       </div>
       </div>
     </section>
@@ -2840,7 +3222,7 @@
     var progress = lastStatus && lastStatus.sync_progress;
     var activity = progress && progress.activity;
     var status = String(activity && activity.status || "idle");
-    var visible = activeTier !== "local" && (
+    var visible = activeTier === "public" && (
       status === "running" || status === "waiting" ||
       status === "failed" || status === "offline"
     );
@@ -2875,6 +3257,10 @@
     var note = $("graph-tier-note");
     if (!note) return;
     renderSyncProgress();
+    if (activeTier === "community") {
+      note.textContent = TIER_NOTE.community;
+      return;
+    }
     if (activeTier !== "local" && isTierPending(activeTier)) {
       var elapsed = catchupElapsed();
       var count = graphTotalForTier(activeTier);
@@ -3237,8 +3623,8 @@
   }
 
   // Graph manual-refresh: force `hermes blackbox sync` (POST /api/sync) to
-  // catch up + rebuild the public and community rulesets, then re-poll so the
-  // counts and graph redraw. Same spin-while-busy pattern as refreshAgents.
+  // catch up the verifiable ruleset, then re-poll so the count and graph redraw.
+  // Same spin-while-busy pattern as refreshAgents.
   var graphRefreshBusy = false;
   function refreshGraphs() {
     if (graphRefreshBusy) return;
@@ -3275,7 +3661,7 @@
     fileaccess: "Reads, writes, and path access patterns that touch sensitive or unusual files.",
     skill: "Skill and plugin activity with behavior that deserves extra review.",
     secret: "Possible credentials, tokens, or other sensitive values exposed in agent context.",
-    ioc: "Indicators of compromise reported by agents or verified threat sources.",
+    ioc: "Indicators of compromise published by verified threat sources.",
     other: "Signals that do not fit a narrower category yet."
   };
 
@@ -3331,13 +3717,13 @@
   // Subtitle under the tab strip — what each trust tier means.
   var TIER_NOTE = {
     public: "Threats verified by Umanitek.",
-    community: "Reports shared by agents across the network.",
+    community: "Community protection is coming soon.",
     local: "Events recorded on this machine."
   };
   // Per-tier empty-state message for the graph stage.
   var TIER_EMPTY = {
     public: "No verified threats are available yet.",
-    community: "No community-reported threats yet.",
+    community: "Community protection is coming soon.",
     local: "No agent activity on this machine yet."
   };
 
@@ -4138,10 +4524,9 @@
     return out;
   }
 	  function reportersHTML(d) {
-	    if (typeof d.reporters !== "number" || d.reporters <= 0) return "";
-	    return '<div class="modal-reporters"><div class="big">' + d.reporters + '</div>' +
-	      '<div class="rlabel"><b>' + d.reporters + ' agent' + (d.reporters === 1 ? '' : 's') + '</b> reported this threat' +
-	      (d.framework ? ' &middot; ' + esc(d.framework) : '') + '</div></div>';
+	    // Agent-contributed threat reporting ships with the community graph.
+	    // Do not expose legacy SWM reporter metadata while sharing is paused.
+	    return "";
 	  }
 
 	  function graphThreatsForFocus(tier, focus) {
@@ -4307,8 +4692,8 @@
   var EVENT_LABEL = { pre_tool_call: "Pre-tool check", post_tool_call: "Post-tool check" };
   var SRC_LONG = {
     public: "Verifiable graph match. Confirmed threat.",
-    community: "Community pool match. Flagged by agents.",
-    heuristic: "Built-in heuristic. Discovery candidate."
+    community: "Locally recorded candidate. Community sharing is not active.",
+    heuristic: "Built-in heuristic. Local discovery candidate."
   };
 
   function findingTags(f) {
@@ -4413,11 +4798,10 @@
     overlay.classList.add("open");
     overlay.setAttribute("aria-hidden", "false");
 
-    // Enrich graph-matched findings with the threat's full record. Recorded
-    // source is a detection-time snapshot, so try that tier first, then the other.
+    // Enrich confirmed findings only from the curated verifiable graph.
     var sk = srcKey(f);
     if (!id || sk === "heuristic") return;
-    var tiers = sk === "public" ? ["public", "community"] : ["community", "public"];
+    var tiers = ["public"];
     var apply = function (d) {
       if (TM.finding !== f) return;   // user moved on
       var intel = threatIntelHTML(d || {});
@@ -4711,8 +5095,23 @@
         else lel.textContent = localCache.threatCount || 0;
         return;
       }
-      setCount("count-" + t, graphTotalForTier(t), "tab:" + t, false);
+      if (t !== "community") setCount("count-" + t, graphTotalForTier(t), "tab:" + t, false);
     });
+
+    var communityLaunch = $("community-launch");
+    if (communityLaunch) communityLaunch.hidden = activeTier !== "community";
+    var graphPanel = $("graph-panel");
+    if (graphPanel) graphPanel.classList.toggle("community-preview", activeTier === "community");
+    if (activeTier === "community") {
+      var graphEmpty = $("graph-empty"); if (graphEmpty) graphEmpty.style.display = "none";
+      var graphControls = $("graph-controls"); if (graphControls) graphControls.style.display = "none";
+      var graphFullscreen = $("graph-fullscreen"); if (graphFullscreen) graphFullscreen.hidden = true;
+      if (fg) fg.graphData({ nodes: [], links: [] });
+      fgTierShown = null;
+      return;
+    }
+    var graphFullscreen = $("graph-fullscreen");
+    if (graphFullscreen && document.fullscreenEnabled !== false) graphFullscreen.hidden = false;
 
     // Every tier — including local — renders through the one force-graph stage.
     var isLocal = activeTier === "local";
@@ -4837,8 +5236,8 @@
   // local-only sources, which never fold into public/candidate).
   var SRC_META = {
     public:    { label: "confirmed", tip: "Verifiable graph match, verified by Umanitek. Blockable in block mode." },
-    community: { label: "community", tip: "Matched the shared community pool. Reported to strengthen consensus, never blocks." },
-    heuristic: { label: "candidate", tip: "Built-in heuristic discovery — not yet in any graph. Local; nominated to the community pool." },
+    community: { label: "candidate", tip: "A locally recorded candidate from before community sharing was paused. It is not shared." },
+    heuristic: { label: "candidate", tip: "Built-in heuristic discovery — not in the verifiable graph. Local only and never shared." },
     custom:    { label: "your rule", tip: "Matched one of your own protected paths. Local only — never shared." },
     llm:       { label: "AI review", tip: "Flagged by the optional LLM injection reviewer. Local only — never blocks or shares." },
     secret:    { label: "secret", tip: "Secret exposure caught locally. Never leaves your machine." }
@@ -4869,6 +5268,8 @@
   function updateThreatNotificationUI() {
     var button = $("threat-notify");
     var badge = $("threat-notify-count");
+    var menuButton = $("header-menu-toggle");
+    var menuAlert = $("header-menu-alert");
     var count = threatAlertsEnabled ? unreadThreatCount : 0;
     if (button) {
       button.classList.toggle("has-unread", count > 0);
@@ -4880,6 +5281,8 @@
       badge.hidden = count === 0;
       badge.textContent = count > 99 ? "99+" : String(count);
     }
+    if (menuButton) menuButton.classList.toggle("has-unread", count > 0);
+    if (menuAlert) menuAlert.hidden = count === 0;
     document.title = count > 0 ? "(" + count + ") " + dashboardTitle : dashboardTitle;
   }
 
@@ -5546,7 +5949,6 @@
     // replaces these numbers as catch-up adds entries; loaders are reserved for
     // the brief window before the first payload.
     setCount("stat-threats", curated, "stat:curated", true);
-    setCount("stat-community", data.community, "stat:community", true);
 
     // header status pills: node reachability + enforcement mode
     var nodePill = $("pill-node");
@@ -5560,7 +5962,7 @@
         modePill.textContent = mode + ' mode';
         modePill.title = mode === "block"
           ? "Block mode. Confirmed verifiable-graph threats are blocked."
-          : "Audit mode. Findings are logged and reported, nothing is blocked.";
+          : "Audit mode. Findings are logged locally; nothing is blocked or shared.";
       } else {
         modePill.hidden = true;
       }
@@ -5574,20 +5976,12 @@
     }
   }
 
-  // ---------- Reports (stat only) ----------
-  function renderReports(data) {
-    var list = asList(data);
-    var total = (data && data.total != null) ? data.total : list.length;
-    $("stat-reports").textContent = num(total);
-  }
-
   // ---------- Poll loop ----------
   function poll() {
     loadAudit();   // full history refresh (independent of the fixed-index batch below)
     return Promise.allSettled([
       getJSON("/api/findings?limit=10"),
       getJSON("/api/graph-status"),
-      getJSON("/api/reports"),
       getJSON("/api/agents"),
       getJSON("/api/local-activity")
     ]).then(function (res) {
@@ -5599,14 +5993,12 @@
         renderFindings(res[0].value);
       }
       if (res[1].status === "fulfilled") renderGraphStatus(res[1].value);
-      if (res[2].status === "fulfilled") renderReports(res[2].value);
-      if (res[3].status === "fulfilled") renderAgents(res[3].value);
+      if (res[2].status === "fulfilled") renderAgents(res[2].value);
       var anyGraph = false;
-      if (res[4].status === "fulfilled") { localCache = res[4].value; anyGraph = true; }
+      if (res[3].status === "fulfilled") { localCache = res[3].value; anyGraph = true; }
 
       return Promise.allSettled([
-        loadGraphTier("public"),
-        loadGraphTier("community")
+        loadGraphTier("public")
       ]).then(function (graphRes) {
         if (graphRes.some(function (r) { return r.status === "fulfilled" && r.value; })) anyGraph = true;
         if (anyGraph) renderGraphTab();
@@ -5621,6 +6013,40 @@
   TIERS.forEach(function (t) {
     $("tab-" + t).addEventListener("click", function () { switchTier(t); });
   });
+
+  // Collapse the header actions into one animated disclosure on phone/tablet.
+  (function wireHeaderMenu() {
+    var toggle = $("header-menu-toggle");
+    var menu = $("header-action-menu");
+    if (!toggle || !menu) return;
+    var narrow = window.matchMedia("(max-width: 860px)");
+    function setOpen(open, returnFocus) {
+      open = !!open && narrow.matches;
+      toggle.setAttribute("aria-expanded", open ? "true" : "false");
+      toggle.setAttribute("aria-label", open ? "Close dashboard menu" : "Open dashboard menu");
+      menu.classList.toggle("open", open);
+      menu.setAttribute("aria-hidden", narrow.matches && !open ? "true" : "false");
+      if (!open && returnFocus) toggle.focus();
+    }
+    toggle.addEventListener("click", function () {
+      setOpen(toggle.getAttribute("aria-expanded") !== "true", false);
+    });
+    menu.addEventListener("click", function (e) {
+      if (e.target.closest("button")) setOpen(false, false);
+    });
+    document.addEventListener("click", function (e) {
+      if (toggle.getAttribute("aria-expanded") === "true" && !menu.contains(e.target) && !toggle.contains(e.target)) {
+        setOpen(false, false);
+      }
+    });
+    document.addEventListener("keydown", function (e) {
+      if (e.key === "Escape" && toggle.getAttribute("aria-expanded") === "true") setOpen(false, true);
+    });
+    function syncBreakpoint() { setOpen(false, false); }
+    if (narrow.addEventListener) narrow.addEventListener("change", syncBreakpoint);
+    else narrow.addListener(syncBreakpoint);
+    syncBreakpoint();
+  })();
 	  Object.keys(GRAPH_DETAIL_PRESETS).forEach(function (mode) {
 	    var btn = $("graph-detail-" + mode);
 	    if (btn) btn.addEventListener("click", function () { setGraphDetailMode(mode); });
@@ -5872,7 +6298,7 @@
     bb.setAttribute("aria-pressed", block ? "true" : "false");
     $("set-mode-help").innerHTML = block
       ? "Stop confirmed threats at or above the chosen severity."
-      : "Log and report findings.";
+      : "Log findings locally. Nothing is shared.";
     // block-severity row is only meaningful in block mode
     var row = $("set-block-sev-row");
     row.style.display = block ? "" : "none";
@@ -5959,12 +6385,8 @@
 
   function renderAdvancedUI() {
     if (!setState) return;
-    $("set-report").checked = !!setState.report;
     $("set-discover").checked = !!setState.discover;
     $("set-osv").checked = !!setState.osv_lookup;
-    var sel = $("set-report-severity");
-    sel.innerHTML = sevOptions(setState.report_min_severity);
-    sel.disabled = !setState.report;
   }
 
   function renderAllSettings() {
@@ -6139,14 +6561,7 @@
       if (!setState) return; setState.block_severity = sevOk(this.value); markDirty();
     });
 
-    // advanced toggles + report severity
-    $("set-report").addEventListener("change", function () {
-      if (!setState) return; setState.report = this.checked;
-      $("set-report-severity").disabled = !this.checked; markDirty();
-    });
-    $("set-report-severity").addEventListener("change", function () {
-      if (!setState) return; setState.report_min_severity = sevOk(this.value); markDirty();
-    });
+    // advanced toggles
     $("set-discover").addEventListener("change", function () {
       if (!setState) return; setState.discover = this.checked; markDirty();
     });
@@ -6417,7 +6832,7 @@
     <div class="chat-prompts" aria-label="Example prompts">
       <button type="button" class="chat-prompt" data-prompt="Summarize the current dashboard state. Which protected agents, findings, graph tiers, or sync issues need attention right now?">What needs attention?</button>
       <button type="button" class="chat-prompt" data-prompt="List the protected local agents exactly as the dashboard sees them. Include framework, path, status, and any recent reports.">Show protected agents</button>
-      <button type="button" class="chat-prompt" data-prompt="Explain the verifiable, community, and local graph counts on this dashboard. If a tier is zero, tell me whether it looks empty or unreachable and what to check next.">Explain graph counts</button>
+      <button type="button" class="chat-prompt" data-prompt="Explain the verifiable threat graph and local activity counts on this dashboard. If the verifiable graph is empty, tell me whether it looks unsynced or unreachable and what to check next. Mention that community sharing is coming soon and is not active today.">Explain graph counts</button>
     </div>
     <form class="chat-form" id="chat-form">
       <textarea class="chat-input" id="chat-input" rows="2" maxlength="4000" placeholder="Ask about agents, findings, or graph sync…"></textarea>
@@ -6539,7 +6954,7 @@
         <div class="set-row">
           <div class="set-rl">
             <div class="set-rt">Enforcement</div>
-            <div class="set-rh"><b id="set-mode-help">Log and report findings.</b></div>
+            <div class="set-rh"><b id="set-mode-help">Log findings locally. Nothing is shared.</b></div>
           </div>
           <div class="set-rc">
             <div class="set-seg" role="group" aria-label="Protection mode">
@@ -6585,12 +7000,11 @@
         <div class="set-glabel">Advanced</div>
         <div class="set-row">
           <div class="set-rl">
-            <div class="set-rt">Share sightings</div>
-            <div class="set-rh">Report matched verifiable/community threats to the shared graph to strengthen consensus.</div>
+            <div class="set-rt">Community sharing</div>
+            <div class="set-rh">Threat reports are not shared. Your findings stay private on this machine.</div>
           </div>
           <div class="set-rc">
-            <select class="set-select" id="set-report-severity" aria-label="Report at severity"></select>
-            <label class="set-toggle"><input type="checkbox" id="set-report" /><span class="set-track"></span></label>
+            <span class="set-soon">Coming soon</span>
           </div>
         </div>
         <div class="set-row">
