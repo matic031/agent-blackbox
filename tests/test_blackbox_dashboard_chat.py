@@ -234,6 +234,7 @@ def test_dashboard_graph_pages_are_user_driven_and_keep_scene_state():
     assert "return next(nowLoaded);" not in html
     assert "priorPositions[node.id]" in html
     assert "graphCanvasSize.width === w && graphCanvasSize.height === h" in html
+    assert "compact: { cap: 96, focusCap: 320 }" in html
 
 
 @pytest.mark.skip(reason="dashboard never joins private graphs")
