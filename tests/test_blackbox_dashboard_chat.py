@@ -606,7 +606,7 @@ def test_dashboard_zero_graph_count_spins_only_for_active_catchup():
     assert "return !(lastStatus && lastStatus.node_reachable === false);" not in html
     assert '"Fetching a newer " + label + " snapshot"' in html
     assert 'fmtElapsedSeconds(elapsed) + " elapsed"' in html
-    assert '" · current verified snapshot: " + num(count || 0)' in html
+    assert "current verified snapshot" not in html
     assert "' · ' + num(loaded) + ' available'" not in html
 
 

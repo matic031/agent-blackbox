@@ -3288,11 +3288,9 @@
     }
     if (activeTier !== "local" && isTierPending(activeTier)) {
       var elapsed = catchupElapsed();
-      var count = graphTotalForTier(activeTier);
       var label = activeTier === "public" ? "verifiable VM" : "community SWM";
       note.textContent = "Fetching a newer " + label + " snapshot" +
-        (elapsed == null ? "" : " · " + fmtElapsedSeconds(elapsed) + " elapsed") +
-        " · current verified snapshot: " + num(count || 0) + ".";
+        (elapsed == null ? "" : " · " + fmtElapsedSeconds(elapsed) + " elapsed");
       return;
     }
     note.textContent = TIER_NOTE[activeTier] || "";
