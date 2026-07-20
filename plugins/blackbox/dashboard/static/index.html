@@ -1633,38 +1633,6 @@
     font-size: 11px;
     line-height: 1.5;
   }
-  .first-detection-foot {
-    min-height: 43px;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 16px;
-    padding: 10px clamp(20px, 4vw, 44px);
-    border-top: 1px solid var(--border);
-    color: var(--muted);
-    font-family: var(--mono-font);
-    font-size: 9px;
-  }
-  .first-listening {
-    display: inline-flex;
-    align-items: center;
-    gap: 8px;
-    color: var(--muted-strong);
-  }
-  .first-live-dot {
-    width: 6px;
-    height: 6px;
-    border-radius: 50%;
-    background: var(--signal);
-    box-shadow: 0 0 0 0 rgba(255,79,0,0.4);
-    animation: bb-first-pulse 2s ease-out infinite;
-  }
-  @keyframes bb-first-pulse {
-    0% { box-shadow: 0 0 0 0 rgba(255,79,0,0.38); }
-    65%, 100% { box-shadow: 0 0 0 7px rgba(255,79,0,0); }
-  }
-  .first-safety { text-align: right; }
-
   /* ---------- Empty states ---------- */
   .empty {
     padding: 44px 24px;
@@ -2744,8 +2712,6 @@
     .first-detection h3 { font-size: 27px; }
     .first-detection-proof, .first-steps { grid-template-columns: 1fr; }
     .first-step + .first-step { border-left: 0; border-top: 1px solid var(--border); }
-    .first-detection-foot { align-items: flex-start; flex-direction: column; }
-    .first-safety { text-align: left; }
   }
 
   @media (prefers-reduced-motion: reduce) {
@@ -3002,10 +2968,6 @@
               <span id="first-detection-copy-label">Copy prompt</span>
             </button>
           </div>
-        </div>
-        <div class="first-detection-foot">
-          <span class="first-listening"><span class="first-live-dot" aria-hidden="true"></span><span id="first-detection-status" aria-live="polite">Listening for your first threat</span></span>
-          <span class="first-safety">Harmless test · nothing runs</span>
         </div>
       </div>
       <div class="panel" id="findings-panel">
@@ -6020,14 +5982,9 @@
 
   function renderFirstDetectionReadiness() {
     var label = $("first-detection-copy-label");
-    var status = $("first-detection-status");
     var tag = $("first-detection-tag");
     if (label && !$("first-detection-copy").classList.contains("copied")) label.textContent = "Copy prompt";
     if (tag) tag.textContent = firstDetectionReady ? "Graph-backed" : "Syncing graph";
-    if (status && !firstDetectionReady) status.textContent = "Waiting for verifiable graph sync";
-    else if (status && status.textContent === "Waiting for verifiable graph sync") {
-      status.textContent = "Listening for your first threat";
-    }
   }
 
   function checkFirstDetectionReadiness() {
@@ -6046,13 +6003,11 @@
   function copyFirstDetectionPrompt() {
     var button = $("first-detection-copy");
     var label = $("first-detection-copy-label");
-    var status = $("first-detection-status");
     var copied = function () {
       if (button) {
         button.classList.add("copied");
       }
       if (label) label.textContent = "Copied";
-      if (status) status.textContent = "Prompt copied · waiting for your agent";
       window.setTimeout(function () {
         if (button) button.classList.remove("copied");
         if (label) label.textContent = "Copy prompt";

@@ -137,6 +137,9 @@ def test_first_detection_onboarding_uses_copyable_prompt_injection_example():
     assert 'FIRST_DETECTION_IDENTIFIER = "injection:a202ee6e402bb4a0ae16157a"' in html
     assert 'class="first-copy-icon"' in html
     assert 'id="first-detection-copy-label"' in html
+    assert 'class="first-detection-foot"' not in html
+    assert "Waiting for verifiable graph sync" not in html
+    assert "Harmless test · nothing runs" not in html
     assert prompt in html
     assert [finding.identifier for finding in findings] == [
         "injection:a202ee6e402bb4a0ae16157a"
