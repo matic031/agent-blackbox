@@ -66,7 +66,7 @@ BLACKBOX_DKG_LIST_CONTEXT_GRAPHS_PROJECTION="${BLACKBOX_DKG_LIST_CONTEXT_GRAPHS_
 BLACKBOX_DKG_SYNC_GLOBAL_MAX_INFLIGHT="1"
 BLACKBOX_DKG_NODE_OPTIONS=""
 NODE_MAJOR="${BLACKBOX_NODE_MAJOR:-22}"
-BLACKBOX_CONTEXT_GRAPH_ID="${BLACKBOX_CONTEXT_GRAPH_ID:-0x37b1Fdfd134e2b17583bCBdD3034F91504cD9C70/agent-blackbox}"
+BLACKBOX_CONTEXT_GRAPH_ID="${BLACKBOX_CONTEXT_GRAPH_ID:-0x37b1Fdfd134e2b17583bCBdD3034F91504cD9C70/agent-blackbox-vm}"
 BLACKBOX_GRAPH_PEER_ID="${BLACKBOX_GRAPH_PEER_ID:-12D3KooWBJskzr2unXQG9mR3LRZFUJoxWr1PN6hTbyWyKndHXjZM}"
 BLACKBOX_DKG_CATCHUP_TIMEOUT="${BLACKBOX_DKG_CATCHUP_TIMEOUT:-3600}"
 BLACKBOX_LLM_PROVIDER="${BLACKBOX_LLM_PROVIDER:-}"
@@ -1326,7 +1326,7 @@ install_dkg() {
     step "  DKG home: $BLACKBOX_DKG_HOME"
     step "  DKG CLI:  $BLACKBOX_DKG_BIN"
     step "  Store:    $(blackbox_store_description)"
-    step "  (non-interactive; joining and reading need no wallet funding)"
+    step "  (non-interactive; subscribing and reading need no wallet funding)"
     if blackbox_dkg start && wait_for_blackbox_dkg_runtime; then
         rm -f "$BLACKBOX_DKG_STORE_RESET_MARKER"
         ok "DKG node bootstrapped on $DKG_NETWORK"
@@ -1431,7 +1431,7 @@ blackbox = entries.setdefault("blackbox", {})
 # Idempotent for custom user edits, but migrate deprecated defaults that point
 # at the user's shared DKG install or a retired community graph.
 legacy_dkg_urls = {"http://127.0.0.1:9200", "http://localhost:9200"}
-legacy_graphs = {"umanitek/blackbox-threats-staging", "umanitek/guardian-threats-staging", "umanitek/guardian-threats"}
+legacy_graphs = {"0x37b1Fdfd134e2b17583bCBdD3034F91504cD9C70/agent-blackbox", "umanitek/blackbox-threats-staging", "umanitek/guardian-threats-staging", "umanitek/guardian-threats"}
 legacy_peers = {"12D3KooWAuEHYTWbD3R3yPTcECCYZnrjHNpJmrUw5b4D5T3m5Kr3", "12D3KooWBY9jmNATMPv1DZcKbFas5RtjpkhT69pPwvkUBY2MMnDX", "12D3KooWQHQd1SNecrRxwceqPJkXS" + "K" + "EYn8vrV4QyJ2AfqeYwXz1E", "12D3KooWBJskzr2unXQG9mR3LRZFUJoxWr1PN6hTbyWyKndHXjZM"}
 default_dkg_home = os.path.abspath(os.path.expanduser("~/.dkg"))
 legacy_blackbox_dkg_home = os.path.abspath(os.path.expanduser("~/.hermes/blackbox/dkg"))
@@ -1679,10 +1679,9 @@ ${path_note}
   DKG CLI:    $BLACKBOX_DKG_BIN
   Store:      $store_note
 
-  The signed join request and DKG sync are running in the background. The
-  default curator auto-approves valid requests; Blackbox retries until local
-  membership is confirmed. Do not treat this install as fully protected until
-  this command succeeds:
+  The public threat-graph subscription and DKG sync are running in the
+  background. Do not treat this install as fully protected until this command
+  succeeds:
 
       blackbox sync --wait --require-rules
 

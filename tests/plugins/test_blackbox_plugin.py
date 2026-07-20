@@ -20,7 +20,11 @@ cli_mod = load_blackbox("cli")
 
 def test_release_defaults_target_agent_blackbox_graph():
     assert constants.DEFAULT_CONTEXT_GRAPH_ID == (
+        "0x37b1Fdfd134e2b17583bCBdD3034F91504cD9C70/agent-blackbox-vm"
+    )
+    assert (
         "0x37b1Fdfd134e2b17583bCBdD3034F91504cD9C70/agent-blackbox"
+        in constants.LEGACY_CONTEXT_GRAPH_IDS
     )
     assert constants.DEFAULT_GRAPH_PEER_ID == (
         "12D3KooWBJskzr2unXQG9mR3LRZFUJoxWr1PN6hTbyWyKndHXjZM"

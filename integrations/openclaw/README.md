@@ -10,9 +10,8 @@ Blackbox-managed DKG node (`http://127.0.0.1:9320`) and home
 (`~/.hermes/blackbox/dkg`). That keeps it separate from any user-owned DKG node
 on the DKG CLI defaults (`~/.dkg` / `9200`).
 
-The default context graph is private. The shared local node must complete the
-signed join, curator approval, subscription, and catch-up flow before VM/SWM
-rules are available; `blackbox sync --wait` reports that state.
+The default context graph is public. The shared local node subscribes and
+catches up without curator approval; `blackbox sync --wait` reports that state.
 
 - **Detection rules come only from the threat graph.** The plugin syncs a
   ruleset from your local DKG node in two trust tiers (see below). On an empty
@@ -82,7 +81,7 @@ Point OpenClaw at the plugin directory and set its config in
         "hooks": { "allowConversationAccess": true },
         "config": {
           "mode": "audit",
-          "contextGraphId": "0x37b1Fdfd134e2b17583bCBdD3034F91504cD9C70/agent-blackbox",
+          "contextGraphId": "0x37b1Fdfd134e2b17583bCBdD3034F91504cD9C70/agent-blackbox-vm",
           "dkgUrl": "http://127.0.0.1:9320",
           "dkgHome": "~/.hermes/blackbox/dkg",
           "syncInterval": 300,
@@ -119,7 +118,7 @@ override (env wins).
 | Key | Default | Env | Meaning |
 |-----|---------|-----|---------|
 | `mode` | `audit` | `BLACKBOX_MODE` | `audit` \| `block` |
-| `contextGraphId` | `0x37b1Fdfd…/agent-blackbox` | `BLACKBOX_CONTEXT_GRAPH_ID` | Private Blackbox threat graph id |
+| `contextGraphId` | `0x37b1Fdfd…/agent-blackbox-vm` | `BLACKBOX_CONTEXT_GRAPH_ID` | Public verified threat graph id |
 | `dkgUrl` | `http://127.0.0.1:9320` | `BLACKBOX_DKG_DAEMON_URL` / `BLACKBOX_DKG_URL` | Blackbox-managed local node |
 | `dkgHome` | `~/.hermes/blackbox/dkg` | `BLACKBOX_DKG_HOME` | isolated DKG config, API token, pid, and cache |
 | `syncInterval` | `300` | `BLACKBOX_SYNC_INTERVAL` | seconds between ruleset refresh |

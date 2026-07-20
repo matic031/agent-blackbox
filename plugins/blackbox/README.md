@@ -20,11 +20,10 @@ The installer sets up an isolated node from the latest official
 agents. Docker must be installed and running for its Blazegraph store. The
 installer does not replace or modify an existing DKG node.
 
-The default context graph is private. The installer sends the local node's
-signed join request to the default curator, which auto-approves valid requests.
-Blackbox retries approval delivery and waits for local membership confirmation
-before starting DKG catch-up. Local WM and the dashboard remain available while
-the private graph is joining.
+The default context graph is public, so every Agent Blackbox install can sync
+verified threat data immediately. Publishing remains curated so only trusted
+data becomes blocking Verifiable Memory. Local working memory and the dashboard
+remain available during the initial sync.
 
 ## Compatibility
 
@@ -75,9 +74,9 @@ plugins:
 Blackbox uses two shared graphs:
 
 - The **public graph** contains Umanitek-verified threats. These can be blocked
-  in block mode. “Public” is the VM trust tier; the default context graph still
-  restricts its underlying data to approved nodes. The UI expands collection
-  contents and lists each threat entity, not one row per collection.
+  in block mode. Anyone can read and sync it, while publishing remains curated.
+  The UI expands collection contents and lists each threat entity, not one row
+  per collection.
 - The **community graph** contains reports awaiting review. These warn but
   never block.
 
@@ -99,8 +98,8 @@ to change them is through the dashboard settings page.
 | `detection.<category>.enabled` | `true` | Enable or disable a detection category |
 | `detection.<category>.min_severity` | `info` | Minimum visible severity for a category |
 | `protected_paths` | `[]` | Local file globs that always block and are never shared |
-| `context_graph_id` | `0x37b1Fdfd…/agent-blackbox` | Private Blackbox context graph |
-| `graph_peer_id` | bundled curator peer | Receives the signed join request |
+| `context_graph_id` | `0x37b1Fdfd…/agent-blackbox-vm` | Public verified threat graph |
+| `graph_peer_id` | bundled publisher peer | Authoritative threat-data sync source |
 
 Categories are `injection`, `escalation`, `dependency`, `fileaccess`, and
 `skill`.
@@ -144,11 +143,9 @@ blackbox status
 blackbox sync --wait
 ```
 
-A first sync can continue in the background for several minutes. The default
-curator auto-approves the signed request, and Blackbox keeps retrying until the
-local DKG confirms membership. If `joining private graph` remains for more than
-three minutes, rerun the command below and include the displayed agent address,
-peer ID, and DKG log when reporting the problem:
+A first sync can continue in the background for several minutes. If it does not
+finish, rerun the command below and include the displayed peer ID and DKG log
+when reporting the problem:
 
 ```bash
 blackbox sync --wait --timeout 180
