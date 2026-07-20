@@ -80,17 +80,16 @@ SCHEMA_CONTRIBUTOR_PRED = "http://schema.org/contributor"
 # Defaults
 # ---------------------------------------------------------------------------
 
-#: Default private context graph (config key ``context_graph_id``).
-DEFAULT_CONTEXT_GRAPH_ID = "0x37b1Fdfd134e2b17583bCBdD3034F91504cD9C70/agent-blackbox"
+#: Default public Verifiable Memory graph (config key ``context_graph_id``).
+DEFAULT_CONTEXT_GRAPH_ID = "0x37b1Fdfd134e2b17583bCBdD3034F91504cD9C70/agent-blackbox-vm"
 
 #: Legacy graph ids from earlier defaults. A node still pointed at one of these
 #: is transparently switched to ``DEFAULT_CONTEXT_GRAPH_ID`` at config-load
 #: time, so an existing install moves to the current graph with zero manual
-#: steps. Includes the public ``guardian-threats-staging`` default we ran
-#: before pivoting back to the private relay-backed community graph. A
-#: genuinely custom ``context_graph_id`` (anything not in this set) is always
-#: left untouched.
+#: steps. A genuinely custom ``context_graph_id`` (anything not in this set)
+#: is always left untouched.
 LEGACY_CONTEXT_GRAPH_IDS = frozenset({
+    "0x37b1Fdfd134e2b17583bCBdD3034F91504cD9C70/agent-blackbox",
     "umanitek/blackbox-threats-staging",
     "umanitek/guardian-threats-staging",
     "umanitek/guardian-threats",
@@ -100,7 +99,7 @@ LEGACY_CONTEXT_GRAPH_IDS = frozenset({
 DEFAULT_DKG_PORT = 9320
 DEFAULT_DKG_URL = f"http://127.0.0.1:{DEFAULT_DKG_PORT}"
 
-#: Bootstrap peer for joining the default private threat graph.
+#: Publisher peer used for authoritative catch-up of the default threat graph.
 DEFAULT_GRAPH_PEER_ID = "12D3KooWBJskzr2unXQG9mR3LRZFUJoxWr1PN6hTbyWyKndHXjZM"
 
 #: Previous bootstrap peers transparently replaced during config loading.

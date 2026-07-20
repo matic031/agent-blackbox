@@ -17,10 +17,18 @@ constants = load_blackbox("constants")
 quads = load_blackbox("quads")
 cli_mod = load_blackbox("cli")
 
+PRIVATE_CONTEXT_GRAPH_ID = (
+    "0x37b1Fdfd134e2b17583bCBdD3034F91504cD9C70/agent-blackbox"
+)
+
 
 def test_release_defaults_target_agent_blackbox_graph():
     assert constants.DEFAULT_CONTEXT_GRAPH_ID == (
+        "0x37b1Fdfd134e2b17583bCBdD3034F91504cD9C70/agent-blackbox-vm"
+    )
+    assert (
         "0x37b1Fdfd134e2b17583bCBdD3034F91504cD9C70/agent-blackbox"
+        in constants.LEGACY_CONTEXT_GRAPH_IDS
     )
     assert constants.DEFAULT_GRAPH_PEER_ID == (
         "12D3KooWBJskzr2unXQG9mR3LRZFUJoxWr1PN6hTbyWyKndHXjZM"
@@ -523,7 +531,7 @@ def test_blackbox_sync_private_waits_for_approval_then_subscribes(monkeypatch):
         cli_mod,
         "load_blackbox_config",
         lambda: config_mod.BlackboxConfig(
-            context_graph_id=constants.DEFAULT_CONTEXT_GRAPH_ID,
+            context_graph_id=PRIVATE_CONTEXT_GRAPH_ID,
             dkg_url=constants.DEFAULT_DKG_URL,
             graph_peer_id=constants.DEFAULT_GRAPH_PEER_ID,
         ),
@@ -581,7 +589,7 @@ def test_blackbox_sync_restarts_stale_empty_catchup_after_approval(monkeypatch, 
         cli_mod,
         "load_blackbox_config",
         lambda: config_mod.BlackboxConfig(
-            context_graph_id=constants.DEFAULT_CONTEXT_GRAPH_ID,
+            context_graph_id=PRIVATE_CONTEXT_GRAPH_ID,
             dkg_url=constants.DEFAULT_DKG_URL,
             graph_peer_id=constants.DEFAULT_GRAPH_PEER_ID,
         ),
@@ -591,11 +599,11 @@ def test_blackbox_sync_restarts_stale_empty_catchup_after_approval(monkeypatch, 
     args = argparse.Namespace(wait=False, timeout=180, require_rules=True)
     assert cli_mod._cmd_sync(args) == 2
     assert events == [
-        ("status", constants.DEFAULT_CONTEXT_GRAPH_ID),
-        ("join", constants.DEFAULT_CONTEXT_GRAPH_ID, constants.DEFAULT_GRAPH_PEER_ID),
-        ("subscribe", constants.DEFAULT_CONTEXT_GRAPH_ID),
-        ("status", constants.DEFAULT_CONTEXT_GRAPH_ID),
-        ("restart", constants.DEFAULT_CONTEXT_GRAPH_ID),
+        ("status", PRIVATE_CONTEXT_GRAPH_ID),
+        ("join", PRIVATE_CONTEXT_GRAPH_ID, constants.DEFAULT_GRAPH_PEER_ID),
+        ("subscribe", PRIVATE_CONTEXT_GRAPH_ID),
+        ("status", PRIVATE_CONTEXT_GRAPH_ID),
+        ("restart", PRIVATE_CONTEXT_GRAPH_ID),
     ]
     assert "Restarted DKG catch-up after approval" in capsys.readouterr().out
 
@@ -650,7 +658,7 @@ def test_blackbox_sync_waits_for_fresh_dkg_catchup_without_restarting(monkeypatc
         cli_mod,
         "load_blackbox_config",
         lambda: config_mod.BlackboxConfig(
-            context_graph_id=constants.DEFAULT_CONTEXT_GRAPH_ID,
+            context_graph_id=PRIVATE_CONTEXT_GRAPH_ID,
             dkg_url=constants.DEFAULT_DKG_URL,
             graph_peer_id=constants.DEFAULT_GRAPH_PEER_ID,
         ),
@@ -660,7 +668,7 @@ def test_blackbox_sync_waits_for_fresh_dkg_catchup_without_restarting(monkeypatc
 
     args = argparse.Namespace(wait=True, timeout=30, require_rules=True)
     assert cli_mod._cmd_sync(args) == 0
-    assert ("restart", constants.DEFAULT_CONTEXT_GRAPH_ID) not in events
+    assert ("restart", PRIVATE_CONTEXT_GRAPH_ID) not in events
 
 
 def test_blackbox_sync_reports_pending_approval_when_catchup_is_denied(monkeypatch, capsys):
@@ -696,7 +704,7 @@ def test_blackbox_sync_reports_pending_approval_when_catchup_is_denied(monkeypat
         cli_mod,
         "load_blackbox_config",
         lambda: config_mod.BlackboxConfig(
-            context_graph_id=constants.DEFAULT_CONTEXT_GRAPH_ID,
+            context_graph_id=PRIVATE_CONTEXT_GRAPH_ID,
             dkg_url=constants.DEFAULT_DKG_URL,
             graph_peer_id=constants.DEFAULT_GRAPH_PEER_ID,
         ),

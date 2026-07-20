@@ -26,7 +26,12 @@ _BLACKBOX_SOUL_MARKER = "<!-- managed-by: hermes-blackbox-chat -->"
 _LEGACY_GUARDIAN_SOUL_MARKER = "<!-- managed-by: hermes-guardian-chat -->"
 _BLACKBOX_SOURCE_ROOT_MARKER = ".blackbox-source-root"
 _BLACKBOX_CONTEXT_FILE_MAX_CHARS = 100_000
-_PRIVATE_AUTO_JOIN_GRAPH_IDS = {constants.DEFAULT_CONTEXT_GRAPH_ID}
+# The release graph is public. Keep the private-join machinery available for
+# the previous private graph without making public installs request curator
+# membership.
+_PRIVATE_AUTO_JOIN_GRAPH_IDS: frozenset[str] = frozenset({
+    "0x37b1Fdfd134e2b17583bCBdD3034F91504cD9C70/agent-blackbox",
+})
 _BLACKBOX_SOUL = f"""{_BLACKBOX_SOUL_MARKER}
 # Agent Blackbox
 
@@ -440,6 +445,8 @@ def _cmd_sync(args: argparse.Namespace) -> int:
     cfg = load_blackbox_config()
     client = DkgClient(url=cfg.dkg_url, dkg_home=cfg.dkg_home)
     private_graph = _should_request_private_join(cfg)
+    release_graph = cfg.context_graph_id == constants.DEFAULT_CONTEXT_GRAPH_ID
+    managed_graph = private_graph or release_graph
     authoritative_available = bool(
         cfg.graph_peer_id and callable(getattr(client, "catchup_from_peer", None))
     )
@@ -456,14 +463,14 @@ def _cmd_sync(args: argparse.Namespace) -> int:
     authoritative_target = 0
     last_join_attempt = float("-inf")
     deadline = time.monotonic() + max(1, int(getattr(args, "timeout", 180) or 180))
-    track_sync = bool(private_graph and getattr(args, "wait", False))
+    track_sync = bool(managed_graph and getattr(args, "wait", False))
 
     if track_sync:
         sync_state.write(
             "running",
             context_graph_id=cfg.context_graph_id,
             graph_peer_id=cfg.graph_peer_id,
-            phase="joining",
+            phase="joining" if private_graph else "network-catchup",
             public_entries=0,
             community_entries=0,
         )
@@ -475,7 +482,7 @@ def _cmd_sync(args: argparse.Namespace) -> int:
     except (DkgError, AttributeError):
         pass
 
-    if private_graph:
+    if managed_graph:
         try:
             baseline_catchup = client.catchup_status(cfg.context_graph_id)
             baseline_catchup_known = True
@@ -556,7 +563,7 @@ def _cmd_sync(args: argparse.Namespace) -> int:
         community_count = _ruleset_graph_count(rs, "community")
 
         catchup_state = ""
-        if private_graph and subscribed:
+        if managed_graph and subscribed:
             try:
                 catchup = client.catchup_status(cfg.context_graph_id)
                 last_catchup = catchup
@@ -573,7 +580,7 @@ def _cmd_sync(args: argparse.Namespace) -> int:
             except DkgError:
                 pass
         if (
-            private_graph
+            managed_graph
             and subscribed
             and not catchup_restarted
             and not fresh_catchup_seen
@@ -587,14 +594,17 @@ def _cmd_sync(args: argparse.Namespace) -> int:
             try:
                 client.restart_context_graph_catchup(cfg.context_graph_id)
                 catchup_restarted = True
-                print("Restarted DKG catch-up after approval; waiting for threat rows.")
+                if private_graph:
+                    print("Restarted DKG catch-up after approval; waiting for threat rows.")
+                else:
+                    print("Restarted DKG catch-up; waiting for public threat rows.")
                 if getattr(args, "wait", False):
                     continue
             except DkgError as exc:
                 logger.debug("blackbox: catch-up restart failed: %s", exc)
 
         authoritative_fallback_ready = (
-            private_graph
+            managed_graph
             and authoritative_available
             and getattr(args, "wait", False)
             and public_count > 0
@@ -607,11 +617,11 @@ def _cmd_sync(args: argparse.Namespace) -> int:
             or authoritative_fallback_ready
         )
         base_sync_complete = (
-            public_count > 0 if private_graph else sum(counts.values()) > 0
+            public_count > 0 if managed_graph else sum(counts.values()) > 0
         ) and fresh_catchup_complete
         if (
             base_sync_complete
-            and private_graph
+            and managed_graph
             and getattr(args, "wait", False)
             and authoritative_available
             and not authoritative_attempted
@@ -730,7 +740,7 @@ def _cmd_sync(args: argparse.Namespace) -> int:
         }:
             detail = last_catchup.get("error") or (last_catchup.get("result") or {}).get("error")
             print(f"  Fresh DKG catch-up failed{f': {detail}' if detail else '.'}")
-        elif private_graph and community_count > 0 and public_count == 0:
+        elif managed_graph and community_count > 0 and public_count == 0:
             print("  Community SWM synced, but public VM is still empty.")
             print("  Retry with `hermes blackbox sync --wait`.")
         elif authoritative_attempted and not authoritative_complete:

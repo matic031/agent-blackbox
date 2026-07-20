@@ -113,7 +113,7 @@ const DEFAULT_DKG_URL = `http://127.0.0.1:${DEFAULT_DKG_PORT}`;
 
 const DEFAULTS: BlackboxConfig = {
   mode: "audit",
-  contextGraphId: "0x37b1Fdfd134e2b17583bCBdD3034F91504cD9C70/agent-blackbox",
+  contextGraphId: "0x37b1Fdfd134e2b17583bCBdD3034F91504cD9C70/agent-blackbox-vm",
   dkgUrl: DEFAULT_DKG_URL,
   dkgHome: "",
   syncInterval: 300,
