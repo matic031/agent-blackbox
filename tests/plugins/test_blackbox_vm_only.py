@@ -1,11 +1,22 @@
 """Release contract: curated public VM only; community SWM is coming soon."""
 
 from argparse import Namespace
+from pathlib import Path
 
 from fastapi.testclient import TestClient
 
 from plugins.blackbox import cli, config, constants, detection, hooks, ruleset
 from plugins.blackbox.dashboard import server
+
+
+DASHBOARD_HTML = (
+    Path(__file__).resolve().parents[2]
+    / "plugins"
+    / "blackbox"
+    / "dashboard"
+    / "static"
+    / "index.html"
+)
 
 
 def test_refresh_queries_only_verifiable_memory(monkeypatch, tmp_path):
@@ -44,7 +55,18 @@ def test_cached_community_rules_are_discarded():
 
 def test_config_cannot_enable_threat_sharing(monkeypatch):
     monkeypatch.setenv("BLACKBOX_REPORT", "true")
-    assert config.load_blackbox_config().report is False
+    cfg = config.load_blackbox_config()
+    assert cfg.report is False
+    assert cfg.daily_report_limit == 0
+
+
+def test_dashboard_settings_fallback_keeps_community_sharing_off():
+    html = DASHBOARD_HTML.read_text(encoding="utf-8")
+
+    assert 'report: false, report_min_severity: "high"' in html
+    assert "out.report = false;" in html
+    assert 'report: true, report_min_severity: "high"' not in html
+    assert "out.report = data.report !== false;" not in html
 
 
 def test_report_command_submits_nothing(monkeypatch, capsys):

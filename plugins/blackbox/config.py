@@ -104,7 +104,7 @@ class BlackboxConfig:
     dkg_bin: str = field(default_factory=lambda: str(constants.blackbox_dkg_bin()))
     sync_interval: int = 60
     report: bool = False
-    daily_report_limit: int = 9999
+    daily_report_limit: int = 0
     report_min_severity: str = "high"
     block_severity: str = "critical"
     dashboard_port: int = 9700
@@ -316,15 +316,7 @@ def load_blackbox_config() -> BlackboxConfig:
         # Threat sharing ships with the future community graph. This is not a
         # user-toggleable path in the VM-only release.
         report=False,
-        daily_report_limit=_as_int(
-            _env_or(
-                entry,
-                env="BLACKBOX_DAILY_REPORT_LIMIT",
-                key="daily_report_limit",
-                default=9999,
-            ),
-            9999,
-        ),
+        daily_report_limit=0,
         report_min_severity=report_min_severity,
         block_severity=block_severity,
         dashboard_port=_as_int(

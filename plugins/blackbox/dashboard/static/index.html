@@ -6258,7 +6258,7 @@
     SET_CATS.forEach(function (c) { cats[c.key] = { enabled: true, min_severity: "info" }; });
     return {
       mode: "audit", block_severity: "critical",
-      report: true, report_min_severity: "high",
+      report: false, report_min_severity: "high",
       discover: true, osv_lookup: true,
       categories: cats, protected_paths: [],
       category_labels: {}
@@ -6272,7 +6272,9 @@
     out.mode = (String(data.mode).toLowerCase() === "block") ? "block" : "audit";
     out.block_severity = sevOk(data.block_severity || "critical");
     out.report_min_severity = sevOk(data.report_min_severity || "high");
-    out.report = data.report !== false;
+    // Community sharing is coming soon; missing or stale server values must
+    // never make the dashboard's hidden compatibility field opt in.
+    out.report = false;
     out.discover = data.discover !== false;
     out.osv_lookup = data.osv_lookup !== false;
     var cats = (data.categories && typeof data.categories === "object") ? data.categories : {};

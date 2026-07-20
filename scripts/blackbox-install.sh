@@ -1519,8 +1519,11 @@ defaults = {
     "context_graph_id": context_graph_id,
     "graph_peer_id": graph_peer_id,
     "sync_interval": 60,
-    "report": True,
-    "daily_report_limit": 9999,
+    # Community sharing has not shipped.  Keep fresh installs private, and
+    # make the obsolete outbound-report allowance inert for compatibility
+    # with older readers that still expect the key to exist.
+    "report": False,
+    "daily_report_limit": 0,
     "report_min_severity": "high",
     "block_severity": "critical",
     "dashboard_port": 9700,
@@ -1529,6 +1532,12 @@ defaults = {
 }
 for k, v in defaults.items():
     if k not in blackbox:
+        blackbox[k] = v
+        added.append(k)
+# Migrate stale pre-release sharing settings too. The feature is closed at
+# runtime, so leaving an old opt-in in config is misleading even if inert.
+for k, v in {"report": False, "daily_report_limit": 0}.items():
+    if blackbox.get(k) != v:
         blackbox[k] = v
         added.append(k)
 with open(cfg_path, "w") as f:

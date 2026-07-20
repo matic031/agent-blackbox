@@ -394,7 +394,7 @@ def _cmd_status(args: argparse.Namespace) -> int:
     print(f"  DKG node:          {cfg.dkg_url}  [{'reachable' if reachable else 'unreachable'}]")
     print(f"  DKG home:          {cfg.dkg_home}")
     print(f"  DKG CLI:           {cfg.dkg_bin}")
-    print(f"  reports:           {'on' if cfg.report else 'off'} (limit {cfg.daily_report_limit}/day)")
+    print("  threat sharing:    off (Community graph coming soon)")
     print(f"  sync interval:     {cfg.sync_interval}s")
     print(f"  ruleset:           {counts['injection']} injection, "
           f"{counts['escalation']} escalation, {counts['dependency']} dependency, "
@@ -436,6 +436,36 @@ def _print_attached_targets() -> None:
 
 
 def _cmd_sync(args: argparse.Namespace) -> int:
+    """Run a ruleset sync, translating an interactive cancellation cleanly."""
+    try:
+        return _cmd_sync_impl(args)
+    except KeyboardInterrupt:
+        try:
+            current_transfer = sync_state.read()
+            try:
+                owns_transfer = int(current_transfer.get("pid") or 0) == os.getpid()
+            except (TypeError, ValueError):
+                owns_transfer = False
+            if current_transfer.get("status") == "running" and owns_transfer:
+                sync_state.write(
+                    "cancelled",
+                    context_graph_id=current_transfer.get("context_graph_id"),
+                    graph_peer_id=current_transfer.get("graph_peer_id"),
+                    phase=str(current_transfer.get("phase") or "cancelled"),
+                    public_entries=int(current_transfer.get("public_entries") or 0),
+                    expected_public_entries=int(
+                        current_transfer.get("expected_public_entries") or 0
+                    ),
+                    community_entries=int(current_transfer.get("community_entries") or 0),
+                    error="sync cancelled by user",
+                )
+        except Exception as exc:  # cancellation must never print a traceback
+            logger.debug("blackbox: failed to record sync cancellation: %s", exc)
+        print("Blackbox sync cancelled.", file=sys.stderr)
+        return 130
+
+
+def _cmd_sync_impl(args: argparse.Namespace) -> int:
     cfg = load_blackbox_config()
     client = DkgClient(url=cfg.dkg_url, dkg_home=cfg.dkg_home)
     private_graph = _should_request_private_join(cfg)
@@ -602,7 +632,14 @@ def _cmd_sync(args: argparse.Namespace) -> int:
             and authoritative_available
             and getattr(args, "wait", False)
             and public_count > 0
-            and catchup_state in {"failed", "cancelled", "denied", "unreachable"}
+            and (
+                catchup_state in {"failed", "cancelled", "denied", "unreachable"}
+                or (
+                    catchup_state == "deferred"
+                    and authoritative_recovered
+                    and authoritative_complete
+                )
+            )
         )
         fresh_catchup_complete = (
             not getattr(args, "wait", False)
@@ -648,18 +685,23 @@ def _cmd_sync(args: argparse.Namespace) -> int:
             authoritative_complete = (
                 authoritative_target > 0 and public_count >= authoritative_target
             )
+        sync_complete = base_sync_complete and (
+            not authoritative_attempted or authoritative_complete
+        )
+        if authoritative_recovered and not sync_complete:
             sync_state.write(
-                "done" if authoritative_complete else "running",
+                "running",
                 context_graph_id=cfg.context_graph_id,
                 graph_peer_id=cfg.graph_peer_id,
-                phase=("complete" if authoritative_complete else "reconciling-public-memory"),
+                phase=(
+                    "reconciling-public-memory"
+                    if not authoritative_complete
+                    else "network-catchup"
+                ),
                 public_entries=public_count,
                 expected_public_entries=authoritative_target,
                 community_entries=community_count,
             )
-        sync_complete = base_sync_complete and (
-            not authoritative_attempted or authoritative_complete
-        )
         if sync_complete:
             break
         if (

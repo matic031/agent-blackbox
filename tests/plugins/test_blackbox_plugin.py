@@ -372,6 +372,81 @@ def test_blackbox_sync_uses_authoritative_publisher_for_empty_local_store(
     assert "25,000 public VM" in capsys.readouterr().out
 
 
+def test_blackbox_sync_accepts_deferred_after_verified_authoritative_vm(
+    monkeypatch, capsys
+):
+    curator_calls = []
+    states = []
+    status_calls = []
+
+    class FakeClient:
+        def __init__(self, url, **_kwargs):
+            self.url = url
+
+        def catchup_status(self, cg_id):
+            status_calls.append(cg_id)
+            if len(status_calls) == 1:
+                return {"jobId": "old", "status": "done"}
+            return {
+                "jobId": "fresh",
+                "status": "deferred",
+                "result": {"deferredBackpressure": 7, "peersSucceeded": 0},
+            }
+
+        def subscribe_context_graph(self, cg_id):
+            return {"catchup": {"jobId": "fresh", "status": "queued"}}
+
+        def catchup_from_peer(self, cg_id, peer_id, *, budget_ms):
+            curator_calls.append((cg_id, peer_id, budget_ms))
+            return {"completed": True, "replacedRoots": 4}
+
+    class FakeRuleset:
+        def counts(self):
+            return {
+                "injection": 0,
+                "escalation": 0,
+                "dependency": 4,
+                "fileaccess": 0,
+                "skill": 0,
+            }
+
+        def graph_count(self, source):
+            return 4 if source == "public" else 0
+
+        def graph_entries(self, source):
+            if source == "public":
+                return [{"identifier": f"dep:{index}"} for index in range(4)]
+            return []
+
+    monkeypatch.setattr(cli_mod, "DkgClient", FakeClient)
+    monkeypatch.setattr(
+        cli_mod,
+        "load_blackbox_config",
+        lambda: config_mod.BlackboxConfig(
+            context_graph_id=constants.DEFAULT_CONTEXT_GRAPH_ID,
+            dkg_url=constants.DEFAULT_DKG_URL,
+            graph_peer_id=constants.DEFAULT_GRAPH_PEER_ID,
+        ),
+    )
+    monkeypatch.setattr(cli_mod.ruleset, "refresh", lambda _cfg, _client: FakeRuleset())
+    monkeypatch.setattr(
+        cli_mod.sync_state,
+        "write",
+        lambda status, **details: states.append((status, details)) or details,
+    )
+
+    args = argparse.Namespace(wait=True, timeout=30, require_rules=True)
+    assert cli_mod._cmd_sync(args) == 0
+    assert len(curator_calls) == 1
+    assert len(status_calls) >= 3
+    assert states[-1][0] == "done"
+    statuses = [status for status, _details in states]
+    assert statuses.count("done") == 1
+    assert all(details.get("phase") == "complete" for status, details in states if status == "done")
+    assert states[-1][1]["public_entries"] == 4
+    assert "4 public VM" in capsys.readouterr().out
+
+
 def test_authoritative_recovery_waits_for_dkg_backpressure(monkeypatch, capsys):
     attempts = []
     states = []
@@ -406,6 +481,97 @@ def test_authoritative_recovery_waits_for_dkg_backpressure(monkeypatch, capsys):
     )
     assert not any(status == "failed" for status, _details in states)
     assert "waiting for safe recovery capacity" in capsys.readouterr().out
+
+
+def test_blackbox_sync_ctrl_c_records_cancellation_and_returns_130(monkeypatch, capsys):
+    state = {}
+
+    class FakeClient:
+        def __init__(self, url, **_kwargs):
+            self.url = url
+
+        def catchup_status(self, cg_id):
+            return {}
+
+        def subscribe_context_graph(self, cg_id):
+            return {}
+
+    def write_state(status, **details):
+        state.clear()
+        state.update(status=status, pid=cli_mod.os.getpid(), **details)
+        return dict(state)
+
+    monkeypatch.setattr(cli_mod, "DkgClient", FakeClient)
+    monkeypatch.setattr(
+        cli_mod,
+        "load_blackbox_config",
+        lambda: config_mod.BlackboxConfig(
+            context_graph_id=constants.DEFAULT_CONTEXT_GRAPH_ID,
+            dkg_url=constants.DEFAULT_DKG_URL,
+            graph_peer_id=constants.DEFAULT_GRAPH_PEER_ID,
+        ),
+    )
+    monkeypatch.setattr(
+        cli_mod.ruleset,
+        "refresh",
+        lambda _cfg, _client: (_ for _ in ()).throw(KeyboardInterrupt()),
+    )
+    monkeypatch.setattr(cli_mod.sync_state, "write", write_state)
+    monkeypatch.setattr(cli_mod.sync_state, "read", lambda: dict(state))
+
+    args = argparse.Namespace(wait=True, timeout=30, require_rules=True)
+    assert cli_mod._cmd_sync(args) == 130
+    assert state["status"] == "cancelled"
+    assert state["phase"] == "network-catchup"
+    assert state["error"] == "sync cancelled by user"
+    captured = capsys.readouterr()
+    assert captured.err.endswith("Blackbox sync cancelled.\n")
+    assert "Traceback" not in captured.out + captured.err
+
+
+def test_blackbox_sync_ctrl_c_does_not_overwrite_another_process_state(
+    monkeypatch, capsys
+):
+    writes = []
+    monkeypatch.setattr(
+        cli_mod,
+        "_cmd_sync_impl",
+        lambda _args: (_ for _ in ()).throw(KeyboardInterrupt()),
+    )
+    monkeypatch.setattr(
+        cli_mod.sync_state,
+        "read",
+        lambda: {"status": "running", "pid": cli_mod.os.getpid() + 1},
+    )
+    monkeypatch.setattr(
+        cli_mod.sync_state,
+        "write",
+        lambda status, **details: writes.append((status, details)),
+    )
+
+    assert cli_mod._cmd_sync(argparse.Namespace()) == 130
+    assert writes == []
+    assert capsys.readouterr().err == "Blackbox sync cancelled.\n"
+
+
+def test_blackbox_sync_ctrl_c_survives_broken_cancellation_state(
+    monkeypatch, capsys
+):
+    monkeypatch.setattr(
+        cli_mod,
+        "_cmd_sync_impl",
+        lambda _args: (_ for _ in ()).throw(KeyboardInterrupt()),
+    )
+    monkeypatch.setattr(
+        cli_mod.sync_state,
+        "read",
+        lambda: (_ for _ in ()).throw(OSError("state unavailable")),
+    )
+
+    assert cli_mod._cmd_sync(argparse.Namespace()) == 130
+    captured = capsys.readouterr()
+    assert captured.err == "Blackbox sync cancelled.\n"
+    assert "Traceback" not in captured.out + captured.err
 
 
 def test_blackbox_sync_does_not_accept_stale_public_rows_after_fresh_catchup_failure(

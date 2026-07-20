@@ -299,6 +299,61 @@ def test_installers_enable_blackbox_noninteractively() -> None:
     assert "plugins enable blackbox --no-allow-tool-override" in windows
 
 
+def test_unix_installer_fresh_config_keeps_community_sharing_off(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "config.yaml"
+
+    configured = _run_unix_blackbox_config_writer(
+        config_path,
+        dkg_url="http://127.0.0.1:9320",
+        dkg_home=tmp_path / ".dkg",
+        dkg_bin=tmp_path / "dkg" / "node_modules" / ".bin" / "dkg",
+    )
+    blackbox = configured["plugins"]["entries"]["blackbox"]
+
+    assert blackbox["report"] is False
+    assert blackbox["daily_report_limit"] == 0
+
+
+def test_windows_installer_fresh_config_keeps_community_sharing_off() -> None:
+    writer = _extract_powershell_function_body("Enable-AndConfigure")
+
+    assert '"report": False' in writer
+    assert '"daily_report_limit": 0' in writer
+    assert '"report": True' not in writer
+    assert '"daily_report_limit": 9999' not in writer
+
+
+def test_unix_installer_migrates_stale_community_sharing_opt_in(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "plugins:\n  entries:\n    blackbox:\n      report: true\n"
+        "      daily_report_limit: 9999\n",
+        encoding="utf-8",
+    )
+
+    configured = _run_unix_blackbox_config_writer(
+        config_path,
+        dkg_url="http://127.0.0.1:9320",
+        dkg_home=tmp_path / ".dkg",
+        dkg_bin=tmp_path / "dkg" / "node_modules" / ".bin" / "dkg",
+    )
+    blackbox = configured["plugins"]["entries"]["blackbox"]
+
+    assert blackbox["report"] is False
+    assert blackbox["daily_report_limit"] == 0
+
+
+def test_windows_installer_migrates_stale_community_sharing_opt_in() -> None:
+    writer = INSTALL_PS1.read_text(encoding="utf-8")
+
+    assert 'for k, v in {"report": False, "daily_report_limit": 0}.items()' in writer
+    assert "if blackbox.get(k) != v:" in writer
+
+
 def test_hermes_setup_defaults_to_reuse_without_prompting() -> None:
     text = INSTALL_SH.read_text()
     body = _extract_function_body("run_hermes_setup")
