@@ -418,6 +418,54 @@ def test_sync_activity_does_not_hide_failure_behind_stale_syncing_state():
     assert activity["detail"] == "protocol negotiation failed"
 
 
+def test_sync_activity_hides_known_swm_failure_when_verified_vm_is_ready():
+    activity = server._sync_activity(
+        public=52_000,
+        community=0,
+        node_reachable=True,
+        catchup={
+            "status": "failed",
+            "error": "POST /api/shared-memory/catchup transport error: timed out",
+        },
+        connection={"state": "subscribed", "updated_at": 200.0},
+        transfer={},
+    )
+
+    assert activity["status"] == "ready"
+    assert activity["phase"] == "verifiable-memory-ready"
+    assert activity["label"] == "Verified threat graph is ready"
+    assert activity["detail"] == "52,000 verified public threats are queryable."
+    assert activity["percent"] == 100.0
+
+
+def test_sync_activity_keeps_unrelated_catchup_failures_visible():
+    activity = server._sync_activity(
+        public=52_000,
+        community=0,
+        node_reachable=True,
+        catchup={"status": "failed", "error": "publisher VM checksum mismatch"},
+        connection={},
+        transfer={},
+    )
+
+    assert activity["status"] == "failed"
+    assert activity["label"] == "Graph sync needs attention"
+    assert activity["detail"] == "publisher VM checksum mismatch"
+
+    swm_permission_error = server._sync_activity(
+        public=52_000,
+        community=0,
+        node_reachable=True,
+        catchup={
+            "status": "failed",
+            "error": "POST /api/shared-memory/catchup denied: invalid capability",
+        },
+        connection={},
+        transfer={},
+    )
+    assert swm_permission_error["status"] == "failed"
+
+
 def test_sync_activity_prefers_completed_authoritative_transfer_over_stale_connection():
     activity = server._sync_activity(
         public=25_000,
