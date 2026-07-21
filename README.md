@@ -1,8 +1,6 @@
 <div align="center">
 
-<img src="./docs/blackbox-header.gif" alt="Agent Blackbox" width="100%">
-
-**Stop dangerous AI agent actions before they happen.**
+<img src="./docs/blackbox-header.jpg" alt="Agent Blackbox" width="100%">
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-80CA9C?style=flat-square)](LICENSE)
 [![by Umanitek](https://img.shields.io/badge/by-Umanitek-5C7F87?style=flat-square)](#about-umanitek)
@@ -273,8 +271,8 @@ Open the dashboard and click the gear icon. Switch threat categories on/off and 
 
 ## Legal
 
-- [Terms of Service](legal/terms-of-service.pdf) ([editable Word version](legal/terms-of-service.docx))
-- [Privacy Policy](legal/privacy-policy.pdf) ([editable Word version](legal/privacy-policy.docx))
+- [Terms of Service](legal/terms-of-service.pdf)
+- [Privacy Policy](legal/privacy-policy.pdf)
 
 These documents are provided for transparency and supplement the open-source license without restricting the rights granted by it.
 
