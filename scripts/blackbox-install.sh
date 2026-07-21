@@ -1330,18 +1330,8 @@ install_blackbox_dkg_package() {
         warn "Could not determine the installed DKG package version."
         return 1
     fi
-    if ! "$VENV_DIR/bin/python" - "$installed_version" <<'PYEOF'
-import sys
-
-raw = sys.argv[1].split("-", 1)[0]
-try:
-    version = tuple(int(part) for part in raw.split("."))
-except ValueError:
-    raise SystemExit(1)
-raise SystemExit(0 if version >= (10, 0, 7) else 1)
-PYEOF
-    then
-        warn "DKG $installed_version is too old for the complete Blackbox graph; version 10.0.7+ is required."
+    if ! "$VENV_DIR/bin/python" -m plugins.blackbox.dkg_version "$installed_version"; then
+        warn "DKG $installed_version is too old for direct verified Blackbox recovery; version 10.0.9+ is required."
         return 1
     fi
     step "Using published upstream DKG $installed_version unchanged."
