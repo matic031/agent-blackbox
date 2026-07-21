@@ -259,6 +259,16 @@ class DkgClient:
             f"/api/sync/catchup-status?contextGraphId={encoded}",
         )
 
+    def context_graphs(self) -> List[Dict[str, Any]]:
+        """Return the daemon's native context-graph registry projection."""
+        result = self._request(
+            "GET",
+            "/api/context-graph/list",
+            timeout=_STORE_TIMEOUT,
+        )
+        rows = result.get("contextGraphs") if isinstance(result, dict) else None
+        return [row for row in (rows or []) if isinstance(row, dict)]
+
     def catchup_from_peer(
         self,
         cg_id: str,

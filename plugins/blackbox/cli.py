@@ -1250,6 +1250,31 @@ def _ruleset_graph_count(rs: Any, source: str) -> int:
     return sum(int(value or 0) for value in rs.counts().values())
 
 
+def _context_graph_on_chain_binding(
+    client: DkgClient,
+    context_graph_id: str,
+) -> Optional[str]:
+    """Read a cleartext graph's numeric chain binding from DKG's registry."""
+    if not context_graph_id or any(
+        char.isspace() or char in '<>"{}|^`\\'
+        for char in context_graph_id
+    ):
+        return None
+    try:
+        rows = client.context_graphs()
+    except (AttributeError, DkgError):
+        return None
+    for row in rows:
+        if str(row.get("id") or "") != context_graph_id:
+            continue
+        value = str(row.get("onChainId") or "").strip()
+        try:
+            return value if value.isdigit() and int(value) > 0 else None
+        except ValueError:
+            return None
+    return None
+
+
 def _catchup_authoritative_vm(
     client: DkgClient,
     context_graph_id: str,
@@ -1465,7 +1490,34 @@ def _catchup_authoritative_vm(
         inserted = int(result.get("totalDurableInsertedTriples") or 0)
         if active_context_graph_id != context_graph_id:
             if inserted > 0:
-                print(f"  verified graph metadata ready ({inserted:,} triples)")
+                # A bounded DKG pass may return a verified prefix. Do not start
+                # the large public VM until a following zero-insert pass proves
+                # that the small ontology snapshot is fully settled.
+                print(
+                    f"  verified graph metadata advanced "
+                    f"({inserted:,} triples inserted)"
+                )
+                time.sleep(min(1.0, max(0.2, deadline - time.monotonic())))
+                continue
+            on_chain_id = _context_graph_on_chain_binding(
+                client,
+                context_graph_id,
+            )
+            if on_chain_id is None:
+                error = (
+                    "verified graph metadata settled without a numeric "
+                    "context-graph binding"
+                )
+                sync_state.write(
+                    "failed",
+                    context_graph_id=context_graph_id,
+                    graph_peer_id=graph_peer_id,
+                    phase="resolving-context-graph-binding",
+                    error=error,
+                )
+                print(f"  {error}; refusing the public VM transfer")
+                return False
+            print(f"  verified graph metadata ready (context graph {on_chain_id})")
             pending_context_graphs.pop(0)
             backpressure_retries = 0
             continue

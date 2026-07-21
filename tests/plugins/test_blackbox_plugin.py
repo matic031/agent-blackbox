@@ -320,6 +320,9 @@ def test_blackbox_sync_waits_for_public_vm_when_community_arrives_first(monkeypa
         return FakeRuleset(public=2 if len(refreshes) > 1 else 0)
 
     monkeypatch.setattr(cli_mod, "DkgClient", FakeClient)
+    monkeypatch.setattr(
+        cli_mod, "_context_graph_on_chain_binding", lambda *_args: "14"
+    )
     monkeypatch.setattr(cli_mod, "_request_join", lambda *args: ("already approved", True))
     monkeypatch.setattr(
         cli_mod,
@@ -349,7 +352,7 @@ def test_blackbox_sync_waits_for_public_vm_when_community_arrives_first(monkeypa
 def test_blackbox_sync_recovers_curator_snapshot_then_waits_for_vm(monkeypatch, capsys):
     events = []
     public_counts = iter([6_875, 23_001])
-    durable_rounds = iter([10_134, 244_842, 0])
+    durable_rounds = iter([10_134, 0, 244_842, 0])
 
     class FakeClient:
         def __init__(self, url, **_kwargs):
@@ -402,6 +405,9 @@ def test_blackbox_sync_recovers_curator_snapshot_then_waits_for_vm(monkeypatch, 
 
     states = []
     monkeypatch.setattr(cli_mod, "DkgClient", FakeClient)
+    monkeypatch.setattr(
+        cli_mod, "_context_graph_on_chain_binding", lambda *_args: "14"
+    )
     monkeypatch.setattr(cli_mod, "_request_join", lambda *args: ("already approved", True))
     monkeypatch.setattr(cli_mod.sync_state, "write", lambda status, **data: states.append((status, data)))
     monkeypatch.setattr(
@@ -429,11 +435,12 @@ def test_blackbox_sync_recovers_curator_snapshot_then_waits_for_vm(monkeypatch, 
     args = argparse.Namespace(wait=True, timeout=30, require_rules=True)
     assert cli_mod._cmd_sync(args) == 0
     curator_events = [event for event in events if event[0] == "curator"]
-    assert len(curator_events) == 3
+    assert len(curator_events) == 4
     assert curator_events[0][1] == constants.DEFAULT_GRAPH_METADATA_CONTEXT_GRAPH_ID
-    assert curator_events[1][1] == constants.DEFAULT_CONTEXT_GRAPH_ID
+    assert curator_events[1][1] == constants.DEFAULT_GRAPH_METADATA_CONTEXT_GRAPH_ID
+    assert curator_events[2][1] == constants.DEFAULT_CONTEXT_GRAPH_ID
     curator_indexes = [index for index, event in enumerate(events) if event[0] == "curator"]
-    assert curator_indexes[1] < events.index(("refresh",)) < curator_indexes[2]
+    assert curator_indexes[2] < events.index(("refresh",)) < curator_indexes[3]
     assert not any(event[0] == "subscribe" for event in events)
     assert states[-1][0] == "done"
     assert states[-1][1]["public_entries"] == 23_001
@@ -496,6 +503,9 @@ def test_blackbox_sync_uses_authoritative_publisher_for_empty_local_store(
             return []
 
     monkeypatch.setattr(cli_mod, "DkgClient", FakeClient)
+    monkeypatch.setattr(
+        cli_mod, "_context_graph_on_chain_binding", lambda *_args: "14"
+    )
     monkeypatch.setattr(
         cli_mod,
         "load_blackbox_config",
@@ -561,6 +571,9 @@ def test_blackbox_sync_fails_instead_of_waiting_on_empty_zero_insert_snapshot(
             return 0
 
     monkeypatch.setattr(cli_mod, "DkgClient", FakeClient)
+    monkeypatch.setattr(
+        cli_mod, "_context_graph_on_chain_binding", lambda *_args: "14"
+    )
     monkeypatch.setattr(
         cli_mod,
         "load_blackbox_config",
@@ -762,6 +775,9 @@ def test_blackbox_sync_does_not_accept_deferred_catchup_as_complete(
 
     monkeypatch.setattr(cli_mod, "DkgClient", FakeClient)
     monkeypatch.setattr(
+        cli_mod, "_context_graph_on_chain_binding", lambda *_args: "14"
+    )
+    monkeypatch.setattr(
         cli_mod,
         "load_blackbox_config",
         lambda: config_mod.BlackboxConfig(
@@ -886,10 +902,12 @@ def test_authoritative_recovery_uses_short_first_pass_then_normal_dkg_budget(
     monkeypatch,
 ):
     budgets = []
-    durable_rounds = iter([10_134, 250_000, 500_000, 0])
+    graph_calls = []
+    durable_rounds = iter([10_134, 0, 250_000, 500_000, 0])
 
     class FakeClient:
-        def catchup_from_peer(self, _cg_id, peer_id, *, budget_ms):
+        def catchup_from_peer(self, cg_id, peer_id, *, budget_ms):
+            graph_calls.append(cg_id)
             budgets.append(budget_ms)
             inserted = next(durable_rounds)
             return {
@@ -900,6 +918,9 @@ def test_authoritative_recovery_uses_short_first_pass_then_normal_dkg_budget(
                 "totalDurableInsertedTriples": inserted,
                 "results": [{"peerId": peer_id}],
             }
+
+        def context_graphs(self):
+            return [{"id": constants.DEFAULT_CONTEXT_GRAPH_ID, "onChainId": "14"}]
 
     monkeypatch.setattr(cli_mod.time, "sleep", lambda _seconds: None)
     monkeypatch.setattr(cli_mod.sync_state, "write", lambda *_args, **_kwargs: {})
@@ -913,9 +934,47 @@ def test_authoritative_recovery_uses_short_first_pass_then_normal_dkg_budget(
     assert budgets == [
         constants.INITIAL_GRAPH_SYNC_PASS_BUDGET_MS,
         constants.INITIAL_GRAPH_SYNC_PASS_BUDGET_MS,
+        constants.INITIAL_GRAPH_SYNC_PASS_BUDGET_MS,
         constants.DEFAULT_GRAPH_SYNC_PASS_BUDGET_MS,
         constants.DEFAULT_GRAPH_SYNC_PASS_BUDGET_MS,
     ]
+    assert graph_calls == [
+        constants.DEFAULT_GRAPH_METADATA_CONTEXT_GRAPH_ID,
+        constants.DEFAULT_GRAPH_METADATA_CONTEXT_GRAPH_ID,
+        constants.DEFAULT_CONTEXT_GRAPH_ID,
+        constants.DEFAULT_CONTEXT_GRAPH_ID,
+        constants.DEFAULT_CONTEXT_GRAPH_ID,
+    ]
+
+
+def test_authoritative_recovery_requires_binding_before_public_vm(monkeypatch, capsys):
+    graph_calls = []
+
+    class FakeClient:
+        def catchup_from_peer(self, cg_id, peer_id, *, budget_ms):
+            graph_calls.append(cg_id)
+            return {
+                "ok": True,
+                "includeDurable": True,
+                "includeSharedMemory": False,
+                "peersAttempted": 1,
+                "totalDurableInsertedTriples": 0,
+                "results": [{"peerId": peer_id}],
+            }
+
+        def context_graphs(self):
+            return []
+
+    monkeypatch.setattr(cli_mod.sync_state, "write", lambda *_args, **_kwargs: {})
+
+    assert not cli_mod._catchup_authoritative_vm(
+        FakeClient(),
+        constants.DEFAULT_CONTEXT_GRAPH_ID,
+        constants.DEFAULT_GRAPH_PEER_ID,
+        cli_mod.time.monotonic() + 60,
+    )
+    assert graph_calls == [constants.DEFAULT_GRAPH_METADATA_CONTEXT_GRAPH_ID]
+    assert "refusing the public VM transfer" in capsys.readouterr().out
 
 
 def test_authoritative_recovery_does_not_loop_when_dkg_attempts_no_peer(monkeypatch):
@@ -1180,6 +1239,9 @@ def test_blackbox_sync_uses_curator_when_generic_catchup_peer_fails(monkeypatch,
             return [{"identifier": "dep:2"}]
 
     monkeypatch.setattr(cli_mod, "DkgClient", FakeClient)
+    monkeypatch.setattr(
+        cli_mod, "_context_graph_on_chain_binding", lambda *_args: "14"
+    )
     monkeypatch.setattr(cli_mod, "_request_join", lambda *args: ("already approved", True))
     monkeypatch.setattr(
         cli_mod,
