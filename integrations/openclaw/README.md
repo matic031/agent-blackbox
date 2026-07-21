@@ -129,11 +129,14 @@ accepted as aliases of the camelCase keys.
 
 ### Per-category tuning
 
-Each of the five detection categories — `injection`, `escalation`,
-`dependency`, `fileaccess`, `skill` — can be individually disabled or given a
-minimum-severity floor under `detection.<category>`. **Defaults: every category
-is enabled at `minSeverity: info`** (flag everything the threat graph knows), so
-you only need to add a category when you want to quiet it down.
+Each of the six detection categories — `injection`, `escalation`,
+`dependency`, `fileaccess`, `skill`, `ioc` — can be individually disabled or
+given a minimum-severity floor under `detection.<category>`. **Defaults: every
+category is enabled at `minSeverity: info`** (flag everything the threat graph
+knows), so you only need to add a category when you want to quiet it down.
+
+IOC matches and historical skill reports without an affected version always
+alert; they never auto-block.
 
 - `enabled: false` drops **every** finding in that category.
 - `minSeverity: <info|low|medium|high|critical>` drops anything below the floor

@@ -341,6 +341,90 @@ def test_dashboard_graph_expands_explicitly_and_keeps_scene_state():
     assert 'magnitude.toLocaleString() + " THREAT"' in html
 
 
+def test_dashboard_explore_mode_adapts_rendered_nodes_to_frame_rate():
+    html = (
+        Path(__file__).resolve().parents[1]
+        / "plugins"
+        / "blackbox"
+        / "dashboard"
+        / "static"
+        / "index.html"
+    ).read_text(encoding="utf-8")
+
+    assert "var GRAPH_PERFORMANCE_MIN_LEAVES = 600" in html
+    assert "var GRAPH_PERFORMANCE_LOW_FPS = 24" in html
+    assert "var GRAPH_PERFORMANCE_SUSTAINED_LOW_WINDOWS = 3" in html
+    assert "graphAdaptiveLeafCap = { public: null, community: null }" in html
+    assert "leafLimit = Math.min(leafLimit, performanceLeafBudget);" in html
+    assert "var leafBudget = performanceLeafBudget;" in html
+    assert (
+        "graphFrameMonitor.lowWindows >= GRAPH_PERFORMANCE_SUSTAINED_LOW_WINDOWS"
+        in html
+    )
+    assert "graphFrameMonitor.healthyWindows >= 3" in html
+    assert "Math.floor(current * 0.72)" in html
+    assert "Math.floor(cap * 1.3)" in html
+    assert '"|perf:" + (graphAdaptiveLeafCap[activeTier] || "auto")' in html
+    assert 'id="graph-performance"' in html
+
+
+def test_dashboard_findings_can_load_more_without_poll_resetting_the_page():
+    html = (
+        Path(__file__).resolve().parents[1]
+        / "plugins"
+        / "blackbox"
+        / "dashboard"
+        / "static"
+        / "index.html"
+    ).read_text(encoding="utf-8")
+
+    assert 'id="findings-more"' in html
+    assert 'id="findings-shown"' in html
+    assert "var FINDINGS_PAGE = 10, FINDINGS_MAX = 500" in html
+    assert 'getJSON("/api/findings?limit=" + findingsLoaded + "&offset=0")' in html
+    assert "findingsLoaded + FINDINGS_PAGE" in html
+    assert "requestGeneration !== findingsRequestGeneration" in html
+    assert 'findingsMoreBtn.textContent = "Load more threats"' in html
+
+
+def test_dashboard_prefers_available_vm_data_over_sync_error_panel():
+    html = (
+        Path(__file__).resolve().parents[1]
+        / "plugins"
+        / "blackbox"
+        / "dashboard"
+        / "static"
+        / "index.html"
+    ).read_text(encoding="utf-8")
+
+    assert 'var hasQueryableVm = Number(graphTotalForTier("public") || 0) > 0' in html
+    assert '((status === "failed" || status === "offline") && !hasQueryableVm)' in html
+
+
+def test_dashboard_does_not_position_private_storage_as_normal_product_behavior():
+    html = (
+        Path(__file__).resolve().parents[1]
+        / "plugins"
+        / "blackbox"
+        / "dashboard"
+        / "static"
+        / "index.html"
+    ).read_text(encoding="utf-8")
+
+    for unwanted in (
+        "Nothing is shared yet",
+        "findings and reports stay local",
+        "Log findings locally. Nothing is shared.",
+        "Changes stay on this machine.",
+        "Local only and never shared.",
+        "Your findings stay private on this machine.",
+    ):
+        assert unwanted not in html
+
+    assert "Record findings without blocking agent actions." in html
+    assert "Network threat distribution is in development." in html
+
+
 def test_dashboard_more_node_is_a_display_only_marker():
     html = (
         Path(__file__).resolve().parents[1]

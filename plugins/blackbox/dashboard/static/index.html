@@ -1118,6 +1118,22 @@
     color: var(--bg);
     background: var(--mint);
   }
+  .graph-performance {
+    min-height: 28px;
+    display: inline-flex;
+    align-items: center;
+    padding: 4px 8px;
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    color: var(--muted);
+    background: var(--graph-control-soft);
+    font-size: 10px;
+    font-weight: 650;
+    box-shadow: 0 6px 18px rgba(0,0,0,0.18);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+  }
+  .graph-performance[hidden] { display: none; }
 
   /* graph empty-state overlay (centered inside the stage) */
   .graph-empty {
@@ -1208,20 +1224,6 @@
     font-size: 13px;
     line-height: 1.65;
   }
-  .community-launch-now {
-    display: flex;
-    align-items: center;
-    gap: 9px;
-    margin-top: 24px;
-    padding-top: 17px;
-    border-top: 1px solid var(--border);
-    color: var(--muted-strong);
-    font-family: var(--mono-font);
-    font-size: 9px;
-    line-height: 1.5;
-    letter-spacing: 0.04em;
-  }
-  .community-launch-now svg { width: 15px; height: 15px; flex: 0 0 auto; color: var(--mint); }
   .community-launch-art {
     position: relative;
     min-width: 0;
@@ -2600,7 +2602,6 @@
     }
     .community-launch h3 { max-width: 100%; margin-top: 13px; font-size: clamp(24px, 7.2vw, 28px); }
     .community-launch-lede { font-size: 12px; line-height: 1.55; }
-    .community-launch-now { width: 100%; justify-content: center; margin-top: 16px; padding-top: 13px; }
     .community-launch-art { display: none; }
     .sync-progress-meta { gap: 8px; }
     .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
@@ -2804,6 +2805,7 @@
                 <button type="button" id="graph-detail-compact" data-detail="compact">Compact</button>
                 <button type="button" id="graph-detail-explore" data-detail="explore">Explore</button>
               </div>
+              <span class="graph-performance" id="graph-performance" hidden>Performance mode</span>
             </div>
             <div class="graph-empty" id="graph-empty">
               <svg class="e-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
@@ -2814,10 +2816,6 @@
                 <div class="community-launch-eyebrow">Community graph · Coming soon</div>
                 <h3><span>One agent sees it.</span><span class="community-launch-title-accent">Every agent gets safer.</span></h3>
                 <p class="community-launch-lede">A shared layer of verified threat signals will help agents protect each other across the network.</p>
-                <div class="community-launch-now">
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="10" width="14" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg>
-                  Nothing is shared yet. Your findings and threat reports stay private.
-                </div>
               </div>
               <div class="community-launch-art" aria-hidden="true">
                 <svg class="community-network" viewBox="0 0 420 360">
@@ -2889,7 +2887,7 @@
           Threat sharing
         </div>
         <div class="value"><span class="stat-soon">Coming soon</span></div>
-        <div class="meta">findings and reports stay local</div>
+        <div class="meta">network distribution is in development</div>
       </div>
       </div>
     </section>
@@ -2953,6 +2951,10 @@
               </td></tr>
             </tbody>
           </table>
+        </div>
+        <div class="audit-foot" id="findings-foot">
+          <span class="audit-count" id="findings-shown">-</span>
+          <button type="button" class="load-more" id="findings-more" hidden>Load more threats</button>
         </div>
       </div>
     </section>
@@ -3036,6 +3038,12 @@
   };
   var GRAPH_CATEGORY_MIN_LEAVES = 12;
   var GRAPH_MAX_VISIBLE_LEAVES = 12000;
+  var GRAPH_PERFORMANCE_MIN_LEAVES = 600;
+  var GRAPH_PERFORMANCE_LOW_FPS = 24;
+  var GRAPH_PERFORMANCE_HEALTHY_FPS = 45;
+  var GRAPH_PERFORMANCE_SAMPLE_MS = 2000;
+  var GRAPH_PERFORMANCE_SUSTAINED_LOW_WINDOWS = 3;
+  var GRAPH_PERFORMANCE_COOLDOWN_MS = 6000;
   var graphDetailMode = { public: "compact", community: "compact" };
   var graphLeafLimit = {
     public: GRAPH_DETAIL_PRESETS.compact.cap,
@@ -3044,13 +3052,22 @@
   var graphFocus = { public: null, community: null };
   var graphFocusLoadInFlight = { public: false, community: false };
   var graphRenderMeta = { public: null, community: null, local: null };
+  // A temporary render-only ceiling. Cached graph rows and corpus totals stay
+  // intact; only the number of force-graph leaves mounted at once changes.
+  var graphAdaptiveLeafCap = { public: null, community: null };
+  var graphFrameMonitor = {
+    raf: null, startedAt: 0, frames: 0, lowWindows: 0, healthyWindows: 0,
+    cooldownUntil: 0, tier: null
+  };
 
   // Latest /api/graph-status payload, so the graph renderer can read node
   // reachability when deciding "still syncing" vs a settled 0. See countSyncing.
   var lastStatus = null;
 
-  // Findings: keep the latest fetched list so the sort toggle can re-render
-  // without a network round-trip. Backend returns newest-first already.
+  // Findings: keep the latest fetched list so sorting stays local. Expanded
+  // pages remain expanded across background polls instead of snapping to 10.
+  var FINDINGS_PAGE = 10, FINDINGS_MAX = 500, findingsLoaded = FINDINGS_PAGE;
+  var findingsRequestGeneration = 0;
   var findingsCache = null;
   var findingsSort = "newest";   // "newest" | "severity"
 
@@ -3222,9 +3239,13 @@
     var activity = progress && progress.activity;
     var status = String(activity && activity.status || "idle");
     renderGraphRefreshState(status === "running" || status === "waiting");
+    // A refresh failure must not replace a usable verified graph. Keep the
+    // backend status intact, but prefer the count and graph already available
+    // in this read-only dashboard. With no VM data, the error stays visible.
+    var hasQueryableVm = Number(graphTotalForTier("public") || 0) > 0;
     var visible = activeTier === "public" && (
       status === "running" || status === "waiting" ||
-      status === "failed" || status === "offline"
+      ((status === "failed" || status === "offline") && !hasQueryableVm)
     );
     panel.hidden = !visible;
     if (!visible) return;
@@ -3890,6 +3911,11 @@
     function graphCap(tier) {
       return Math.max(1, Number(graphLeafLimit[tier] || graphPreset(tier).cap || 20));
     }
+    function graphPerformanceLeafBudget(tier) {
+      var cap = Number(graphAdaptiveLeafCap[tier]);
+      if (!Number.isFinite(cap) || cap <= 0) return GRAPH_MAX_VISIBLE_LEAVES;
+      return Math.max(GRAPH_PERFORMANCE_MIN_LEAVES, Math.min(GRAPH_MAX_VISIBLE_LEAVES, Math.floor(cap)));
+    }
     function graphFocusKey(focus) {
       if (!focus) return "";
       return focus.cat + (focus.eco ? "|eco:" + focus.eco : "");
@@ -3948,6 +3974,8 @@
       var preset = graphPreset(tier);
       var baseLimit = graphCap(tier);
       var leafLimit = focus ? Math.max(baseLimit, preset.focusCap) : baseLimit;
+      var performanceLeafBudget = graphPerformanceLeafBudget(tier);
+      leafLimit = Math.min(leafLimit, performanceLeafBudget);
       var focusLabel = graphFocusLabel(focus);
       var view = graphViewData(tier) || {};
       var categoryTotals = view.category_totals || {};
@@ -3961,7 +3989,7 @@
       }
       // Keep a representative ring around every populated category even while
       // one field is focused. The focused field receives the remaining budget.
-      var leafBudget = GRAPH_MAX_VISIBLE_LEAVES;
+      var leafBudget = performanceLeafBudget;
       var shownLeaves = 0;
       nodes.push({
         id: centerId, kind: "center",
@@ -5055,6 +5083,8 @@
     function setGraphDetailMode(mode) {
       if (!GRAPH_DETAIL_PRESETS[mode] || activeTier === "local") return;
       graphDetailMode[activeTier] = mode;
+      graphAdaptiveLeafCap[activeTier] = null;
+      if (mode !== "explore") stopGraphPerformanceMonitor();
       graphLeafLimit[activeTier] = graphPreset(activeTier).cap;
       if (mode === "compact") {
         graphFocus[activeTier] = null;
@@ -5081,6 +5111,12 @@
       var searchInput = $("graph-search");
       if (searchInput && document.activeElement !== searchInput) {
         searchInput.value = graphSearchQuery[activeTier] || "";
+      }
+      var performance = $("graph-performance");
+      if (performance) {
+        var adaptiveCap = graphAdaptiveLeafCap[activeTier];
+        performance.hidden = !(graphDetailMode[activeTier] === "explore" && adaptiveCap);
+        if (adaptiveCap) performance.textContent = "Performance mode · " + num(adaptiveCap) + " nodes";
       }
     }
 
@@ -5238,6 +5274,89 @@
       return fg;
     }
 
+    function graphRenderedLeafCount() {
+      return graphNodesShown.reduce(function (count, node) {
+        return count + (node && (node.kind === "leaf" || node.kind === "lthreat") ? 1 : 0);
+      }, 0);
+    }
+
+    function resetGraphFrameWindow(tier) {
+      graphFrameMonitor.startedAt = 0;
+      graphFrameMonitor.frames = 0;
+      graphFrameMonitor.lowWindows = 0;
+      graphFrameMonitor.healthyWindows = 0;
+      graphFrameMonitor.tier = tier || null;
+    }
+
+    function applyGraphPerformanceCap(tier, nextCap, now) {
+      var normalized = Math.max(
+        GRAPH_PERFORMANCE_MIN_LEAVES,
+        Math.min(GRAPH_MAX_VISIBLE_LEAVES, Math.floor(nextCap))
+      );
+      graphAdaptiveLeafCap[tier] = normalized >= GRAPH_MAX_VISIBLE_LEAVES ? null : normalized;
+      graphFrameMonitor.cooldownUntil = now + GRAPH_PERFORMANCE_COOLDOWN_MS;
+      resetGraphFrameWindow(tier);
+      invalidateGraphTier(tier);
+      if (tier === activeTier) renderGraphTab();
+    }
+
+    function graphFrameTick(now) {
+      graphFrameMonitor.raf = null;
+      var tier = activeTier;
+      var eligible = tier !== "local" && graphDetailMode[tier] === "explore" &&
+        !document.hidden && fgTierShown === tier &&
+        (graphAdaptiveLeafCap[tier] || graphRenderedLeafCount() > GRAPH_PERFORMANCE_MIN_LEAVES);
+      if (!eligible) { resetGraphFrameWindow(tier); return; }
+      graphFrameMonitor.raf = requestAnimationFrame(graphFrameTick);
+      if (graphFrameMonitor.tier !== tier || !graphFrameMonitor.startedAt) {
+        resetGraphFrameWindow(tier);
+        graphFrameMonitor.startedAt = now;
+      }
+      graphFrameMonitor.frames += 1;
+      var elapsed = now - graphFrameMonitor.startedAt;
+      if (elapsed < GRAPH_PERFORMANCE_SAMPLE_MS) return;
+      var fps = graphFrameMonitor.frames * 1000 / Math.max(1, elapsed);
+      graphFrameMonitor.startedAt = now;
+      graphFrameMonitor.frames = 0;
+      if (now < graphFrameMonitor.cooldownUntil) return;
+
+      if (fps < GRAPH_PERFORMANCE_LOW_FPS) {
+        graphFrameMonitor.lowWindows += 1;
+        graphFrameMonitor.healthyWindows = 0;
+      } else if (fps >= GRAPH_PERFORMANCE_HEALTHY_FPS) {
+        graphFrameMonitor.healthyWindows += 1;
+        graphFrameMonitor.lowWindows = 0;
+      } else {
+        graphFrameMonitor.lowWindows = 0;
+        graphFrameMonitor.healthyWindows = 0;
+      }
+
+      // A single rough frame window can come from loading, resizing, or a
+      // background task. Only reduce density after sustained low FPS.
+      if (graphFrameMonitor.lowWindows >= GRAPH_PERFORMANCE_SUSTAINED_LOW_WINDOWS) {
+        var rendered = graphRenderedLeafCount();
+        var current = graphAdaptiveLeafCap[tier] || Math.min(GRAPH_MAX_VISIBLE_LEAVES, rendered);
+        var reduced = Math.max(GRAPH_PERFORMANCE_MIN_LEAVES, Math.floor(current * 0.72));
+        if (reduced < current) applyGraphPerformanceCap(tier, reduced, now);
+      } else if (graphFrameMonitor.healthyWindows >= 3 && graphAdaptiveLeafCap[tier]) {
+        var cap = graphAdaptiveLeafCap[tier];
+        var recovered = Math.min(GRAPH_MAX_VISIBLE_LEAVES, Math.max(cap + 300, Math.floor(cap * 1.3)));
+        applyGraphPerformanceCap(tier, recovered, now);
+      }
+    }
+
+    function ensureGraphPerformanceMonitor() {
+      if (graphFrameMonitor.raf == null) {
+        graphFrameMonitor.raf = requestAnimationFrame(graphFrameTick);
+      }
+    }
+
+    function stopGraphPerformanceMonitor() {
+      if (graphFrameMonitor.raf != null) cancelAnimationFrame(graphFrameMonitor.raf);
+      graphFrameMonitor.raf = null;
+      resetGraphFrameWindow(null);
+    }
+
     // Dense catalogs should read as a constellation, not explode off-canvas.
     // Repulsion deliberately weakens as node count rises; links pull 10k+ leaves
     // into legible category galaxies while compact/local views remain airy.
@@ -5367,7 +5486,8 @@
             ? graphSearchRevision[activeTier]
             : graphRevision[activeTier]) +
           "|" + (graphDetailMode[activeTier] || "compact") +
-          "|" + graphCap(activeTier) + "|" + graphFocusKey(graphFocus[activeTier]);
+          "|" + graphCap(activeTier) + "|" + graphFocusKey(graphFocus[activeTier]) +
+          "|perf:" + (graphAdaptiveLeafCap[activeTier] || "auto");
       // Re-feed only on data change or a tier switch that isn't mounted yet, so
       // the poll doesn't reset the user's pan/zoom.
       if (fgTierShown !== activeTier || fgSig[activeTier] !== sig) {
@@ -5399,6 +5519,7 @@
       updateGraphControls(isLocal, isLocal ? null : graphRenderMeta[activeTier]);
       // keep canvas sized to its container
       resizeGraph();
+      if (!isLocal && graphDetailMode[activeTier] === "explore") ensureGraphPerformanceMonitor();
     }
 
   function resizeGraph() {
@@ -5465,11 +5586,11 @@
   // local-only sources, which never fold into public/candidate).
   var SRC_META = {
     public:    { label: "confirmed", tip: "Verifiable graph match, verified by Umanitek. Blockable in block mode." },
-    community: { label: "candidate", tip: "A locally recorded candidate from before community sharing was paused. It is not shared." },
-    heuristic: { label: "candidate", tip: "Built-in heuristic discovery — not in the verifiable graph. Local only and never shared." },
-    custom:    { label: "your rule", tip: "Matched one of your own protected paths. Local only — never shared." },
-    llm:       { label: "AI review", tip: "Flagged by the optional LLM injection reviewer. Local only — never blocks or shares." },
-    secret:    { label: "secret", tip: "Secret exposure caught locally. Never leaves your machine." }
+    community: { label: "candidate", tip: "A candidate awaiting community graph review." },
+    heuristic: { label: "candidate", tip: "Built-in heuristic discovery awaiting graph verification." },
+    custom:    { label: "your rule", tip: "Matched one of your own protected paths." },
+    llm:       { label: "AI review", tip: "Flagged by the optional LLM injection reviewer. Informational and never blocks." },
+    secret:    { label: "secret", tip: "Secret exposure detected by Blackbox." }
   };
   function srcKey(f) {
     var s = String(f.source || "").toLowerCase();
@@ -6079,10 +6200,12 @@
     var onboarding = $("findings-onboarding");
     var findingsPanel = $("findings-panel");
     var findingsSortControl = $("findings-sort-control");
+    var findingsFoot = $("findings-foot");
     var showOnboarding = openCount === 0;
     if (onboarding) onboarding.hidden = !showOnboarding;
     if (findingsPanel) findingsPanel.hidden = showOnboarding;
     if (findingsSortControl) findingsSortControl.hidden = showOnboarding;
+    if (findingsFoot) findingsFoot.hidden = showOnboarding;
     if (showOnboarding) checkFirstDetectionReadiness();
 
     if (!list.length) {
@@ -6093,6 +6216,20 @@
 
     findingsRendered = sortedFindings(list);
     body.innerHTML = findingsRendered.map(findingRowHTML).join("");
+    var shown = $("findings-shown");
+    if (shown) shown.textContent = "Showing " + list.length + " of " + openCount;
+    var more = $("findings-more");
+    if (more) more.hidden = !(list.length < openCount && findingsLoaded < FINDINGS_MAX);
+  }
+
+  function loadFindings() {
+    var requestGeneration = ++findingsRequestGeneration;
+    return getJSON("/api/findings?limit=" + findingsLoaded + "&offset=0").then(function (data) {
+      if (requestGeneration !== findingsRequestGeneration) return null;
+      processThreatNotifications(data);
+      renderFindings(data);
+      return data;
+    });
   }
 
   function renderFirstDetectionReadiness() {
@@ -6204,7 +6341,7 @@
   function poll() {
     loadAudit();   // full history refresh (independent of the fixed-index batch below)
     return Promise.allSettled([
-      getJSON("/api/findings?limit=10"),
+      loadFindings(),
       getJSON("/api/graph-status"),
       getJSON("/api/agents"),
       getJSON("/api/local-activity")
@@ -6212,10 +6349,6 @@
       var anyOk = res.some(function (r) { return r.status === "fulfilled"; });
       var allFail = res.every(function (r) { return r.status === "rejected"; });
 
-      if (res[0].status === "fulfilled") {
-        processThreatNotifications(res[0].value);
-        renderFindings(res[0].value);
-      }
       if (res[1].status === "fulfilled") renderGraphStatus(res[1].value);
       if (res[2].status === "fulfilled") renderAgents(res[2].value);
       var anyGraph = false;
@@ -6306,6 +6439,17 @@
   }
   $("sort-newest").addEventListener("click", function () { setFindingsSort("newest"); });
   $("sort-severity").addEventListener("click", function () { setFindingsSort("severity"); });
+
+  var findingsMoreBtn = $("findings-more");
+  if (findingsMoreBtn) findingsMoreBtn.addEventListener("click", function () {
+    findingsLoaded = Math.min(FINDINGS_MAX, findingsLoaded + FINDINGS_PAGE);
+    findingsMoreBtn.disabled = true;
+    findingsMoreBtn.textContent = "Loading\u2026";
+    loadFindings().catch(function () {}).then(function () {
+      findingsMoreBtn.disabled = false;
+      findingsMoreBtn.textContent = "Load more threats";
+    });
+  });
 
   var threatNotifyBtn = $("threat-notify");
   if (threatNotifyBtn) threatNotifyBtn.addEventListener("click", function () {
@@ -6541,7 +6685,7 @@
     bb.setAttribute("aria-pressed", block ? "true" : "false");
     $("set-mode-help").innerHTML = block
       ? "Stop confirmed threats at or above the chosen severity."
-      : "Log findings locally. Nothing is shared.";
+      : "Record findings without blocking agent actions.";
     // block-severity row is only meaningful in block mode
     var row = $("set-block-sev-row");
     row.style.display = block ? "" : "none";
@@ -7067,7 +7211,13 @@
   function startPolling() { if (!pollTimer) { poll(); pollTimer = setInterval(poll, POLL_MS); } }
   function stopPolling() { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } }
   document.addEventListener("visibilitychange", function () {
-    if (document.hidden) stopPolling(); else startPolling();
+    if (document.hidden) {
+      stopPolling();
+      stopGraphPerformanceMonitor();
+    } else {
+      startPolling();
+      if (graphDetailMode[activeTier] === "explore") ensureGraphPerformanceMonitor();
+    }
   });
   if (!document.hidden) startPolling();
 })();
@@ -7175,7 +7325,7 @@
       </div>
       <div class="set-htext">
         <div class="set-title" id="set-title">Blackbox settings</div>
-        <div class="set-sub">Changes stay on this machine.</div>
+        <div class="set-sub">Configure detection and enforcement.</div>
       </div>
     </div>
 
@@ -7213,7 +7363,7 @@
         <div class="set-row">
           <div class="set-rl">
             <div class="set-rt">Enforcement</div>
-            <div class="set-rh"><b id="set-mode-help">Log findings locally. Nothing is shared.</b></div>
+            <div class="set-rh"><b id="set-mode-help">Record findings without blocking agent actions.</b></div>
           </div>
           <div class="set-rc">
             <div class="set-seg" role="group" aria-label="Protection mode">
@@ -7260,7 +7410,7 @@
         <div class="set-row">
           <div class="set-rl">
             <div class="set-rt">Community sharing</div>
-            <div class="set-rh">Threat reports are not shared. Your findings stay private on this machine.</div>
+            <div class="set-rh">Network threat distribution is in development.</div>
           </div>
           <div class="set-rc">
             <span class="set-soon">Coming soon</span>

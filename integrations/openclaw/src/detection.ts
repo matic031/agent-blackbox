@@ -28,6 +28,7 @@ import {
   fileaccessIdentifierFor,
   injectionIdentifier,
   dependencyIdentifier,
+  iocIdentifier,
   skillVersionIdentifierFor,
   skillShapeIdentifierFor,
 } from "./quads.js";
@@ -37,7 +38,8 @@ export type ThreatCategory =
   | "escalation"
   | "dependency"
   | "fileaccess"
-  | "skill";
+  | "skill"
+  | "ioc";
 
 /**
  * Trust tier a graph rule came from. `"public"` = verifiable-memory (the
@@ -110,6 +112,15 @@ export interface SkillRule {
   name: string;
   source?: RuleSource;
 }
+export interface IocRule {
+  identifier: string;
+  severity: BlackboxSeverity;
+  name: string;
+  iocType: string;
+  value: string;
+  kind?: string;
+  source?: RuleSource;
+}
 export interface Ruleset {
   injection: InjectionRule[];
   escalation: EscalationRule[];
@@ -117,6 +128,8 @@ export interface Ruleset {
   dependency: Record<string, DependencyRule>;
   fileaccess: FileAccessRule[];
   skill: SkillRule[];
+  /** Keyed by the full `ioc:{type}:{normalized-value}` identifier. */
+  ioc: Record<string, IocRule>;
   fetchedAt: number;
 }
 
@@ -127,6 +140,7 @@ export function emptyRuleset(): Ruleset {
     dependency: {},
     fileaccess: [],
     skill: [],
+    ioc: {},
     fetchedAt: 0,
   };
 }
@@ -150,6 +164,7 @@ export interface FindingFields {
   skillName?: string;
   skillVersion?: string;
   dangerShape?: string;
+  iocType?: string;
 }
 
 export interface Finding {
@@ -180,9 +195,9 @@ export interface Finding {
    */
   source: FindingSource;
   /**
-   * Dependency threat kind (`malware` | `vulnerability`); undefined for other
-   * categories. A `vulnerability`-kind finding flags but NEVER auto-blocks, so
-   * a legit-but-vulnerable package keeps working. Mirrors Python `Finding.kind`.
+   * Threat handling kind (`malware` | `vulnerability` | `historical`).
+   * Vulnerability and historical findings flag but never auto-block. Mirrors
+   * Python `Finding.kind`.
    */
   kind?: string;
   /** Privacy-safe candidate threat fields (see `FindingFields`). */
@@ -201,7 +216,13 @@ function compile(source: string): RegExp | null {
   if (regexCache.has(source)) return regexCache.get(source) ?? null;
   let re: RegExp | null = null;
   try {
-    re = new RegExp(source, "i");
+    // DKG string literals carry one JSON/RDF escape layer beyond the regex
+    // source. Leaving it intact can turn `<\\|endoftext\\|>` into a pattern
+    // that matches any bare `>`. Python-authored patterns may also carry the
+    // leading inline `(?i)` flag, which JavaScript rejects; the explicit `i`
+    // flag below already provides the same semantics.
+    const normalized = source.replace(/\\\\/g, "\\").replace(/^\(\?i\)/, "");
+    re = new RegExp(normalized, "i");
   } catch {
     re = null;
   }
@@ -879,18 +900,24 @@ export function detectSkill(toolName: string, args: unknown, ruleset: Ruleset): 
       if (seen.has(ident)) continue;
       seen.add(ident);
       const src = ruleSource(rule);
+      const historical = !ruleVer;
       out.push({
         identifier: ident,
         category: "skill",
-        severity: rule.severity ?? "high",
-        title: rule.name || `Known-bad skill ${name}`,
+        severity: historical ? "medium" : (rule.severity ?? "high"),
+        title: historical
+          ? `Historical threat report for ${name} (version unspecified)`
+          : (rule.name || `Known-bad skill ${name}`),
         // Python: skill.get("tool", "") or (tool_name or "").lower(); the
         // install descriptor has no `tool` key so this is always the tool name.
         toolName: (toolName || "").toLowerCase(),
         matched: name,
-        evidence: `known-bad skill ${name}`,
+        evidence: historical
+          ? `Skill ${name} was exploited in the past; the graph does not specify an affected version, so the issue may be fixed in newer releases.`
+          : `known-bad skill ${name}`,
         confirmed: src === "public",
         source: src,
+        kind: historical ? "historical" : undefined,
         fields: { skillName: name, skillVersion: version },
       });
     }
@@ -912,6 +939,94 @@ export function detectSkill(toolName: string, args: unknown, ruleset: Ruleset): 
       confirmed: false,
       source: "heuristic",
       fields: { skillName: name, skillVersion: version, dangerShape: shape },
+    });
+  }
+  return out;
+}
+
+// IOC extraction mirrors Python `quads.iter_ioc_candidates`. Extraction is
+// deliberately broad, but a finding exists only after an exact dictionary hit
+// against a known-bad graph identifier.
+const IOC_URL_RE = /https?:\/\/[^\s'"<>|\\)}\]]+/gi;
+const IOC_IPV4_RE = /\b(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)\b/g;
+const IOC_DOMAIN_RE = /\b(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,24}\b/gi;
+const IOC_SHA256_RE = /\b[a-fA-F0-9]{64}\b/g;
+const IOC_SHA1_RE = /\b[a-fA-F0-9]{40}\b/g;
+const IOC_MD5_RE = /\b[a-fA-F0-9]{32}\b/g;
+const IOC_EVM_RE = /0x[a-fA-F0-9]{40}/g;
+const IOC_BTC_RE = /\b(?:bc1[023-9ac-hj-np-z]{11,71}|[13][a-km-zA-HJ-NP-Z1-9]{25,39})\b/g;
+const IOC_SOL_RE = /\b[1-9A-HJ-NP-Za-km-z]{32,44}\b/g;
+const MAX_IOC_CANDIDATES = 4_000;
+
+function hostSuffixes(host: string): string[] {
+  const clean = host.replace(/^\.+|\.+$/g, "").toLowerCase();
+  if (!clean) return [];
+  const out = [clean];
+  if (clean.startsWith("www.")) out.push(clean.slice(4));
+  const labels = clean.split(".");
+  for (let i = 1; i < labels.length - 1; i += 1) out.push(labels.slice(i).join("."));
+  return [...new Set(out)];
+}
+
+export function iterIocCandidates(input: string): string[] {
+  const text = (input || "").slice(0, MAX_TEXT);
+  if (!text) return [];
+  const out: string[] = [];
+  const seen = new Set<string>();
+  const add = (type: string, value: string): void => {
+    if (out.length >= MAX_IOC_CANDIDATES) return;
+    const identifier = iocIdentifier(type, value);
+    if (!seen.has(identifier)) {
+      seen.add(identifier);
+      out.push(identifier);
+    }
+  };
+  for (const match of text.matchAll(IOC_URL_RE)) {
+    const clean = match[0].replace(/[.,);'" ]+$/g, "");
+    add("url", clean);
+    const host = clean.split("://", 2).at(-1)?.split("/", 1)[0].split("@").at(-1)?.split(":", 1)[0] ?? "";
+    for (const suffix of hostSuffixes(host)) add("domain", suffix);
+  }
+  for (const match of text.matchAll(IOC_DOMAIN_RE)) {
+    for (const suffix of hostSuffixes(match[0])) add("domain", suffix);
+  }
+  for (const match of text.matchAll(IOC_IPV4_RE)) add("ip", match[0]);
+  for (const match of text.matchAll(IOC_SHA256_RE)) add("hash", `sha256:${match[0]}`);
+  for (const match of text.matchAll(IOC_SHA1_RE)) add("hash", `sha1:${match[0]}`);
+  for (const match of text.matchAll(IOC_MD5_RE)) add("hash", `md5:${match[0]}`);
+  for (const re of [IOC_EVM_RE, IOC_BTC_RE, IOC_SOL_RE]) {
+    for (const match of text.matchAll(re)) {
+      add("wallet", match[0]);
+      add("contract", match[0]);
+    }
+  }
+  return out;
+}
+
+export function detectIoc(toolName: string, args: unknown, ruleset: Ruleset): Finding[] {
+  if (!ruleset.ioc) return [];
+  const text = typeof args === "string" ? args : collectText(args).join("\n");
+  if (!text) return [];
+  const out: Finding[] = [];
+  for (const identifier of iterIocCandidates(text)) {
+    const rule = ruleset.ioc[identifier];
+    if (!rule) continue;
+    const src = ruleSource(rule);
+    const parts = identifier.split(":", 3);
+    const iocType = rule.iocType || parts[1] || "indicator";
+    const value = identifier.slice(`ioc:${parts[1] ?? ""}:`.length);
+    out.push({
+      identifier,
+      category: "ioc",
+      severity: rule.severity ?? "high",
+      title: rule.name || `Known-bad ${iocType}`,
+      toolName: toolName || "",
+      matched: value.slice(0, 200),
+      evidence: `${iocType} ${value}`.slice(0, 200),
+      confirmed: src === "public",
+      source: src,
+      kind: rule.kind,
+      fields: src === "community" ? { iocType } : {},
     });
   }
   return out;
@@ -1399,5 +1514,6 @@ export function detectAll(
   }
   findings.push(...detectFileaccess(toolName, args, ruleset));
   findings.push(...detectSkill(toolName, args, ruleset));
+  findings.push(...detectIoc(toolName, args, ruleset));
   return discover ? findings : findings.filter((f) => f.source !== "heuristic");
 }

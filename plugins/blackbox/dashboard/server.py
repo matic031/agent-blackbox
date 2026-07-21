@@ -377,6 +377,14 @@ def _graph_sync_state(
     return "empty"
 
 
+def _is_hidden_swm_catchup_error(value: Any) -> bool:
+    """Temporarily suppress the known DKG SWM catch-up UI failure."""
+    text = str(value or "").lower()
+    return "/api/shared-memory/catchup" in text and (
+        "transport error" in text or "timed out" in text or "timeout" in text
+    )
+
+
 def _sync_activity(
     *,
     public: int,
@@ -528,6 +536,24 @@ def _sync_activity(
             percent=100.0,
             indeterminate=False,
         )
+        return progress
+
+    # DKG currently reports an SWM catch-up transport failure even while the
+    # independently verified VM remains usable. Do not cover that ready graph
+    # with a false failure banner; keep unrelated VM and node errors visible.
+    if _is_hidden_swm_catchup_error(error):
+        if public > 0:
+            progress.update(
+                status="ready",
+                phase="verifiable-memory-ready",
+                label="Verified threat graph is ready",
+                detail=f"{public:,} verified public threats are queryable.",
+                updated_at=transfer.get("updated_at") or connection.get("updated_at"),
+                current=public,
+                expected=public,
+                percent=100.0,
+                indeterminate=False,
+            )
         return progress
 
     if (
@@ -1235,6 +1261,11 @@ def create_app(*, manage_blackbox: bool = False):
         total_rules = sum(int(v or 0) for v in counts.values())
         catchup = g.get("catchup") if isinstance(g.get("catchup"), dict) else {}
         node_catchup_state = str(catchup.get("status") or "")
+        catchup_result = catchup.get("result") if isinstance(catchup.get("result"), dict) else {}
+        catchup_error = catchup.get("error") or catchup_result.get("error") or ""
+        public_catchup_state = (
+            "" if _is_hidden_swm_catchup_error(catchup_error) else node_catchup_state
+        )
         catchup_state = node_catchup_state
         authoritative_sync = sync_state.read()
         authoritative_running = authoritative_sync.get("status") == "running"
@@ -1268,7 +1299,7 @@ def create_app(*, manage_blackbox: bool = False):
             else _graph_sync_state(
                 public,
                 g["node_reachable"],
-                node_catchup_state,
+                public_catchup_state,
                 settled=(
                     authoritative_done
                     and public

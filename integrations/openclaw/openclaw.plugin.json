@@ -81,13 +81,14 @@
       "detection": {
         "type": "object",
         "additionalProperties": false,
-        "description": "Per-category detection policy. Each of the five categories can be individually disabled or given a minimum severity floor. Omitted categories default to enabled at severity 'info' (flag everything the threat graph knows). Custom protected-path rules bypass this policy.",
+        "description": "Per-category detection policy. Each of the six categories can be individually disabled or given a minimum severity floor. Omitted categories default to enabled at severity 'info' (flag everything the threat graph knows). Custom protected-path rules bypass this policy.",
         "properties": {
           "injection": { "$ref": "#/$defs/categoryPolicy" },
           "escalation": { "$ref": "#/$defs/categoryPolicy" },
           "dependency": { "$ref": "#/$defs/categoryPolicy" },
           "fileaccess": { "$ref": "#/$defs/categoryPolicy" },
-          "skill": { "$ref": "#/$defs/categoryPolicy" }
+          "skill": { "$ref": "#/$defs/categoryPolicy" },
+          "ioc": { "$ref": "#/$defs/categoryPolicy" }
         }
       },
       "protectedPaths": {

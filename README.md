@@ -171,6 +171,11 @@ In the default audit mode every one is flagged and logged, nothing is stopped. S
 - **Sensitive file access** - reads of SSH keys, credentials, and other secrets.
 - **Secret exposure** - a real API key, token, or private key the agent handles or tries to send off-box.
 - **Suspicious skills** - newly installed skills with malicious behavior.
+- **Known-bad indicators** - domains, URLs, IPs, file hashes, wallets, and contracts found in agent actions.
+
+If a historical skill report names no affected version, Blackbox flags every
+version as a medium, alert-only risk and explains that newer releases may
+already be fixed.
 
 ## Shared protection
 

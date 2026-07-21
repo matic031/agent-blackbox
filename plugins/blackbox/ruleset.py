@@ -382,7 +382,7 @@ def _row_to_rule(row: Dict[str, Any], source: str = "public") -> Optional[tuple]
         "source": source,
     }
     if identifier.startswith("injection:"):
-        pattern_src = extract_binding(row.get("pattern"))
+        pattern_src = _normalize_injection_pattern(extract_binding(row.get("pattern")))
         if not pattern_src:
             return None
         try:
@@ -442,9 +442,12 @@ def _row_to_rule(row: Dict[str, Any], source: str = "public") -> Optional[tuple]
             "category": category.strip().lower(),
         })
     if identifier.startswith("skill:"):
+        skill_name = extract_binding(row.get("skillName"))
+        if not _SKILL_PACKAGE_NAME_RE.fullmatch(skill_name):
+            skill_name = _skill_name_from_title(name)
         rule = {
             **common,
-            "skillName": extract_binding(row.get("skillName")) or name,
+            "skillName": skill_name,
             "skillVersion": extract_binding(row.get("skillVersion")),
             "dangerShape": extract_binding(row.get("dangerShape")),
         }
@@ -462,6 +465,46 @@ def _row_to_rule(row: Dict[str, Any], source: str = "public") -> Optional[tuple]
             "kind": extract_binding(row.get("kind")) or None,
         })
     return None
+
+
+_QUOTED_SKILL_NAME_RE = re.compile(r"^[\"'`]([^\"'`]+)[\"'`]")
+_SKILL_PACKAGE_NAME_RE = re.compile(
+    r"@?[a-z0-9][a-z0-9._-]*(?:/[a-z0-9][a-z0-9._-]*)?",
+    re.IGNORECASE,
+)
+_TITLED_SKILL_NAME_RE = re.compile(
+    r"^(@?[a-z0-9][a-z0-9._-]*(?:/[a-z0-9][a-z0-9._-]*)?)\s+"
+    r"(?:\(|bcc\b)",
+    re.IGNORECASE,
+)
+
+
+def _skill_name_from_title(title: str) -> str:
+    """Recover a concrete package name from older skill display titles.
+
+    Early public SkillSignal records omitted ``skillName`` and embedded a name
+    in titles such as ``'totally-safe-helper' (any version)``. Only explicit,
+    package-shaped names are recovered. Generic research archetypes remain
+    unmatched so they cannot turn into noisy package-name alerts.
+    """
+    value = (title or "").strip()
+    quoted = _QUOTED_SKILL_NAME_RE.match(value)
+    if quoted:
+        return quoted.group(1).strip()
+    titled = _TITLED_SKILL_NAME_RE.match(value)
+    return titled.group(1).strip() if titled else ""
+
+
+def _normalize_injection_pattern(pattern_src: str) -> str:
+    """Undo the JSON/RDF escape layer applied to published regex literals.
+
+    Public graph patterns arrive with regex escapes doubled (for example
+    ``<\\\\|endoftext\\\\|>``). Compiling that value directly changes its
+    meaning: the delimiter rule can match a bare ``>``. Collapse exactly one
+    serialization layer before compiling so graph signatures retain their
+    authored regex semantics.
+    """
+    return (pattern_src or "").replace("\\\\", "\\")
 
 
 def build_from_rows(rows: List[Dict[str, Any]], source: str = "public") -> Ruleset:
@@ -557,7 +600,7 @@ def _serialize(rs: Ruleset) -> Dict[str, Any]:
 def _deserialize(data: Dict[str, Any]) -> Ruleset:
     rs = Ruleset(synced_at=float(data.get("synced_at", 0.0)))
     for rule in data.get("injection", []):
-        src = rule.get("pattern_src")
+        src = _normalize_injection_pattern(str(rule.get("pattern_src") or ""))
         if not src:
             continue
         try:
@@ -565,7 +608,7 @@ def _deserialize(data: Dict[str, Any]) -> Ruleset:
         except re.error:
             continue
         if rule.get("source", "public") == "public":
-            rs.injection.append({**rule, "pattern": compiled})
+            rs.injection.append({**rule, "pattern_src": src, "pattern": compiled})
     rs.escalation = [r for r in data.get("escalation", []) if r.get("source", "public") == "public"]
     rs.dependency = {k: r for k, r in data.get("dependency", {}).items() if r.get("source", "public") == "public"}
     rs.fileaccess = [r for r in data.get("fileaccess", []) if r.get("source", "public") == "public"]
