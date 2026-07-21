@@ -28,6 +28,7 @@ def _ruleset(**kw):
     rs.dependency = kw.get("dependency", {})
     rs.fileaccess = kw.get("fileaccess", [])
     rs.skill = kw.get("skill", [])
+    rs.ioc = kw.get("ioc", {})
     rs.synced_at = kw.get("synced_at", 9e18)  # far future → no background refresh
     return rs
 
@@ -162,6 +163,91 @@ def test_graph_keeps_threat_with_invalid_detection_pattern():
     assert rs.graph_entries("public")[0]["category"] == "injection"
     restored = ruleset_mod._deserialize(ruleset_mod._serialize(rs))
     assert restored.graph_count("public") == 1
+
+
+def test_published_regex_escapes_are_normalized_without_broadening():
+    row = {
+        "threat": "urn:defender:signal:endoftext",
+        "rdfType": "urn:defender:InjectionSignal",
+        "identifier": "injection:endoftext",
+        # The DKG literal contains one extra JSON/RDF escape layer.
+        "pattern": r"<\\|endoftext\\|>",
+        "severity": "high",
+        "name": "GPT end-of-text delimiter injection",
+    }
+
+    rs = ruleset_mod.build_from_rows([row], source="public")
+    restored = ruleset_mod._deserialize(ruleset_mod._serialize(rs))
+
+    assert detection.detect_injection("2 > 1", rs) == []
+    assert detection.detect_injection("2 > 1", restored) == []
+    assert detection.detect_injection("<|endoftext|>", rs)
+    assert detection.detect_injection("<|endoftext|>", restored)
+
+
+def test_legacy_skill_title_recovers_concrete_name_only():
+    rows = [
+        {
+            "identifier": "skill:legacy-named",
+            "rdfType": "urn:defender:SkillSignal",
+            "name": "'totally-safe-helper' (any version)",
+            "severity": "critical",
+        },
+        {
+            "identifier": "skill:legacy-generic",
+            "rdfType": "urn:defender:SkillSignal",
+            "name": "Unrestricted shell-execution MCP",
+            "severity": "critical",
+        },
+    ]
+
+    rs = ruleset_mod.build_from_rows(rows, source="public")
+
+    assert rs.skill[0]["skillName"] == "totally-safe-helper"
+    assert rs.skill[1]["skillName"] == ""
+    assert ruleset_mod._skill_name_from_title("Environment-variable exfil MCP") == ""
+
+
+def test_versionless_historical_skill_flags_medium_with_cautious_wording():
+    rs = _ruleset(skill=[{
+        "identifier": "skill:legacy-named", "skillName": "totally-safe-helper",
+        "skillVersion": "", "dangerShape": "", "severity": "critical",
+        "name": "old incident", "source": "public",
+    }])
+
+    findings = detection.detect_skill(
+        "skill_manage", {"name": "totally-safe-helper", "version": "9.9.9"}, rs
+    )
+
+    assert len(findings) == 1
+    finding = findings[0]
+    assert finding.severity == "medium"
+    assert finding.kind == "historical"
+    assert "was exploited in the past" in finding.evidence
+    assert "may be fixed in newer releases" in finding.evidence
+
+
+def test_versionless_historical_skill_never_blocks(monkeypatch):
+    rs = _ruleset(skill=[{
+        "identifier": "skill:legacy-named", "skillName": "totally-safe-helper",
+        "skillVersion": "", "dangerShape": "", "severity": "critical",
+        "name": "old incident", "source": "public",
+    }])
+    monkeypatch.setattr(ruleset_mod, "get", lambda cfg=None: rs)
+    monkeypatch.setattr(hooks, "_report_and_audit", lambda *a, **k: None)
+    monkeypatch.setattr(hooks, "_spawn_osv_discovery", lambda *a, **k: None)
+    monkeypatch.setattr(
+        config_mod,
+        "load_blackbox_config",
+        lambda: config_mod.BlackboxConfig(mode="block", block_severity="medium"),
+    )
+
+    out = hooks.on_pre_tool_call(
+        tool_name="skill_manage",
+        args={"name": "totally-safe-helper", "version": "9.9.9"},
+    )
+
+    assert out is None
 
 
 # --- detection: community flags, public confirms ------------------------------

@@ -387,6 +387,20 @@ def test_dashboard_findings_can_load_more_without_poll_resetting_the_page():
     assert 'findingsMoreBtn.textContent = "Load more threats"' in html
 
 
+def test_dashboard_prefers_available_vm_data_over_sync_error_panel():
+    html = (
+        Path(__file__).resolve().parents[1]
+        / "plugins"
+        / "blackbox"
+        / "dashboard"
+        / "static"
+        / "index.html"
+    ).read_text(encoding="utf-8")
+
+    assert 'var hasQueryableVm = Number(graphTotalForTier("public") || 0) > 0' in html
+    assert '((status === "failed" || status === "offline") && !hasQueryableVm)' in html
+
+
 def test_dashboard_more_node_is_a_display_only_marker():
     html = (
         Path(__file__).resolve().parents[1]

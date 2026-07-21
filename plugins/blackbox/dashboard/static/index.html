@@ -3258,9 +3258,13 @@
     var activity = progress && progress.activity;
     var status = String(activity && activity.status || "idle");
     renderGraphRefreshState(status === "running" || status === "waiting");
+    // A refresh failure must not replace a usable verified graph. Keep the
+    // backend status intact, but prefer the count and graph already available
+    // in this read-only dashboard. With no VM data, the error stays visible.
+    var hasQueryableVm = Number(graphTotalForTier("public") || 0) > 0;
     var visible = activeTier === "public" && (
       status === "running" || status === "waiting" ||
-      status === "failed" || status === "offline"
+      ((status === "failed" || status === "offline") && !hasQueryableVm)
     );
     panel.hidden = !visible;
     if (!visible) return;

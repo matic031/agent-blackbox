@@ -23,6 +23,7 @@ import {
   DependencyRule,
   EscalationRule,
   FileAccessRule,
+  IocRule,
   InjectionRule,
   RuleSource,
   Ruleset,
@@ -118,6 +119,7 @@ interface ThreatAccum {
   identifier?: string;
   severity?: string;
   name?: string;
+  description?: string;
   pattern?: string;
   owaspCategory?: string;
   toolName?: string;
@@ -134,6 +136,8 @@ interface ThreatAccum {
   skillName?: string;
   skillVersion?: string;
   dangerShape?: string;
+  // IOC
+  iocValue?: string;
 }
 
 /** Accumulate the s/p/o rows of one tier's response into per-subject threats. */
@@ -151,8 +155,8 @@ function collectThreats(resp: unknown): ThreatAccum[] {
       case BLACKBOX_IDENTIFIER_PRED: acc.identifier = o; break;
       case BLACKBOX_SEVERITY_PRED:
       case `${DEFENDER_P}severity`: acc.severity = o; break;
-      case SCHEMA_NAME: acc.name ??= o; break;
-      case SCHEMA_DESCRIPTION: acc.name ??= o; break;
+      case SCHEMA_NAME: acc.name = o; break;
+      case SCHEMA_DESCRIPTION: acc.description = o; break;
       case BLACKBOX_PATTERN_PRED:
       case `${DEFENDER_P}pattern`: acc.pattern = o; break;
       case BLACKBOX_OWASP_CATEGORY_PRED: acc.owaspCategory = o; break;
@@ -170,6 +174,7 @@ function collectThreats(resp: unknown): ThreatAccum[] {
       case `${DEFENDER_P}advisoryId`: acc.advisoryId = o; break;
       case BLACKBOX_CATEGORY_PRED:
       case `${DEFENDER_P}iocType`: acc.category = o; break;
+      case `${DEFENDER_P}value`: acc.iocValue = o; break;
       case BLACKBOX_SKILL_NAME_PRED: acc.skillName = o; break;
       case BLACKBOX_SKILL_VERSION_PRED: acc.skillVersion = o; break;
       case BLACKBOX_DANGER_SHAPE_PRED: acc.dangerShape = o; break;
@@ -185,7 +190,20 @@ type MappedRule =
   | { category: "escalation"; key: string; rule: EscalationRule }
   | { category: "dependency"; key: string; rule: DependencyRule }
   | { category: "fileaccess"; key: string; rule: FileAccessRule }
-  | { category: "skill"; key: string; rule: SkillRule };
+  | { category: "skill"; key: string; rule: SkillRule }
+  | { category: "ioc"; key: string; rule: IocRule };
+
+const QUOTED_SKILL_NAME_RE = /^["'`]([^"'`]+)["'`]/;
+const SKILL_PACKAGE_NAME_RE = /^@?[a-z0-9][a-z0-9._-]*(?:\/[a-z0-9][a-z0-9._-]*)?$/i;
+const TITLED_SKILL_NAME_RE = /^(@?[a-z0-9][a-z0-9._-]*(?:\/[a-z0-9][a-z0-9._-]*)?)\s+(?:\(|bcc\b)/i;
+
+/** Recover only explicit package-shaped names from legacy display titles. */
+export function skillNameFromTitle(title: string): string {
+  const value = (title || "").trim();
+  return QUOTED_SKILL_NAME_RE.exec(value)?.[1]?.trim()
+    ?? TITLED_SKILL_NAME_RE.exec(value)?.[1]?.trim()
+    ?? "";
+}
 
 /** Map one accumulated threat to `(category, key, rule)` or null. Port of Python `_row_to_rule`. */
 function accumToRule(acc: ThreatAccum, source: RuleSource): MappedRule | null {
@@ -200,10 +218,12 @@ function accumToRule(acc: ThreatAccum, source: RuleSource): MappedRule | null {
     identifier = `injection:${suffix}`;
   } else if (!identifier && acc.rdfType === `${DEFENDER}SkillSignal` && suffix) {
     identifier = `skill:${suffix}`;
+  } else if (!identifier && acc.rdfType === `${DEFENDER}IocSignal` && acc.category && acc.iocValue) {
+    identifier = `ioc:${acc.category.trim().toLowerCase()}:${acc.iocValue}`;
   }
   if (!identifier) return null;
   const severity = normalizeSeverity(acc.severity, "high");
-  const name = acc.name || identifier;
+  const name = acc.name || acc.description || identifier;
   if (identifier.startsWith("injection:")) {
     if (!acc.pattern) return null;
     return {
@@ -283,11 +303,32 @@ function accumToRule(acc: ThreatAccum, source: RuleSource): MappedRule | null {
       key: identifier,
       rule: {
         identifier,
-        skillName: acc.skillName ?? name,
+        skillName: acc.skillName && SKILL_PACKAGE_NAME_RE.test(acc.skillName)
+          ? acc.skillName
+          : skillNameFromTitle(name),
         skillVersion: acc.skillVersion ?? "",
         dangerShape: acc.dangerShape ?? "",
         severity,
         name,
+        source,
+      },
+    };
+  }
+  if (identifier.startsWith("ioc:")) {
+    const parts = identifier.split(":", 3);
+    const iocType = (acc.category || parts[1] || "").trim().toLowerCase();
+    const value = acc.iocValue || identifier.slice(`ioc:${parts[1] ?? ""}:`.length);
+    if (!iocType || !value) return null;
+    return {
+      category: "ioc",
+      key: identifier,
+      rule: {
+        identifier,
+        severity,
+        name,
+        iocType,
+        value,
+        kind: acc.kind || undefined,
         source,
       },
     };
@@ -311,6 +352,7 @@ function buildRuleset(tiers: ReadonlyArray<readonly [ThreatAccum[], RuleSource]>
     dependency: new Set(),
     fileaccess: new Set(),
     skill: new Set(),
+    ioc: new Set(),
   };
   for (const [accums, source] of tiers) {
     for (const acc of accums) {
@@ -323,6 +365,7 @@ function buildRuleset(tiers: ReadonlyArray<readonly [ThreatAccum[], RuleSource]>
         case "dependency": ruleset.dependency[mapped.key] = mapped.rule; break;
         case "fileaccess": ruleset.fileaccess.push(mapped.rule); break;
         case "skill": ruleset.skill.push(mapped.rule); break;
+        case "ioc": ruleset.ioc[mapped.key] = mapped.rule; break;
       }
     }
   }
@@ -378,6 +421,9 @@ export class RulesetCache {
           dependency: dependencies,
           fileaccess: publicOnly(parsed.fileaccess),
           skill: publicOnly(parsed.skill),
+          ioc: Object.fromEntries(
+            Object.entries(parsed.ioc ?? {}).filter(([, rule]) => rule?.source !== "community"),
+          ),
         } as Ruleset;
       }
     } catch {
@@ -450,6 +496,7 @@ export class RulesetCache {
     dependency: number;
     fileaccess: number;
     skill: number;
+    ioc: number;
   } {
     return {
       injection: this.ruleset.injection.length,
@@ -457,6 +504,7 @@ export class RulesetCache {
       dependency: Object.keys(this.ruleset.dependency).length,
       fileaccess: this.ruleset.fileaccess.length,
       skill: this.ruleset.skill.length,
+      ioc: Object.keys(this.ruleset.ioc).length,
     };
   }
 }

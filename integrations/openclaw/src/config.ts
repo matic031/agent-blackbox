@@ -13,7 +13,7 @@ import { BlackboxSeverity, SEVERITY_RANK } from "./quads.js";
 import type { ThreatCategory } from "./detection.js";
 
 /**
- * The five detection categories a user can tune individually. Mirrors Python
+ * The six detection categories a user can tune individually. Mirrors Python
  * `config.DETECTION_CATEGORIES`.
  */
 export const DETECTION_CATEGORIES = [
@@ -22,6 +22,7 @@ export const DETECTION_CATEGORIES = [
   "dependency",
   "fileaccess",
   "skill",
+  "ioc",
 ] as const;
 
 /**

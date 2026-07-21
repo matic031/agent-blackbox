@@ -26,7 +26,7 @@ import type {
   PluginHookMessageReceivedEvent,
   PluginHookSessionEndEvent,
   PluginHookSessionStartEvent,
-} from "openclaw/plugin-sdk/plugin-entry";
+} from "openclaw/plugin-sdk/types";
 import {
   Finding,
   Ruleset,
@@ -360,6 +360,8 @@ function meetsBlock(finding: Finding, cfg: BlackboxConfig): boolean {
   return (
     (finding.confirmed || finding.source === "custom") &&
     finding.kind !== KIND_VULNERABILITY &&
+    finding.kind !== "historical" &&
+    finding.category !== "ioc" &&
     SEVERITY_RANK[finding.severity] >= SEVERITY_RANK[cfg.blockSeverity]
   );
 }
