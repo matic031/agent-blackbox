@@ -464,7 +464,7 @@ def test_blackbox_health_uses_live_snapshot_progress_without_remote_count():
     assert ready["out_of_sync"] is False
 
 
-def test_blackbox_health_warns_after_two_missed_sync_cycles():
+def test_blackbox_health_tracks_overdue_sync_without_alerting_when_protected():
     fresh = server._blackbox_sync_health(
         public=338_000,
         sync_interval=3_600,
@@ -481,8 +481,9 @@ def test_blackbox_health_warns_after_two_missed_sync_cycles():
     )
 
     assert fresh["out_of_sync"] is False
-    assert overdue["out_of_sync"] is True
+    assert overdue["out_of_sync"] is False
     assert overdue["reason"] == "last-success-overdue"
+    assert overdue["protection_available"] is True
 
 
 def test_blackbox_health_surfaces_failed_and_first_sync_states():
@@ -502,9 +503,43 @@ def test_blackbox_health_surfaces_failed_and_first_sync_states():
     )
 
     assert failed["reason"] == "last-sync-failed"
-    assert failed["out_of_sync"] is True
+    assert failed["out_of_sync"] is False
+    assert failed["protection_available"] is True
     assert empty["reason"] == "no-local-threats"
     assert empty["out_of_sync"] is True
+
+
+def test_blackbox_health_surfaces_local_node_outage_and_stalled_sync():
+    offline = server._blackbox_sync_health(
+        public=338_000,
+        sync_interval=3_600,
+        activity={"status": "ready", "percent": 100.0},
+        transfer={"status": "done", "updated_at": 10_000},
+        node_reachable=False,
+        now=10_100,
+    )
+    stalled = server._blackbox_sync_health(
+        public=338_000,
+        sync_interval=3_600,
+        activity={"status": "running", "percent": 90.0, "updated_at": 10_000},
+        transfer={"status": "running", "updated_at": 10_000},
+        node_reachable=True,
+        now=10_601,
+    )
+    stalled_before_ready = server._blackbox_sync_health(
+        public=338_000,
+        sync_interval=3_600,
+        activity={"status": "running", "percent": 79.9, "updated_at": 10_000},
+        transfer={"status": "running", "updated_at": 10_000},
+        node_reachable=True,
+        now=10_601,
+    )
+
+    assert offline["out_of_sync"] is False
+    assert offline["reason"] == "local-node-offline"
+    assert stalled["out_of_sync"] is False
+    assert stalled["reason"] == "sync-stalled"
+    assert stalled_before_ready["out_of_sync"] is True
 
 
 def test_dashboard_blackbox_warning_reuses_the_existing_graph_refresh():
@@ -513,7 +548,11 @@ def test_dashboard_blackbox_warning_reuses_the_existing_graph_refresh():
     )
 
     assert 'id="blackbox-sync-alert"' in html
+    assert 'id="blackbox-sync-dismiss"' in html
     assert "function renderBlackboxSyncHealth()" in html
+    assert "sessionStorage.setItem(BLACKBOX_SYNC_DISMISS_KEY" in html
+    assert 'reason === "local-node-offline"' in html
+    assert 'reason === "sync-stalled"' in html
     assert 'graphRefreshBtn.addEventListener("click", refreshGraphs)' in html
     assert html.count('addEventListener("click", refreshGraphs)') == 1
 

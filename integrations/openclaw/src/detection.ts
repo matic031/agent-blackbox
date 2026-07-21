@@ -497,6 +497,9 @@ export function normalizeArgShape(toolName: string, args: unknown): string | nul
 // Privacy: the regex source is the shareable signature; observed prompt text
 // stays in local evidence only and must never enter Finding.fields.
 const INJECTION_HEURISTICS: ReadonlyArray<readonly [BlackboxSeverity, string, RegExp]> = [
+  // OpenClaw replaces model-control delimiters in external content with this
+  // marker before plugins see the result. Preserve the security signal.
+  ["high", "LLM01", /\[REMOVED_SPECIAL_TOKEN\]/],
   // "ignore all previous instructions" and close variants (see quads.py).
   ["high", "LLM01", /(?:ignore|disregard|forget|skip|override)\s+(?:all\s+|any\s+|the\s+|these\s+)?(?:previous|prior|above|earlier|preceding|prior\s+)\s*(?:instruction|message|prompt|rule|context|direction|directive|command|guideline)s?/i],
   // Exfiltrate the system prompt / instructions.
@@ -594,8 +597,8 @@ export function discoverInjection(text: string, ruleset: Ruleset): Finding[] {
 // [category, severity, path-regex]. Matched against the accessed path only; the
 // candidate carries ONLY the category + tool — never the exact path.
 const SENSITIVE_PATH_RULES: ReadonlyArray<readonly [string, BlackboxSeverity, RegExp]> = [
-  ["ssh-private-key", "critical", /(?:^|\/)\.ssh(?:\/|$)|(?:^|\/)id_(?:rsa|ed25519|ecdsa|dsa)\b/i],
-  ["env-file", "high", /(?:^|\/)\.env(?:\.[\w.-]+)?$/i],
+  ["ssh-private-key", "critical", /(?:^|\/)\.ssh\/(?!(?:config|known_hosts|authorized_keys)$)(?!.*\.pub$).+|(?:^|\/)id_(?:rsa|ed25519|ecdsa|dsa)\b(?!\.pub)/i],
+  ["env-file", "high", /(?:^|\/)\.env(?:\.[\w.-]+)?$(?<!\.example)(?<!\.sample)(?<!\.template)(?<!\.dist)(?<!\.default)/i],
   [
     "credentials",
     "critical",
@@ -605,13 +608,15 @@ const SENSITIVE_PATH_RULES: ReadonlyArray<readonly [string, BlackboxSeverity, Re
   [
     "browser-cookies",
     "high",
-    /(?:Cookies|Login Data)$|(?:^|\/)Library\/Keychains(?:\/|$)|(?:^|\/)login\.keychain/i,
+    /(?:Chrome|Chromium|Brave|Edge|Opera|Vivaldi|BraveSoftware)[\s\S]{0,120}\/(?:Cookies|Login Data)$|(?:^|\/)cookies\.sqlite$|(?:^|\/)Cookies\.binarycookies$|(?:^|\/)Library\/Keychains(?:\/|$)|(?:^|\/)login\.keychain/i,
   ],
   ["system-shadow", "critical", /^\/etc\/(?:shadow|passwd|sudoers)$/i],
 ];
 
 // Tools whose args reference a file/path. Value = mode (read | write).
 const FILE_ACCESS_TOOLS: Record<string, "read" | "write"> = {
+  read: "read",
+  write: "write",
   read_file: "read",
   write_file: "write",
   edit_file: "write",
@@ -677,7 +682,7 @@ export function sensitivePathCategory(path: string, args?: unknown): SensitiveCa
   if (!path) return null;
   const p = path.trim();
   if (p.endsWith(".npmrc")) {
-    return npmrcHasToken(args) ? { category: "credentials", severity: "high" } : null;
+    return npmrcHasToken(args) ? { category: "credentials", severity: "critical" } : null;
   }
   for (const [category, severity, pattern] of SENSITIVE_PATH_RULES) {
     try {

@@ -42,6 +42,7 @@ _RULESET_MIN_RETRY_SEC = 5.0
 _RULESET_HEAVY_REFRESH_MIN_SEC = 15 * 60.0
 _BLACKBOX_READY_PERCENT = 80.0
 _BLACKBOX_MIN_OVERDUE_SEC = 10 * 60.0
+_BLACKBOX_STALLED_SYNC_SEC = 10 * 60.0
 _BLACKBOX_PROFILE = "agent-blackbox"
 _BLACKBOX_RUNTIME_HOST = "127.0.0.1"
 _BLACKBOX_RUNTIME_PORT = 9121
@@ -623,6 +624,7 @@ def _blackbox_sync_health(
     sync_interval: Any,
     activity: Dict[str, Any],
     transfer: Dict[str, Any],
+    node_reachable: bool = True,
     now: Any = None,
 ) -> Dict[str, Any]:
     """Describe whether Agent Blackbox needs a graph update.
@@ -647,15 +649,41 @@ def _blackbox_sync_health(
         "out_of_sync": False,
         "state": "ready",
         "reason": "fresh",
+        "protection_available": int(public or 0) > 0,
         "coverage_percent": percent,
         "ready_percent": _BLACKBOX_READY_PERCENT,
         "overdue_after_seconds": int(overdue_after),
+        "stalled_after_seconds": int(_BLACKBOX_STALLED_SYNC_SEC),
         "last_success_at": (
             transfer.get("updated_at") if transfer_status == "done" else None
         ),
     }
 
+    if not node_reachable:
+        return {
+            **base,
+            "out_of_sync": int(public or 0) <= 0,
+            "state": "node-offline",
+            "reason": "local-node-offline",
+        }
+
     if activity_status in {"running", "waiting"}:
+        updated_at = activity.get("updated_at") or transfer.get("updated_at")
+        try:
+            stalled = (
+                updated_at is not None
+                and current_time - float(updated_at) > _BLACKBOX_STALLED_SYNC_SEC
+            )
+        except (TypeError, ValueError):
+            stalled = False
+        if stalled:
+            below_threshold = percent is not None and percent < _BLACKBOX_READY_PERCENT
+            return {
+                **base,
+                "out_of_sync": bool(below_threshold or int(public or 0) <= 0),
+                "state": "sync-stalled",
+                "reason": "sync-stalled",
+            }
         below_threshold = percent is not None and percent < _BLACKBOX_READY_PERCENT
         no_protection_yet = int(public or 0) <= 0
         return {
@@ -676,7 +704,9 @@ def _blackbox_sync_health(
     if transfer_status == "failed" or activity_status == "failed":
         return {
             **base,
-            "out_of_sync": True,
+            # Keep the failure in status metadata, but do not show a prominent
+            # warning while the last verified graph still protects the agent.
+            "out_of_sync": False,
             "state": "update-failed",
             "reason": "last-sync-failed",
         }
@@ -690,7 +720,9 @@ def _blackbox_sync_health(
         if age > overdue_after:
             return {
                 **base,
-                "out_of_sync": True,
+                # Staleness remains observable without alarming users while a
+                # usable verified graph is still loaded.
+                "out_of_sync": False,
                 "state": "overdue",
                 "reason": "last-success-overdue",
             }
@@ -1409,6 +1441,7 @@ def create_app(*, manage_blackbox: bool = False):
             sync_interval=cfg.sync_interval,
             activity=activity,
             transfer=authoritative_sync,
+            node_reachable=bool(g["node_reachable"]),
         )
         if activity["status"] in {"running", "waiting"}:
             if public_state == "empty":

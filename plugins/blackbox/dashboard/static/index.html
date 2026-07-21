@@ -988,7 +988,7 @@
   .sync-progress.offline .sync-progress-bar { background: var(--signal); }
   .blackbox-sync-alert {
     display: grid;
-    grid-template-columns: auto minmax(0, 1fr);
+    grid-template-columns: auto minmax(0, 1fr) auto;
     align-items: center;
     gap: 12px;
     padding: 12px 14px;
@@ -1021,6 +1021,26 @@
     font-size: 10px;
     line-height: 1.45;
   }
+  .blackbox-sync-dismiss {
+    width: 28px;
+    height: 28px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    color: var(--muted);
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 2px;
+    cursor: pointer;
+  }
+  .blackbox-sync-dismiss:hover,
+  .blackbox-sync-dismiss:focus-visible {
+    color: var(--text);
+    border-color: var(--border);
+    outline: none;
+  }
+  .blackbox-sync-dismiss svg { width: 15px; height: 15px; }
   @keyframes bb-sync-slide {
     0% { transform: translateX(-110%); }
     100% { transform: translateX(300%); }
@@ -2826,6 +2846,9 @@
             <span class="blackbox-sync-title" id="blackbox-sync-title">Agent Blackbox is out of sync</span>
             <span class="blackbox-sync-detail" id="blackbox-sync-detail"></span>
           </span>
+          <button type="button" class="blackbox-sync-dismiss" id="blackbox-sync-dismiss" aria-label="Dismiss sync alert" title="Dismiss">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
+          </button>
         </div>
         <div class="sync-progress indeterminate" id="sync-progress" aria-live="polite" hidden>
           <div class="sync-progress-head">
@@ -3107,6 +3130,9 @@
   // Latest /api/graph-status payload, so the graph renderer can read node
   // reachability when deciding "still syncing" vs a settled 0. See countSyncing.
   var lastStatus = null;
+  var BLACKBOX_SYNC_DISMISS_KEY = "blackbox.dashboard.sync-dismissed.v1";
+  var dismissedBlackboxSyncIssue = "";
+  try { dismissedBlackboxSyncIssue = sessionStorage.getItem(BLACKBOX_SYNC_DISMISS_KEY) || ""; } catch (_) {}
 
   // Findings: keep the latest fetched list so sorting stays local. Expanded
   // pages remain expanded across background polls instead of snapping to 10.
@@ -3335,7 +3361,19 @@
     if (!alert) return;
     var progress = lastStatus && lastStatus.sync_progress;
     var health = progress && progress.blackbox;
-    var visible = activeTier === "public" && !!(health && health.out_of_sync);
+    if (!health) {
+      alert.hidden = true;
+      return;
+    }
+    if (!health.out_of_sync) {
+      dismissedBlackboxSyncIssue = "";
+      try { sessionStorage.removeItem(BLACKBOX_SYNC_DISMISS_KEY); } catch (_) {}
+      alert.hidden = true;
+      return;
+    }
+    var issueKey = String(health.reason || "unknown") + ":" + String(health.state || "unknown");
+    alert.dataset.issueKey = issueKey;
+    var visible = activeTier === "public" && dismissedBlackboxSyncIssue !== issueKey;
     alert.hidden = !visible;
     if (!visible) return;
 
@@ -3351,6 +3389,12 @@
       detail = "The last graph update did not complete. Your existing verified protection remains active.";
     } else if (reason === "last-success-overdue") {
       detail = "The last successful graph update is overdue. Refresh the graph to check for the latest verified threats.";
+    } else if (reason === "local-node-offline") {
+      title = "The local DKG node is offline";
+      detail = "Existing verified protection remains available, but graph updates cannot continue until the local node recovers.";
+    } else if (reason === "sync-stalled") {
+      title = "Graph syncing may be stalled";
+      detail = "No sync progress has been reported for more than 10 minutes. Existing verified protection remains active.";
     } else if (reason === "no-local-threats") {
       title = "Agent Blackbox needs its first graph sync";
       detail = "Sync verified threats before relying on graph-backed detection.";
@@ -3363,6 +3407,7 @@
     var note = $("graph-tier-note");
     if (!note) return;
     renderSyncProgress();
+    renderBlackboxSyncHealth();
     if (activeTier === "community") {
       note.textContent = TIER_NOTE.community;
       return;
@@ -6441,7 +6486,6 @@
     resetEmptyGraphOnFirstVerifiedThreats("public", previousPublicTotal);
     resetGraphOnRulesetRefresh("public", previousRulesetVersion);
     updateTierNote();
-    renderBlackboxSyncHealth();
     var curated = data.curated_threats != null ? data.curated_threats
                 : data.curated != null ? data.curated
                 : data.threats;
@@ -6517,6 +6561,16 @@
   TIERS.forEach(function (t) {
     $("tab-" + t).addEventListener("click", function () { switchTier(t); });
   });
+  var blackboxSyncDismiss = $("blackbox-sync-dismiss");
+  if (blackboxSyncDismiss) {
+    blackboxSyncDismiss.addEventListener("click", function () {
+      var alert = $("blackbox-sync-alert");
+      if (!alert) return;
+      dismissedBlackboxSyncIssue = alert.dataset.issueKey || "unknown:unknown";
+      try { sessionStorage.setItem(BLACKBOX_SYNC_DISMISS_KEY, dismissedBlackboxSyncIssue); } catch (_) {}
+      alert.hidden = true;
+    });
+  }
 
   // Collapse the header actions into one animated disclosure on phone/tablet.
   (function wireHeaderMenu() {

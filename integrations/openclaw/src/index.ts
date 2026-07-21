@@ -35,6 +35,7 @@ import {
   detectAll,
   detectCustomFileAccess,
   detectInjection,
+  detectIoc,
   discoverInjection,
   discoverDependencyCandidates,
   fileAccessArg,
@@ -479,7 +480,22 @@ function makeAfterToolCall(rt: BlackboxRuntime) {
       });
       if (event.error) {
         rt.log("debug", `blackbox: tool ${event.toolName} errored`, { error: sanitizeText(event.error, 300) });
+        return;
       }
+
+      // Tool output is untrusted input to the next model call. Scan it here so
+      // web pages, MCP responses, email, and RAG results appear in Blackbox even
+      // when the host's next-run hook does not expose intermediate tool turns.
+      const resultText = collectText(event.result).join("\n");
+      if (!resultText.trim()) return;
+      const findings = scanInjection(rt, resultText);
+      const inputIocs = new Set(detectIoc(event.toolName, event.params, rt.ruleset.get()).map((f) => f.identifier));
+      findings.push(...flagWorthy(
+        rt.cfg,
+        detectIoc(event.toolName, event.result, rt.ruleset.get()).filter((f) => !inputIocs.has(f.identifier)),
+      ));
+      const context: FindingContext = { input: resultText };
+      for (const f of findings) observe(rt, "post_tool_call", f, event.toolName, context);
     } catch {
       /* fail-open */
     }
@@ -598,6 +614,7 @@ function buildRuntime(api: OpenClawPluginApi): BlackboxRuntime {
     client,
     contextGraphId: cfg.contextGraphId,
     ttlSeconds: cfg.syncInterval,
+    seedStateDir: cfg.blackboxHome,
   });
   const log = (level: "debug" | "warn", msg: string, meta?: unknown) => {
     try {

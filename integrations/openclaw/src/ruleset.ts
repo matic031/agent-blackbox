@@ -400,6 +400,8 @@ export interface RulesetCacheOptions {
   client: DkgClient;
   contextGraphId: string;
   stateDir?: string;
+  /** Optional read-only fallback cache (for an attached Hermes Blackbox home). */
+  seedStateDir?: string;
   /** TTL seconds; below this a get() serves the cache without a refresh. */
   ttlSeconds?: number;
 }
@@ -421,12 +423,16 @@ export class RulesetCache {
     this.contextGraphId = opts.contextGraphId;
     this.ttlMs = (opts.ttlSeconds ?? 300) * 1000;
     this.cachePath = join(resolveStateDir(opts.stateDir), "ruleset.json");
-    this.ruleset = this.loadFromDisk() ?? emptyRuleset();
+    const seedPath = opts.seedStateDir ? join(opts.seedStateDir, "ruleset.json") : "";
+    this.ruleset = this.loadFromDisk(this.cachePath) ?? (seedPath ? this.loadFromDisk(seedPath) : null) ?? emptyRuleset();
   }
 
-  private loadFromDisk(): Ruleset | null {
+  private loadFromDisk(path: string): Ruleset | null {
     try {
-      const parsed = JSON.parse(readFileSync(this.cachePath, "utf8")) as Partial<Ruleset>;
+      const parsed = JSON.parse(readFileSync(path, "utf8")) as Partial<Ruleset> & {
+        synced_at?: number;
+        injection?: Array<InjectionRule & { pattern_src?: string }>;
+      };
       if (parsed && Array.isArray(parsed.injection)) {
         const publicOnly = <T extends { source?: RuleSource }>(rows: T[] | undefined): T[] =>
           (rows ?? []).filter((row) => row.source !== "community");
@@ -440,14 +446,25 @@ export class RulesetCache {
         return {
           ...emptyRuleset(),
           ...parsed,
-          injection: publicOnly(parsed.injection),
+          // Hermes persists the regex source as `pattern_src` because its
+          // in-memory `pattern` is a compiled Python regex. Treat that cache as
+          // a read-only seed and normalize it to the TypeScript shape.
+          injection: publicOnly(parsed.injection)
+            .map((rule) => ({ ...rule, pattern: rule.pattern || rule.pattern_src || "" }))
+            .filter((rule) => rule.pattern),
           escalation: publicOnly(parsed.escalation),
           dependency: dependencies,
           fileaccess: publicOnly(parsed.fileaccess),
-          skill: publicOnly(parsed.skill),
+          skill: publicOnly(parsed.skill).map((rule) => ({
+            ...rule,
+            skillName: rule.skillVersion
+              ? rule.skillName
+              : skillNameFromTitle(rule.name || rule.skillName) || rule.skillName,
+          })),
           ioc: Object.fromEntries(
             Object.entries(parsed.ioc ?? {}).filter(([, rule]) => rule?.source !== "community"),
           ),
+          fetchedAt: parsed.fetchedAt ?? (parsed.synced_at ? parsed.synced_at * 1000 : 0),
         } as Ruleset;
       }
     } catch {

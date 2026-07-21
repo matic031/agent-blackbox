@@ -23,10 +23,15 @@ before damage is done.
 - **Catch real risks.** Stop prompt injection, credential access, destructive
   commands, malicious packages, and unsafe skills.
 - **See what happened.** Review every finding in a live dashboard and audit trail.
-- **Get safer together.** A threat found by one agent can protect every other
-  connected agent.
+- **Use verified threat intelligence.** Umanitek-reviewed threats sync to every
+  protected agent through the Verifiable Graph.
 
-**One agent finds a threat. Every protected agent gets safer.**
+**One verified graph. Every protected agent gets safer.**
+
+> **Coming soon: Community Graph.** The next layer of collective defense will
+> help agents strengthen protection across the network as new threats are
+> discovered. Today, findings remain local and no community reports are
+> submitted.
 
 ## Install
 
@@ -115,7 +120,7 @@ Everyday commands:
 
 ```bash
 blackbox status      # config, node health, ruleset + findings counts
-blackbox sync --wait # pull the latest threat graphs right now
+blackbox sync --wait # pull the latest verified threat graph right now
 blackbox dashboard   # live dashboard at http://127.0.0.1:9700
 blackbox chat        # chat with Blackbox from this repo's workspace
 ```
@@ -124,8 +129,9 @@ The installer adds `blackbox` as a shortcut for `hermes blackbox`.
 `blackbox chat` opens a dedicated operator chat for Blackbox without adding that
 chat to the protected-agent count.
 
-The community graph and threat sharing are shown as **Coming soon**. For now,
-findings and reports stay local and `blackbox report` submits nothing.
+The **Community Graph is coming soon**, bringing a new collective-defense layer
+to Blackbox. Until it launches, findings and reports stay local and
+`blackbox report` submits nothing.
 
 Ready to enforce instead of just watch? Flip block mode in `config.yaml`:
 
@@ -187,8 +193,16 @@ Threats should not have to be rediscovered one agent at a time. Agent Blackbox
 gives every protected agent the benefit of what the network has already learned:
 
 - **Verified** threats are reviewed by Umanitek and can be blocked.
-- **Community** Shared Working Memory is coming soon and is not used yet.
+- **Community** Graph is coming soon, expanding Blackbox with a
+  collective-defense layer as new threats are discovered.
 - **Local** findings stay available in your own dashboard and audit trail.
+
+### Community Graph — coming soon
+
+The Verifiable Graph protects agents today with threats reviewed by Umanitek.
+Next, the Community Graph will help agents strengthen protection across the
+network as new threats emerge. Local findings stay local today, and community
+reporting is not yet active.
 
 ## How it works
 
@@ -206,11 +220,12 @@ The shared intelligence lives on the OriginTrail Decentralized Knowledge Graph
 modify another DKG installation.
 
 The curated threat graph is public and requires no private membership or join
-approval. Only its verified VM content is used for threat matching. Community
-SWM and threat sharing remain visible as coming-soon features but are inactive.
+approval. Only its verified VM content is used for threat matching. The
+Community Graph and threat sharing remain visible as coming-soon features but
+are inactive today.
 
-The dashboard shows **Public**, **Community**, and **Local** intelligence side by
-side. Technical settings, paths, and node details are listed below.
+The dashboard shows **Verifiable**, **Community**, and **Local** intelligence
+side by side. Technical settings, paths, and node details are listed below.
 
 ## Auto-attach
 
@@ -240,8 +255,8 @@ Set under `plugins.entries.blackbox.*` in `config.yaml`.
 | `dkg_home` | `<agent-blackbox>/.dkg` | isolated DKG node config, token, pid, and cache |
 | `context_graph_id` | `0x37b1Fdfd…/agent-blackbox-vm` | Public verified threat graph |
 | `graph_peer_id` | bundled publisher peer | Authoritative threat-data sync source |
-| `report` | `false` | fixed off while community threat sharing is coming soon |
-| `report_min_severity` | `high` | reserved for future community sharing; does not submit today |
+| `report` | `false` | fixed off until the Community Graph launches |
+| `report_min_severity` | `high` | reserved for the upcoming Community Graph; does not submit today |
 | `detection.<category>.enabled` | `true` | turn a whole category on/off (`injection`, `escalation`, `dependency`, `fileaccess`, `skill`) |
 | `detection.<category>.min_severity` | `info` | quiet a category below this level, e.g. `detection.dependency.min_severity: critical` |
 | `protected_paths` | `[]` | your own files/folders that always block and never leave your machine |
