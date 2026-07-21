@@ -119,7 +119,7 @@ def test_detection_audit_never_shares(monkeypatch):
     assert shared == []
 
 
-def test_dashboard_sync_never_requests_private_join(monkeypatch):
+def test_dashboard_sync_never_subscribes_or_requests_private_join(monkeypatch):
     events = []
 
     class Cfg:
@@ -146,7 +146,7 @@ def test_dashboard_sync_never_requests_private_join(monkeypatch):
     result = server._sync_ruleset_once(lambda: Cfg(), Client, Rules)
 
     assert result == {"total": 0, "public": 0, "community": 0}
-    assert events == [("subscribe", "legacy/private")]
+    assert events == []
 
 
 def test_dashboard_does_not_query_rules_while_durable_catchup_runs(monkeypatch):
@@ -229,7 +229,7 @@ def test_dashboard_keeps_old_rules_and_advances_verified_count_during_sync(monke
     }
 
 
-def test_dashboard_subscribes_at_most_once_when_status_is_unavailable(monkeypatch):
+def test_dashboard_never_subscribes_when_status_is_unavailable(monkeypatch):
     calls = []
 
     class Cfg:
@@ -254,12 +254,11 @@ def test_dashboard_subscribes_at_most_once_when_status_is_unavailable(monkeypatc
             return ruleset.Ruleset()
 
     monkeypatch.setattr(server.sync_state, "read", lambda: {})
-    server._subscription_attempts.discard(Cfg.context_graph_id)
 
     server._sync_ruleset_once(lambda: Cfg(), Client, Rules)
     server._sync_ruleset_once(lambda: Cfg(), Client, Rules)
 
-    assert calls == [Cfg.context_graph_id]
+    assert calls == []
 
 
 def test_dashboard_does_not_resubscribe_terminal_catchup_without_job_id(monkeypatch):
@@ -305,7 +304,6 @@ def test_dashboard_does_not_resubscribe_terminal_catchup_without_job_id(monkeypa
             raise AssertionError("fresh terminal cache must not be refreshed")
 
     monkeypatch.setattr(server.sync_state, "read", lambda: {})
-    server._subscription_attempts.discard(Cfg.context_graph_id)
 
     assert server._sync_ruleset_once(lambda: Cfg(), Client, Rules)["public"] == 1
 
@@ -353,7 +351,6 @@ def test_dashboard_reuses_fresh_large_ruleset_without_querying_blazegraph(monkey
             raise AssertionError("fresh cache must not trigger a full VM scan")
 
     monkeypatch.setattr(server.sync_state, "read", lambda: {})
-    server._subscription_attempts.discard(Cfg.context_graph_id)
 
     assert server._sync_ruleset_once(lambda: Cfg(), Client, Rules) == {
         "total": 1,

@@ -90,6 +90,7 @@ BLACKBOX_DETACHED_PID=""
 BLACKBOX_DKG_ALREADY_RUNNING=false
 BLACKBOX_DKG_RESTART_REQUIRED=false
 BLACKBOX_DKG_RUNTIME_MARKER="$BLACKBOX_DKG_HOME/.blackbox-runtime.sha256"
+BLACKBOX_DKG_NODE_PATH_MARKER="$BLACKBOX_DKG_HOME/.blackbox-node-path"
 BLACKBOX_DKG_STORE_RESET_MARKER="$BLACKBOX_DKG_HOME/.blackbox-store-reset-pending"
 BLACKBOX_DKG_RUNTIME_FINGERPRINT=""
 HERMES_API_KEY_VARS='OPENAI_API_KEY|ANTHROPIC_API_KEY|OPENROUTER_API_KEY|NOUS_API_KEY|ZAI_API_KEY|KIMI_API_KEY|KIMI_CN_API_KEY|MINIMAX_API_KEY|MINIMAX_CN_API_KEY|GOOGLE_API_KEY|GEMINI_API_KEY|MISTRAL_API_KEY|GROQ_API_KEY|TOGETHER_API_KEY|XAI_API_KEY'
@@ -225,6 +226,7 @@ record_blackbox_dkg_runtime_fingerprint() {
         warn "DKG restarted, but its applied runtime fingerprint could not be recorded."
         return 1
     fi
+    printf '%s\n' "$(command -v node)" >"$BLACKBOX_DKG_NODE_PATH_MARKER"
     return 0
 }
 
@@ -1423,29 +1425,14 @@ sync_ruleset() {
     BLACKBOX_SYNC_LOG="$HERMES_HOME/logs/blackbox-sync-install.log"
     step "Requesting one controlled verified graph catch-up ..."
     step "Sync progress will stream below (also saved to $BLACKBOX_SYNC_LOG)."
-    # Never let a previous install's progress line open an empty dashboard.
+    # Start the dashboard before the long initial transfer so discovery,
+    # download, verification, and reconciliation are observable immediately.
     : >"$BLACKBOX_SYNC_LOG"
-    local watch_dir=""
-    local watch_done=""
-    local watch_pid=""
     if [ "$BLACKBOX_AUTO_DASHBOARD" != "0" ] &&
         [ "$BLACKBOX_AUTO_DASHBOARD" != "false" ] &&
         [ "$BLACKBOX_AUTO_DASHBOARD" != "never" ] &&
         [ "$BLACKBOX_AUTO_DASHBOARD" != "no" ]; then
-        watch_dir="$(mktemp -d "${TMPDIR:-/tmp}/blackbox-first-sync.XXXXXX")"
-        watch_done="$watch_dir/done"
-        (
-            while [ ! -f "$watch_done" ] && kill -0 "$$" 2>/dev/null; do
-                if [ -f "$BLACKBOX_SYNC_LOG" ] &&
-                    grep -Eq '[0-9][0-9,]* verified threats ready' "$BLACKBOX_SYNC_LOG"; then
-                    ok "Verified threats are ready — opening the dashboard while the graph finishes syncing"
-                    start_dashboard
-                    exit 0
-                fi
-                sleep 1
-            done
-        ) &
-        watch_pid=$!
+        start_dashboard
     fi
 
     local sync_code=0
@@ -1455,13 +1442,6 @@ sync_ruleset() {
     else
         sync_code=$?
     fi
-    if [ -n "$watch_done" ]; then
-        touch "$watch_done"
-        wait "$watch_pid" 2>/dev/null || true
-        rm -f "$watch_done"
-        rmdir "$watch_dir" 2>/dev/null || true
-    fi
-
     if [ "$sync_code" -eq 0 ]; then
         ok "Ruleset synced — Blackbox is watching with the latest threats"
     else
@@ -1580,7 +1560,7 @@ defaults = {
     "mode": "audit",
     "context_graph_id": context_graph_id,
     "graph_peer_id": graph_peer_id,
-    "sync_interval": 60,
+    "sync_interval": 3600,
     # Community sharing has not shipped.  Keep fresh installs private, and
     # make the obsolete outbound-report allowance inert for compatibility
     # with older readers that still expect the key to exist.

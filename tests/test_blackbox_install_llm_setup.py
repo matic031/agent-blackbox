@@ -279,7 +279,7 @@ run_detached {shlex.quote(str(log_file))} {shlex.quote(sys.executable)} -c {shle
         subprocess.run(["/bin/kill", "-TERM", str(child_pid)], check=False)
 
 
-def test_unix_installer_runs_one_controlled_sync_before_dashboard() -> None:
+def test_unix_installer_starts_dashboard_before_one_controlled_sync() -> None:
     run_body = _extract_function_body("run_detached")
     health_body = _extract_function_body("detached_process_survived_startup")
     sync_body = _extract_function_body("sync_ruleset")
@@ -291,15 +291,14 @@ def test_unix_installer_runs_one_controlled_sync_before_dashboard() -> None:
     assert 'BLACKBOX_INSTALL_INCOMPLETE=true' in sync_body
     assert 'BLACKBOX_THREAT_GRAPH_INCOMPLETE=true' in sync_body
     assert "one controlled verified graph catch-up" in sync_body
-    assert "verified threats ready" in sync_body
     assert "start_dashboard" in sync_body
     assert ': >"$BLACKBOX_SYNC_LOG"' in sync_body
     assert 'tee -a "$BLACKBOX_SYNC_LOG"' in sync_body
-    assert sync_body.index("verified threats ready") < sync_body.index("start_dashboard")
+    assert sync_body.index("start_dashboard") < sync_body.index("blackbox sync --wait")
 
 
 @pytest.mark.skipif(shutil.which("bash") is None, reason="bash is unavailable")
-def test_unix_installer_opens_dashboard_after_new_verified_cache_is_ready(
+def test_unix_installer_opens_dashboard_before_fresh_sync_starts(
     tmp_path: Path,
 ) -> None:
     sync_body = _extract_function_body("sync_ruleset")
@@ -307,7 +306,7 @@ def test_unix_installer_opens_dashboard_after_new_verified_cache_is_ready(
     log_dir = hermes_home / "logs"
     log_dir.mkdir(parents=True)
     sync_log = log_dir / "blackbox-sync-install.log"
-    # A previous successful install must not satisfy the new run's watcher.
+    # A previous successful install log is cleared before the new sync.
     sync_log.write_text("999 verified threats ready\n", encoding="utf-8")
     events = tmp_path / "events"
     fake_hermes = tmp_path / "fake-hermes"
@@ -347,8 +346,8 @@ sync_ruleset
 
     subprocess.run(["bash", "-c", command], check=True, timeout=10)
     assert events.read_text(encoding="utf-8").splitlines() == [
-        "sync-started",
         "dashboard",
+        "sync-started",
         "sync-finished",
     ]
 

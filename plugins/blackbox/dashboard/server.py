@@ -47,7 +47,6 @@ _BLACKBOX_RESTART_DELAY_SEC = 2.0
 _join_lock = threading.Lock()
 _network_sync_lock = threading.Lock()
 _connection_states: Dict[str, Dict[str, Any]] = {}
-_subscription_attempts: Set[str] = set()
 
 _STATIC_DIR = Path(__file__).resolve().parent / "static"
 _ASSETS_DIR = Path(__file__).resolve().parent / "assets"
@@ -350,38 +349,7 @@ def _sync_ruleset_once(load_config: Any, dkg_client_cls: Any, ruleset_mod: Any) 
     catchup_job_id = str(
         catchup.get("jobId") or catchup.get("job_id") or catchup.get("id") or ""
     )
-    catchup_known = bool(catchup_job_id or catchup_state)
-    with _join_lock:
-        if catchup_known:
-            _subscription_attempts.add(cfg.context_graph_id)
-        subscribe = (
-            not catchup_known
-            and cfg.context_graph_id not in _subscription_attempts
-        )
-        if subscribe:
-            # Claim the attempt before network I/O. The dashboard refresh loop
-            # must never turn a slow/failed subscribe into a retry storm.
-            _subscription_attempts.add(cfg.context_graph_id)
-    if subscribe:
-        try:
-            subscription = client.subscribe_context_graph(cfg.context_graph_id) or {}
-            nested = subscription.get("catchup")
-            if isinstance(nested, dict):
-                catchup = nested
-                catchup_state = str(catchup.get("status") or "").lower()
-            with _join_lock:
-                _connection_states[cfg.context_graph_id] = {
-                    "state": "syncing",
-                    "updated_at": time.time(),
-                }
-        except Exception as exc:
-            with _join_lock:
-                _connection_states[cfg.context_graph_id] = {
-                    "state": "connection-error",
-                    "updated_at": time.time(),
-                    "error": str(exc),
-                }
-    elif catchup_state in {"queued", "running"}:
+    if catchup_state in {"queued", "running"}:
         with _join_lock:
             _connection_states[cfg.context_graph_id] = {
                 "state": "syncing",

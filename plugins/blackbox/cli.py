@@ -13,6 +13,7 @@ import logging
 import os
 import psutil
 import queue
+import shutil
 import subprocess
 import sys
 import threading
@@ -36,7 +37,7 @@ _DKG_STEADY_SYNC_SETTINGS = {
 
 _BLACKBOX_CHAT_PROFILE = "agent-blackbox"
 _BLACKBOX_SOUL_MARKER = "<!-- managed-by: hermes-blackbox-chat -->"
-_LEGACY_GUARDIAN_SOUL_MARKER = "<!-- managed-by: hermes-guardian-chat -->"
+_LEGACY_MANAGED_SOUL_PREFIX = "<!-- managed-by: hermes-"
 _BLACKBOX_SOURCE_ROOT_MARKER = ".blackbox-source-root"
 _BLACKBOX_CONTEXT_FILE_MAX_CHARS = 100_000
 _BLACKBOX_SOUL = f"""{_BLACKBOX_SOUL_MARKER}
@@ -356,7 +357,10 @@ def _write_blackbox_soul(profile_dir: Path) -> None:
             existing = ""
     if existing == _BLACKBOX_SOUL:
         return
-    legacy_identity = _LEGACY_GUARDIAN_SOUL_MARKER in existing
+    legacy_identity = (
+        _LEGACY_MANAGED_SOUL_PREFIX in existing
+        and _BLACKBOX_SOUL_MARKER not in existing
+    )
     if existing and _BLACKBOX_SOUL_MARKER not in existing and not legacy_identity:
         backup = profile_dir / "SOUL.md.before-blackbox-chat"
         if not backup.exists():
@@ -556,11 +560,17 @@ def _dkg_sync_environment(cfg: BlackboxConfig, *, durable: bool) -> Dict[str, st
 
 def _managed_dkg_node_executable(cfg: BlackboxConfig) -> Optional[Path]:
     """Find the Node executable whose ABI matches the installed DKG runtime."""
+    candidates: List[Path] = []
+
+    def _candidate(value: object) -> None:
+        if value:
+            path = Path(str(value)).expanduser()
+            if path not in candidates:
+                candidates.append(path)
+
     try:
         pid = int((Path(cfg.dkg_home) / "daemon.pid").read_text(encoding="utf-8").strip())
-        executable = Path(psutil.Process(pid).exe())
-        if executable.is_file():
-            return executable
+        _candidate(psutil.Process(pid).exe())
     except (OSError, TypeError, ValueError, psutil.Error):
         pass
 
@@ -575,14 +585,57 @@ def _managed_dkg_node_executable(cfg: BlackboxConfig) -> Optional[Path]:
                     continue
                 if not any(item in {"daemon-supervisor", "daemon-worker"} for item in command):
                     continue
-                executable = Path(str(process.info.get("exe") or process.exe()))
-                if executable.is_file():
-                    return executable
+                _candidate(process.info.get("exe") or process.exe())
             except (OSError, TypeError, ValueError, psutil.Error):
                 continue
     except (OSError, psutil.Error):
         pass
+
+    marker = Path(cfg.dkg_home) / ".blackbox-node-path"
+    try:
+        _candidate(marker.read_text(encoding="utf-8").strip())
+    except OSError:
+        pass
+    nvm_bin = os.environ.get("NVM_BIN")
+    if nvm_bin:
+        _candidate(Path(nvm_bin) / ("node.exe" if os.name == "nt" else "node"))
+    _candidate(shutil.which("node"))
+
+    for executable in candidates:
+        if not executable.is_file() or not _node_runtime_matches_dkg(executable, cfg):
+            continue
+        try:
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            tmp = marker.with_suffix(f".tmp-{os.getpid()}")
+            tmp.write_text(str(executable.resolve()) + "\n", encoding="utf-8")
+            os.replace(tmp, marker)
+        except OSError:
+            pass
+        return executable
     return None
+
+
+def _node_runtime_matches_dkg(executable: Path, cfg: BlackboxConfig) -> bool:
+    """Load the installed native SQLite binding before trusting a Node path."""
+    dkg_bin = Path(cfg.dkg_bin).expanduser()
+    native_package = dkg_bin.parent.parent / "better-sqlite3"
+    if not native_package.is_dir():
+        return False
+    probe = (
+        "const DB=require(process.argv[1]);"
+        "const db=new DB(':memory:');db.close();"
+    )
+    try:
+        result = subprocess.run(
+            [str(executable), "-e", probe, str(native_package)],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 0
 
 
 def _set_persisted_dkg_steady_state(cfg: BlackboxConfig) -> None:
@@ -741,7 +794,10 @@ def _cmd_sync_impl(args: argparse.Namespace) -> int:
     )
     admitted = not private_graph
     pending_approval = private_graph
-    subscribed = False
+    # The public release graph uses one curator-pinned VM recovery path. A
+    # generic subscription here was repeated by every automatic sync process
+    # and caused the retry storm this managed mode is designed to prevent.
+    subscribed = release_graph
     catchup_restarted = False
     baseline_catchup_known = False
     baseline_catchup_job_id = ""
@@ -750,9 +806,19 @@ def _cmd_sync_impl(args: argparse.Namespace) -> int:
     authoritative_recovered = False
     authoritative_complete = False
     authoritative_target = 0
+    sync_complete = False
     last_join_attempt = float("-inf")
     deadline = time.monotonic() + max(1, int(getattr(args, "timeout", 180) or 180))
     track_sync = bool(managed_graph and getattr(args, "wait", False))
+
+    if (
+        release_graph
+        and getattr(args, "wait", False)
+        and getattr(args, "require_rules", False)
+        and not authoritative_available
+    ):
+        print("  Required curator-pinned VM recovery is unavailable in this DKG build.")
+        return 2
 
     if track_sync:
         known_public, known_community = _last_sync_counts()
@@ -964,6 +1030,7 @@ def _cmd_sync_impl(args: argparse.Namespace) -> int:
         if (
             managed_graph
             and subscribed
+            and not release_graph
             and not catchup_restarted
             and (
                 catchup_includes_swm
@@ -1015,12 +1082,7 @@ def _cmd_sync_impl(args: argparse.Namespace) -> int:
         # not hold the graph.  Once the release graph is subscribed, pin the
         # authoritative source immediately; the recovery helper already
         # waits through DKG backpressure and verifies completion atomically.
-        authoritative_recovery_ready = base_sync_complete or (
-            release_graph
-            and subscribed
-            and catchup_state
-            in {"failed", "cancelled", "denied", "unreachable", "deferred"}
-        )
+        authoritative_recovery_ready = base_sync_complete or release_graph
         if (
             authoritative_recovery_ready
             and managed_graph
@@ -1047,6 +1109,23 @@ def _cmd_sync_impl(args: argparse.Namespace) -> int:
             authoritative_complete = (
                 authoritative_target > 0 and public_count >= authoritative_target
             )
+            if authoritative_target <= 0:
+                error = "authoritative VM returned no public threat entries"
+                sync_state.write(
+                    "failed",
+                    context_graph_id=cfg.context_graph_id,
+                    graph_peer_id=cfg.graph_peer_id,
+                    phase="empty-verifiable-memory",
+                    public_entries=0,
+                    expected_public_entries=0,
+                    community_entries=community_count,
+                    error=error,
+                )
+                print(
+                    "  authoritative VM returned zero public threat entries; "
+                    "the required ruleset is unavailable."
+                )
+                break
         sync_complete = base_sync_complete and (
             not authoritative_attempted or authoritative_complete
         )
@@ -1148,6 +1227,9 @@ def _cmd_sync_impl(args: argparse.Namespace) -> int:
         }:
             detail = last_catchup.get("error") or (last_catchup.get("result") or {}).get("error")
             print(f"  Fresh DKG catch-up failed{f': {detail}' if detail else '.'}")
+        elif authoritative_attempted and authoritative_target == 0:
+            print("  The authoritative curator VM returned zero public threat entries.")
+            print("  No rules are available to protect this node.")
         elif authoritative_attempted and not authoritative_complete:
             print("  Authoritative curator VM transfer is incomplete.")
             print("  Retry with `hermes blackbox sync --wait`.")

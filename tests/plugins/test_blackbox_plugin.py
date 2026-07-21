@@ -162,9 +162,10 @@ def test_managed_sync_uses_temporary_durable_window_and_restores_steady_state(
     assert persisted["syncGlobalQueueLimit"] == 0
 
 
-def test_managed_dkg_sync_environment_changes_only_durable_mode(tmp_path):
+def test_managed_dkg_sync_environment_changes_only_durable_mode(tmp_path, monkeypatch):
     (tmp_path / "daemon.pid").write_text(str(cli_mod.os.getpid()), encoding="utf-8")
     cfg = config_mod.BlackboxConfig(dkg_home=str(tmp_path))
+    monkeypatch.setattr(cli_mod, "_node_runtime_matches_dkg", lambda *_args: True)
     active = cli_mod._dkg_sync_environment(cfg, durable=True)
     steady = cli_mod._dkg_sync_environment(cfg, durable=False)
 
@@ -197,6 +198,7 @@ def test_managed_dkg_sync_environment_finds_runtime_without_pid_file(tmp_path, m
         }
 
     monkeypatch.setattr(cli_mod.psutil, "process_iter", lambda _attrs: [FakeProcess()])
+    monkeypatch.setattr(cli_mod, "_node_runtime_matches_dkg", lambda *_args: True)
 
     env = cli_mod._dkg_sync_environment(cfg, durable=False)
 
@@ -287,6 +289,16 @@ def test_blackbox_sync_waits_for_public_vm_when_community_arrives_first(monkeypa
         def restart_context_graph_catchup(self, cg_id):
             events.append(("restart", cg_id))
 
+        def catchup_from_peer(self, cg_id, peer_id, *, budget_ms):
+            events.append(("curator", cg_id))
+            return {
+                "ok": True,
+                "includeDurable": True,
+                "includeSharedMemory": False,
+                "peersAttempted": 1,
+                "results": [{"peerId": peer_id}],
+            }
+
     class FakeRuleset:
         def __init__(self, public):
             self.public = public
@@ -325,9 +337,8 @@ def test_blackbox_sync_waits_for_public_vm_when_community_arrives_first(monkeypa
     assert len(refreshes) == 2
     assert events == [
         ("status", constants.DEFAULT_CONTEXT_GRAPH_ID),
-        ("subscribe", constants.DEFAULT_CONTEXT_GRAPH_ID),
-        ("status", constants.DEFAULT_CONTEXT_GRAPH_ID),
-        ("restart", constants.DEFAULT_CONTEXT_GRAPH_ID),
+        ("curator", constants.DEFAULT_GRAPH_METADATA_CONTEXT_GRAPH_ID),
+        ("curator", constants.DEFAULT_CONTEXT_GRAPH_ID),
         ("status", constants.DEFAULT_CONTEXT_GRAPH_ID),
     ]
     out = capsys.readouterr().out
@@ -505,10 +516,84 @@ def test_blackbox_sync_uses_authoritative_publisher_for_empty_local_store(
     assert cli_mod._cmd_sync(args) == 0
     curator_events = [event for event in events if event[0] == "curator"]
     assert len(curator_events) == 2
+    assert not any(event[0] == "subscribe" for event in events)
     assert curator_events[0][1] == constants.DEFAULT_GRAPH_METADATA_CONTEXT_GRAPH_ID
     assert curator_events[1][1] == constants.DEFAULT_CONTEXT_GRAPH_ID
     assert len(refresh_calls) == 1
     assert "25,000 public VM" in capsys.readouterr().out
+
+
+def test_blackbox_sync_fails_instead_of_waiting_on_empty_zero_insert_snapshot(
+    monkeypatch, capsys
+):
+    states = []
+
+    class FakeClient:
+        def __init__(self, url, **_kwargs):
+            self.url = url
+
+        def catchup_status(self, _cg_id):
+            return {"jobId": "fresh", "status": "unreachable"}
+
+        def subscribe_context_graph(self, _cg_id):
+            return {"catchup": {"jobId": "fresh", "status": "queued"}}
+
+        def catchup_from_peer(self, _cg_id, peer_id, *, budget_ms):
+            return {
+                "ok": True,
+                "includeDurable": True,
+                "includeSharedMemory": False,
+                "peersAttempted": 1,
+                "results": [{"peerId": peer_id}],
+            }
+
+    class EmptyRuleset:
+        def counts(self):
+            return {
+                "injection": 0,
+                "escalation": 0,
+                "dependency": 0,
+                "fileaccess": 0,
+                "skill": 0,
+            }
+
+        def graph_count(self, _source):
+            return 0
+
+    monkeypatch.setattr(cli_mod, "DkgClient", FakeClient)
+    monkeypatch.setattr(
+        cli_mod,
+        "load_blackbox_config",
+        lambda: config_mod.BlackboxConfig(
+            context_graph_id=constants.DEFAULT_CONTEXT_GRAPH_ID,
+            dkg_url=constants.DEFAULT_DKG_URL,
+            graph_peer_id=constants.DEFAULT_GRAPH_PEER_ID,
+        ),
+    )
+    monkeypatch.setattr(cli_mod.ruleset, "peek", lambda _cfg: EmptyRuleset())
+    monkeypatch.setattr(cli_mod.ruleset, "refresh", lambda _cfg, _client: EmptyRuleset())
+    monkeypatch.setattr(
+        cli_mod.sync_state,
+        "write",
+        lambda status, **details: states.append((status, details)) or details,
+    )
+    monkeypatch.setattr(cli_mod.sync_state, "read", lambda: {})
+
+    result = cli_mod._cmd_sync_impl(
+        argparse.Namespace(wait=True, timeout=30, require_rules=True)
+    )
+
+    assert result == 2
+    assert any(
+        status == "failed"
+        and details.get("phase") == "empty-verifiable-memory"
+        and details["error"] == "authoritative VM returned no public threat entries"
+        for status, details in states
+    )
+    output = capsys.readouterr().out
+    assert "authoritative VM returned zero public threat entries" in output
+    assert "No rules are available to protect this node" in output
+    assert "Waiting for public VM reconciliation (0/0 entries)" not in output
 
 
 def test_required_release_sync_stops_after_one_non_discovery_connect_failure(
@@ -710,7 +795,7 @@ def test_blackbox_sync_does_not_accept_deferred_catchup_as_complete(
     assert "4 public VM" in capsys.readouterr().out
 
 
-def test_blackbox_sync_does_not_query_vm_while_catchup_is_running(monkeypatch):
+def test_blackbox_sync_does_not_fall_back_to_generic_running_catchup(monkeypatch):
     status_calls = []
     clock = {"value": 0.0}
 
@@ -752,7 +837,7 @@ def test_blackbox_sync_does_not_query_vm_while_catchup_is_running(monkeypatch):
 
     args = argparse.Namespace(wait=True, timeout=1, require_rules=True)
     assert cli_mod._cmd_sync(args) == 2
-    assert status_calls
+    assert not status_calls
 
 
 def test_authoritative_recovery_waits_for_dkg_backpressure(monkeypatch, capsys):
@@ -910,6 +995,9 @@ def test_blackbox_sync_ctrl_c_records_cancellation_and_returns_130(monkeypatch, 
         def subscribe_context_graph(self, cg_id):
             return {}
 
+        def catchup_from_peer(self, *_args, **_kwargs):
+            raise KeyboardInterrupt()
+
     def write_state(status, **details):
         state.clear()
         state.update(status=status, pid=cli_mod.os.getpid(), **details)
@@ -936,7 +1024,7 @@ def test_blackbox_sync_ctrl_c_records_cancellation_and_returns_130(monkeypatch, 
     args = argparse.Namespace(wait=True, timeout=30, require_rules=True)
     assert cli_mod._cmd_sync(args) == 130
     assert state["status"] == "cancelled"
-    assert state["phase"] == "network-catchup"
+    assert state["phase"] == "recovering-verifiable-memory"
     assert state["error"] == "sync cancelled by user"
     captured = capsys.readouterr()
     assert captured.err.endswith("Blackbox sync cancelled.\n")
@@ -1039,8 +1127,7 @@ def test_blackbox_sync_does_not_accept_stale_public_rows_after_fresh_catchup_fai
     args = argparse.Namespace(wait=True, timeout=30, require_rules=True)
     assert cli_mod._cmd_sync(args) == 2
     out = capsys.readouterr().out
-    assert "2 public VM" in out
-    assert "Fresh DKG catch-up failed: protocol negotiation failed" in out
+    assert "Required curator-pinned VM recovery is unavailable" in out
 
 
 def test_blackbox_sync_uses_curator_when_generic_catchup_peer_fails(monkeypatch, capsys):
@@ -1443,7 +1530,7 @@ def test_blackbox_chat_profile_writes_identity_and_attaches(tmp_path, monkeypatc
 def test_blackbox_chat_replaces_legacy_managed_identity(tmp_path):
     soul = tmp_path / "SOUL.md"
     soul.write_text(
-        cli_mod._LEGACY_GUARDIAN_SOUL_MARKER + "\n# Legacy profile\nYou are Guardian.\n",
+        "<!-- managed-by: hermes-old-chat -->\n# Legacy profile\nYou are an old assistant.\n",
         encoding="utf-8",
     )
 
@@ -1451,7 +1538,7 @@ def test_blackbox_chat_replaces_legacy_managed_identity(tmp_path):
 
     updated = soul.read_text(encoding="utf-8")
     assert "You are Agent Blackbox" in updated
-    assert "You are Guardian" not in updated
+    assert "You are an old assistant" not in updated
 
 
 def test_blackbox_chat_cwd_prefers_recorded_source_root(tmp_path, monkeypatch):

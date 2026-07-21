@@ -89,6 +89,7 @@ $script:InstallIncomplete = $false
 $script:DkgAlreadyRunning = $false
 $script:DkgRestartRequired = $false
 $script:DkgRuntimeMarker = Join-Path $DkgHome ".blackbox-runtime.sha256"
+$script:DkgNodePathMarker = Join-Path $DkgHome ".blackbox-node-path"
 $script:DkgStoreResetMarker = Join-Path $DkgHome ".blackbox-store-reset-pending"
 $script:DkgRuntimeFingerprint = ""
 
@@ -357,6 +358,10 @@ function Save-BlackboxDkgRuntimeFingerprint {
         $script:InstallIncomplete = $true
         Write-Warn2 "DKG restarted, but its applied runtime fingerprint could not be recorded."
         return $false
+    }
+    $nodeCommand = Get-Command node -ErrorAction SilentlyContinue
+    if ($nodeCommand -and $nodeCommand.Source) {
+        Set-Content -LiteralPath $script:DkgNodePathMarker -Value $nodeCommand.Source
     }
     return $true
 }
@@ -1255,7 +1260,7 @@ defaults = {
     "mode": "audit",
     "context_graph_id": context_graph_id,
     "graph_peer_id": graph_peer_id,
-    "sync_interval": 60,
+    "sync_interval": 3600,
     # Community sharing has not shipped.  Keep fresh installs private, and
     # make the obsolete outbound-report allowance inert for compatibility
     # with older readers that still expect the key to exist.

@@ -34,7 +34,7 @@ _SELECT_COLUMNS = """?threat ?rdfType ?identifier ?severity ?name ?description
        ?packageEcosystem ?advisoryId ?curated ?category ?skillName
        ?skillVersion ?dangerShape ?kind ?iocValue"""
 
-_GUARDIAN_THREATS_SELECT = f"""PREFIX g: <http://umanitek.ai/ontology/guardian/>
+_LEGACY_THREATS_SELECT = f"""PREFIX g: <http://umanitek.ai/ontology/guardian/>
 PREFIX schema: <http://schema.org/>
 SELECT DISTINCT {_SELECT_COLUMNS}
 WHERE {{
@@ -157,8 +157,8 @@ def _defender_threats_sparql(limit: int, offset: int) -> tuple:
     )
 
 
-def _guardian_threats_sparql(limit: int, offset: int) -> str:
-    return f"{_GUARDIAN_THREATS_SELECT}LIMIT {int(limit)} OFFSET {int(offset)}"
+def _legacy_threats_sparql(limit: int, offset: int) -> str:
+    return f"{_LEGACY_THREATS_SELECT}LIMIT {int(limit)} OFFSET {int(offset)}"
 
 
 def community_report_count(client: DkgClient, cfg: BlackboxConfig) -> int:
@@ -649,7 +649,7 @@ def _fetch_tier(
     """
     rows: List[Dict[str, Any]] = []
     query_groups = (
-        lambda limit, offset: (_guardian_threats_sparql(limit, offset),),
+        lambda limit, offset: (_legacy_threats_sparql(limit, offset),),
         _defender_threats_sparql,
     )
     for query_group in query_groups:
