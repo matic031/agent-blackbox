@@ -542,17 +542,15 @@ def test_blackbox_health_surfaces_local_node_outage_and_stalled_sync():
     assert stalled_before_ready["out_of_sync"] is True
 
 
-def test_dashboard_blackbox_warning_reuses_the_existing_graph_refresh():
+def test_dashboard_omits_obsolete_blackbox_sync_warning():
     html = (Path(server.__file__).with_name("static") / "index.html").read_text(
         encoding="utf-8"
     )
 
-    assert 'id="blackbox-sync-alert"' in html
-    assert 'id="blackbox-sync-dismiss"' in html
-    assert "function renderBlackboxSyncHealth()" in html
-    assert "sessionStorage.setItem(BLACKBOX_SYNC_DISMISS_KEY" in html
-    assert 'reason === "local-node-offline"' in html
-    assert 'reason === "sync-stalled"' in html
+    assert 'id="blackbox-sync-alert"' not in html
+    assert 'id="blackbox-sync-dismiss"' not in html
+    assert "function renderBlackboxSyncHealth()" not in html
+    assert "BLACKBOX_SYNC_DISMISS_KEY" not in html
     assert 'graphRefreshBtn.addEventListener("click", refreshGraphs)' in html
     assert html.count('addEventListener("click", refreshGraphs)') == 1
 

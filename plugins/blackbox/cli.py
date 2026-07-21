@@ -42,6 +42,7 @@ _LEGACY_MANAGED_SOUL_PREFIX = "<!-- managed-by: hermes-"
 _BLACKBOX_SOURCE_ROOT_MARKER = ".blackbox-source-root"
 _BLACKBOX_CONTEXT_FILE_MAX_CHARS = 100_000
 _MAX_GRAPH_METADATA_PASSES = 5
+_MAX_EMPTY_PUBLIC_PASSES = 3
 _BLACKBOX_SOUL = f"""{_BLACKBOX_SOUL_MARKER}
 # Agent Blackbox
 
@@ -843,6 +844,28 @@ def _cmd_sync_impl(args: argparse.Namespace) -> int:
     except (DkgError, AttributeError):
         pass
 
+    # Public Blackbox recovery is deliberately source-pinned. Older installs
+    # may still carry a persisted generic member subscription from before that
+    # managed path existed. Remove only its live gossip/sync scope so DKG's
+    # chain reconciler cannot race the one controlled transfer; the official
+    # endpoint explicitly preserves all local VM/SWM graph data.
+    if release_graph:
+        unsubscribe = getattr(client, "unsubscribe_context_graph", None)
+        if callable(unsubscribe):
+            try:
+                unsubscribe(cfg.context_graph_id)
+            except DkgError as exc:
+                if getattr(args, "require_rules", False):
+                    print(
+                        "  Could not disable the legacy public graph subscription: "
+                        f"{exc}"
+                    )
+                    return 2
+                logger.debug(
+                    "blackbox: could not disable legacy public subscription: %s",
+                    exc,
+                )
+
     if managed_graph:
         try:
             baseline_catchup = client.catchup_status(cfg.context_graph_id)
@@ -1326,6 +1349,7 @@ def _catchup_authoritative_vm(
     print("Syncing the complete verifiable VM snapshot...")
     backpressure_notice_printed = False
     backpressure_retries = 0
+    empty_public_passes = 0
     heartbeat_seconds = 10.0
 
     try:
@@ -1346,10 +1370,19 @@ def _catchup_authoritative_vm(
     # DKG metadata. Fetch it from the same source first so the VM verifier can
     # authenticate each graph-scoped assertion as soon as it arrives.
     pending_context_graphs = [context_graph_id]
-    if context_graph_id == constants.DEFAULT_CONTEXT_GRAPH_ID:
+    existing_on_chain_id = _context_graph_on_chain_binding(client, context_graph_id)
+    if (
+        context_graph_id == constants.DEFAULT_CONTEXT_GRAPH_ID
+        and existing_on_chain_id is None
+    ):
         pending_context_graphs.insert(
             0,
             constants.DEFAULT_GRAPH_METADATA_CONTEXT_GRAPH_ID,
+        )
+    elif existing_on_chain_id is not None:
+        print(
+            "  verified graph metadata ready "
+            f"(context graph {existing_on_chain_id})"
         )
     public_progress_seen = False
     metadata_passes = 0
@@ -1576,8 +1609,41 @@ def _catchup_authoritative_vm(
             inserted_durable_triples=inserted,
         )
         if inserted <= 0:
+            count_threats = getattr(client, "threat_count", None)
+            local_threats: Optional[int] = None
+            if callable(count_threats):
+                try:
+                    local_threats = int(count_threats(context_graph_id) or 0)
+                except (DkgError, TypeError, ValueError):
+                    local_threats = None
+            if local_threats == 0:
+                empty_public_passes += 1
+                if (
+                    empty_public_passes < _MAX_EMPTY_PUBLIC_PASSES
+                    and deadline - time.monotonic() > 4
+                ):
+                    print(
+                        "  public VM returned no durable progress; "
+                        "retrying the pinned source"
+                    )
+                    time.sleep(min(2.0, max(0.2, deadline - time.monotonic())))
+                    continue
+                error = (
+                    "public VM returned no durable progress after "
+                    f"{empty_public_passes} pinned passes"
+                )
+                sync_state.write(
+                    "failed",
+                    context_graph_id=context_graph_id,
+                    graph_peer_id=graph_peer_id,
+                    phase="empty-verifiable-memory",
+                    error=error,
+                )
+                print(f"  {error}")
+                return False
             print("  verifiable VM sync settled (no new triples)")
             return True
+        empty_public_passes = 0
         print(f"  verifiable VM sync advanced ({inserted:,} triples inserted)")
         if on_progress is not None:
             on_progress(inserted)

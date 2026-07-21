@@ -285,6 +285,17 @@ def test_restart_context_graph_catchup_uses_official_unsubscribe_then_subscribe(
     ]
 
 
+def test_unsubscribe_context_graph_preserves_the_official_data_safe_operation(monkeypatch):
+    cap = _capture(monkeypatch, body='{"unsubscribed":"cg","subscribed":false}')
+    client = dkg_client.DkgClient(url="http://node", token="tok")
+
+    result = client.unsubscribe_context_graph("cg")
+
+    assert result == {"unsubscribed": "cg", "subscribed": False}
+    assert cap["url"] == "http://node/api/context-graph/unsubscribe"
+    assert json.loads(cap["body"]) == {"contextGraphId": "cg"}
+
+
 def test_query_normalizes_bindings(monkeypatch):
     body = json.dumps({"bindings": [{"identifier": '"dep:npm:x@1"'}]})
     cap = _capture(monkeypatch, body=body)

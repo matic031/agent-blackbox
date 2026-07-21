@@ -228,6 +228,15 @@ class DkgClient:
             timeout=_STORE_TIMEOUT,
         )
 
+    def unsubscribe_context_graph(self, cg_id: str) -> Dict[str, Any]:
+        """Drop live gossip/sync scope without deleting local VM/SWM data."""
+        return self._request(
+            "POST",
+            "/api/context-graph/unsubscribe",
+            {"contextGraphId": cg_id},
+            timeout=_STORE_TIMEOUT,
+        )
+
     def restart_context_graph_catchup(
         self,
         cg_id: str,
@@ -235,12 +244,7 @@ class DkgClient:
         include_shared_memory: bool = False,
     ) -> Dict[str, Any]:
         """Force a fresh official catch-up without deleting local graph data."""
-        self._request(
-            "POST",
-            "/api/context-graph/unsubscribe",
-            {"contextGraphId": cg_id},
-            timeout=_STORE_TIMEOUT,
-        )
+        self.unsubscribe_context_graph(cg_id)
         return self.subscribe_context_graph(
             cg_id,
             include_shared_memory=include_shared_memory,

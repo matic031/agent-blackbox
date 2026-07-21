@@ -116,10 +116,9 @@ DEFAULT_GRAPH_PEER_ID = "12D3KooWBJskzr2unXQG9mR3LRZFUJoxWr1PN6hTbyWyKndHXjZM"
 #: rejected as an unresolved context graph.
 DEFAULT_GRAPH_METADATA_CONTEXT_GRAPH_ID = "ontology"
 
-#: A fresh curator snapshot may need more than 30 seconds just to materialize
-#: its first verified page. Keep the initial pass aligned with DKG's normal
-#: durable budget so Blackbox does not cancel a healthy publisher mid-query.
-INITIAL_GRAPH_SYNC_PASS_BUDGET_MS = 110_000
+#: Keep the first pass short so a fresh install gets prompt feedback. Durable
+#: progress is resumable; later passes use the normal, longer DKG budget.
+INITIAL_GRAPH_SYNC_PASS_BUDGET_MS = 30_000
 
 #: Once the first verified rules are locally usable, prefer DKG's normal
 #: per-peer durable budget. Larger follow-up passes avoid repeatedly paying the
