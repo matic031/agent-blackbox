@@ -9,7 +9,9 @@ import shlex
 import shutil
 import subprocess
 import sys
+import threading
 import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
@@ -1050,6 +1052,134 @@ provision_blackbox_store && printf 'unexpected-continue\n'
 
     assert completed.returncode != 0
     assert "unexpected-continue" not in completed.stdout
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is unavailable")
+def test_blazegraph_helper_resets_only_the_exact_local_namespace() -> None:
+    requests = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            length = int(self.headers.get("content-length", "0"))
+            body = self.rfile.read(length).decode("utf-8")
+            requests.append((self.path, self.headers.get("content-type"), body))
+            if body == "DROP ALL":
+                self.send_response(204)
+                self.end_headers()
+                return
+            payload = json.dumps(
+                {
+                    "results": {
+                        "bindings": [{"count": {"type": "literal", "value": "0"}}]
+                    }
+                }
+            ).encode("utf-8")
+            self.send_response(200)
+            self.send_header("content-type", "application/sparql-results+json")
+            self.send_header("content-length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, *_args):
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        endpoint = (
+            f"http://127.0.0.1:{server.server_port}/bigdata/namespace/"
+            "agent-blackbox/sparql"
+        )
+        completed = subprocess.run(
+            [
+                "node",
+                str(BLAZEGRAPH_HELPER),
+                "reset",
+                str(REPO_ROOT / "dkg"),
+                endpoint,
+                "agent-blackbox",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+    assert json.loads(completed.stdout)["triples"] == 0
+    assert requests[0][0] == "/bigdata/namespace/agent-blackbox/sparql"
+    assert requests[0][1] == "application/sparql-update"
+    assert requests[0][2] == "DROP ALL"
+    assert requests[1][1] == "application/sparql-query"
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash is unavailable")
+@pytest.mark.parametrize(
+    ("fresh", "managed", "explicit", "foreign", "expected_rc", "expected_calls"),
+    [
+        ("true", "true", "false", "false", 0, 1),
+        ("false", "true", "false", "false", 0, 0),
+        ("true", "false", "true", "false", 0, 0),
+        ("true", "true", "false", "true", 1, 0),
+    ],
+)
+def test_unix_fresh_store_reset_obeys_ownership_boundary(
+    tmp_path: Path,
+    fresh: str,
+    managed: str,
+    explicit: str,
+    foreign: str,
+    expected_rc: int,
+    expected_calls: int,
+) -> None:
+    calls = tmp_path / "calls"
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    node = fake_bin / "node"
+    node.write_text(
+        f"#!/bin/sh\nprintf '%s\\n' \"$*\" >> {shlex.quote(str(calls))}\n",
+        encoding="utf-8",
+    )
+    node.chmod(0o755)
+    command = f"""
+reset_fresh_managed_blazegraph() {{
+{_extract_function_body("reset_fresh_managed_blazegraph")}
+}}
+step() {{ :; }}
+ok() {{ :; }}
+err() {{ :; }}
+BLACKBOX_DKG_FRESH_STATE={fresh}
+BLACKBOX_DKG_SELECTED_STORE_BACKEND=blazegraph
+BLACKBOX_DKG_STORE_MANAGED_BY_DKG={managed}
+BLACKBOX_DKG_STORE_URL_EXPLICIT={explicit}
+BLACKBOX_DKG_FOREIGN_ENDPOINT={foreign}
+BLACKBOX_DKG_STORE_URL=http://127.0.0.1:9999/bigdata/namespace/agent-blackbox/sparql
+BLACKBOX_DKG_STORE_NAMESPACE=agent-blackbox
+BLACKBOX_DKG_CLI_DIR=/tmp/dkg
+REPO_DIR=/tmp/repo
+PATH={shlex.quote(str(fake_bin) + os.pathsep + os.environ.get("PATH", ""))}
+reset_fresh_managed_blazegraph
+"""
+    completed = subprocess.run(["bash", "-c", command], check=False)
+
+    assert completed.returncode == expected_rc
+    actual_calls = calls.read_text(encoding="utf-8").splitlines() if calls.exists() else []
+    assert len(actual_calls) == expected_calls
+    if actual_calls:
+        assert "reset /tmp/dkg" in actual_calls[0]
+        assert actual_calls[0].endswith("agent-blackbox")
+
+
+def test_windows_fresh_store_reset_has_the_same_ownership_guards() -> None:
+    windows = INSTALL_PS1.read_text(encoding="utf-8")
+    assert "$script:DkgFreshState = -not (Test-BlackboxDkgState)" in windows
+    assert 'if (-not $script:DkgStoreManagedByDkg) { return $true }' in windows
+    assert "if ($DkgStoreUrlExplicit) { return $true }" in windows
+    assert "if ($script:DkgForeignEndpoint)" in windows
+    assert "node $helper reset $DkgCliDir $DkgStoreUrl $script:DkgStoreNamespace" in windows
 
 
 def test_installers_offer_both_store_backends_and_actionable_docker_setup() -> None:

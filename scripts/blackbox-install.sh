@@ -53,6 +53,7 @@ BLACKBOX_DKG_PORT="${BLACKBOX_DKG_PORT:-9320}"
 BLACKBOX_DKG_STORE_PORT="${BLACKBOX_DKG_STORE_PORT:-9999}"
 BLACKBOX_DKG_STORE_URL="${BLACKBOX_DKG_STORE_URL:-}"
 BLACKBOX_DKG_STORE_MANAGED_BY_DKG=false
+BLACKBOX_DKG_STORE_NAMESPACE="agent-blackbox"
 BLACKBOX_DKG_STORE_BACKEND="auto"
 BLACKBOX_DKG_SELECTED_STORE_BACKEND=""
 BLACKBOX_DOCKER_REQUIRED=false
@@ -88,6 +89,8 @@ BLACKBOX_SYNC_PENDING=false
 BLACKBOX_SYNC_LOG=""
 BLACKBOX_DETACHED_PID=""
 BLACKBOX_DKG_ALREADY_RUNNING=false
+BLACKBOX_DKG_FRESH_STATE=false
+BLACKBOX_DKG_FOREIGN_ENDPOINT=false
 BLACKBOX_DKG_RESTART_REQUIRED=false
 BLACKBOX_DKG_RUNTIME_MARKER="$BLACKBOX_DKG_HOME/.blackbox-runtime.sha256"
 BLACKBOX_DKG_NODE_PATH_MARKER="$BLACKBOX_DKG_HOME/.blackbox-node-path"
@@ -333,6 +336,7 @@ check_blackbox_dkg_port() {
             return 0
         fi
         warn "Port $port already has a DKG endpoint, but $BLACKBOX_DKG_HOME has no Blackbox node state."
+        BLACKBOX_DKG_FOREIGN_ENDPOINT=true
         if [ "$BLACKBOX_DKG_PORT_EXPLICIT" = true ]; then
             BLACKBOX_INSTALL_INCOMPLETE=true
             BLACKBOX_THREAT_GRAPH_INCOMPLETE=true
@@ -488,6 +492,7 @@ print("true" if options.get("managedByDkg") is True else "false")
 PYEOF
     )"
     namespace="$(printf '%s\n' "$existing_state" | sed -n '1p')"
+    BLACKBOX_DKG_STORE_NAMESPACE="$namespace"
     existing_backend="$(printf '%s\n' "$existing_state" | sed -n '2p')"
     existing_url="$(printf '%s\n' "$existing_state" | sed -n '3p')"
     existing_managed="$(printf '%s\n' "$existing_state" | sed -n '4p')"
@@ -618,6 +623,26 @@ check_blackbox_blazegraph() {
         return 1
     fi
     ok "Blazegraph SPARQL endpoint is healthy at $BLACKBOX_DKG_STORE_URL"
+}
+
+reset_fresh_managed_blazegraph() {
+    [ "$BLACKBOX_DKG_FRESH_STATE" = true ] || return 0
+    [ "$BLACKBOX_DKG_SELECTED_STORE_BACKEND" = blazegraph ] || return 0
+    [ "$BLACKBOX_DKG_STORE_MANAGED_BY_DKG" = true ] || return 0
+    [ "$BLACKBOX_DKG_STORE_URL_EXPLICIT" = false ] || return 0
+    if [ "$BLACKBOX_DKG_FOREIGN_ENDPOINT" = true ]; then
+        err "Refusing to reset the Blackbox namespace while an unrelated DKG endpoint is running."
+        step "Stop that DKG node or set BLACKBOX_DKG_STORE_URL to an operator-managed store."
+        return 1
+    fi
+    local helper="$REPO_DIR/scripts/blackbox-blazegraph.mjs"
+    step "Clearing the installer-managed Blazegraph namespace for the fresh DKG identity ..."
+    if ! node "$helper" reset "$BLACKBOX_DKG_CLI_DIR" \
+        "$BLACKBOX_DKG_STORE_URL" "$BLACKBOX_DKG_STORE_NAMESPACE" >/dev/null; then
+        err "Could not clear the stale installer-managed Blackbox namespace."
+        return 1
+    fi
+    ok "Fresh Blackbox store is empty and ready for the new DKG identity"
 }
 
 ensure_blackbox_dkg_config() {
@@ -1340,6 +1365,11 @@ install_dkg() {
         return 0
     fi
 
+    if blackbox_has_dkg_state; then
+        BLACKBOX_DKG_FRESH_STATE=false
+    else
+        BLACKBOX_DKG_FRESH_STATE=true
+    fi
     mkdir -p "$BLACKBOX_DKG_HOME"
     if ! check_blackbox_dkg_port; then
         dkg_manual_hint
@@ -1353,6 +1383,10 @@ install_dkg() {
     fi
     if [ "$store_rc" -ne 0 ]; then
         err "Blazegraph setup did not complete and Oxigraph was not confirmed. Installation stopped."
+        exit 1
+    fi
+    if ! reset_fresh_managed_blazegraph; then
+        err "Installation stopped before creating a DKG identity against stale graph state."
         exit 1
     fi
     if [ "$BLACKBOX_DKG_ALREADY_RUNNING" = true ]; then

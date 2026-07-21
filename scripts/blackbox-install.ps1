@@ -64,6 +64,7 @@ $DkgPort     = if ($env:BLACKBOX_DKG_PORT)    { [int]$env:BLACKBOX_DKG_PORT } el
 $DkgStorePort = if ($env:BLACKBOX_DKG_STORE_PORT) { [int]$env:BLACKBOX_DKG_STORE_PORT } else { 9999 }
 $DkgStoreUrl = if ($env:BLACKBOX_DKG_STORE_URL) { $env:BLACKBOX_DKG_STORE_URL } else { "" }
 $DkgStoreManagedByDkg = $false
+$script:DkgStoreNamespace = "agent-blackbox"
 $script:DkgSelectedStoreBackend = ""
 $script:DockerRequired = $false
 $DkgAcceptStoreReset = $false
@@ -87,6 +88,8 @@ $GraphPeerId = if ($env:BLACKBOX_GRAPH_PEER_ID) { $env:BLACKBOX_GRAPH_PEER_ID } 
 $CatchupTimeout = if ($env:BLACKBOX_DKG_CATCHUP_TIMEOUT) { [int]$env:BLACKBOX_DKG_CATCHUP_TIMEOUT } else { 3600 }
 $script:InstallIncomplete = $false
 $script:DkgAlreadyRunning = $false
+$script:DkgFreshState = $false
+$script:DkgForeignEndpoint = $false
 $script:DkgRestartRequired = $false
 $script:DkgRuntimeMarker = Join-Path $DkgHome ".blackbox-runtime.sha256"
 $script:DkgNodePathMarker = Join-Path $DkgHome ".blackbox-node-path"
@@ -473,6 +476,7 @@ function Test-BlackboxDkgPort {
             return $true
         }
         Write-Warn2 "Port $DkgPort already has a DKG endpoint, but $DkgHome has no Blackbox node state."
+        $script:DkgForeignEndpoint = $true
         if ($DkgPortExplicit) {
             $script:InstallIncomplete = $true
             Write-Step "Set BLACKBOX_DKG_PORT to a free port or stop the process on $DkgDaemonUrl."
@@ -602,6 +606,7 @@ function Initialize-BlackboxStore {
             $existingManaged = $existing.store.options.managedByDkg -eq $true
         } catch { }
     }
+    $script:DkgStoreNamespace = $namespace
 
     if ($StoreBackend -eq "oxigraph") {
         Use-BlackboxOxigraph
@@ -707,6 +712,29 @@ function Initialize-BlackboxStore {
         Write-Warn2 "Could not provision Blazegraph."
         return $false
     }
+}
+
+function Reset-FreshManagedBlazegraph {
+    if (-not $script:DkgFreshState) { return $true }
+    if ($script:DkgSelectedStoreBackend -ne "blazegraph") { return $true }
+    if (-not $script:DkgStoreManagedByDkg) { return $true }
+    if ($DkgStoreUrlExplicit) { return $true }
+    if ($script:DkgForeignEndpoint) {
+        Write-Err2 "Refusing to reset the Blackbox namespace while an unrelated DKG endpoint is running."
+        Write-Step "Stop that DKG node or set BLACKBOX_DKG_STORE_URL to an operator-managed store."
+        return $false
+    }
+    $helper = Join-Path $RepoDir "scripts\blackbox-blazegraph.mjs"
+    Write-Step "Clearing the installer-managed Blazegraph namespace for the fresh DKG identity ..."
+    try {
+        & node $helper reset $DkgCliDir $DkgStoreUrl $script:DkgStoreNamespace *> $null
+        if ($LASTEXITCODE -ne 0) { throw "Blazegraph reset exit $LASTEXITCODE" }
+    } catch {
+        Write-Err2 "Could not clear the stale installer-managed Blackbox namespace."
+        return $false
+    }
+    Write-Ok "Fresh Blackbox store is empty and ready for the new DKG identity"
+    return $true
 }
 
 function Ensure-BlackboxDkgConfig {
@@ -1060,6 +1088,7 @@ function Install-Dkg {
         return
     }
 
+    $script:DkgFreshState = -not (Test-BlackboxDkgState)
     New-Item -ItemType Directory -Force -Path $DkgHome | Out-Null
     if (-not (Test-BlackboxDkgPort)) {
         Show-DkgManualHint
@@ -1071,6 +1100,10 @@ function Install-Dkg {
             exit 1
         }
         Write-Err2 "Blazegraph setup did not complete and Oxigraph was not confirmed. Installation stopped."
+        exit 1
+    }
+    if (-not (Reset-FreshManagedBlazegraph)) {
+        Write-Err2 "Installation stopped before creating a DKG identity against stale graph state."
         exit 1
     }
     if ($script:DkgAlreadyRunning) {

@@ -16,9 +16,68 @@ function fail(message) {
 
 const args = process.argv.slice(2);
 const healthCheck = args[0] === 'check';
-const [dkgCheckout, namespace, portText] = healthCheck ? args.slice(1) : args;
+const namespaceReset = args[0] === 'reset';
+const [dkgCheckout, namespace, portText] = (healthCheck || namespaceReset)
+  ? args.slice(1)
+  : args;
 if (!dkgCheckout || !namespace) {
   fail('usage: blackbox-blazegraph.mjs <dkg-checkout> <namespace> [preferred-port]');
+}
+
+if (namespaceReset) {
+  const expectedNamespace = String(portText || '');
+  let endpoint;
+  try {
+    endpoint = new URL(namespace);
+  } catch {
+    fail(`invalid Blazegraph endpoint: ${namespace}`);
+  }
+  const host = endpoint.hostname.toLowerCase();
+  const parts = endpoint.pathname.split('/').filter(Boolean).map(decodeURIComponent);
+  const namespaceIndex = parts.lastIndexOf('namespace');
+  const endpointNamespace = namespaceIndex >= 0 ? parts[namespaceIndex + 1] : '';
+  if (!['127.0.0.1', 'localhost', '::1'].includes(host)) {
+    fail('refusing to reset a non-local Blazegraph endpoint');
+  }
+  if (!expectedNamespace || endpointNamespace !== expectedNamespace || parts.at(-1) !== 'sparql') {
+    fail(`refusing to reset endpoint outside namespace "${expectedNamespace}"`);
+  }
+  const request = async (body, contentType) => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 60_000);
+    try {
+      return await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'content-type': contentType, accept: 'application/sparql-results+json' },
+        body,
+        signal: controller.signal,
+      });
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+  try {
+    const cleared = await request('DROP ALL', 'application/sparql-update');
+    if (!cleared.ok) {
+      throw new Error(`DROP ALL returned HTTP ${cleared.status}: ${await cleared.text()}`);
+    }
+    const checked = await request(
+      'SELECT (COUNT(*) AS ?count) WHERE { { ?s ?p ?o } UNION { GRAPH ?g { ?s ?p ?o } } }',
+      'application/sparql-query',
+    );
+    if (!checked.ok) {
+      throw new Error(`empty-store verification returned HTTP ${checked.status}`);
+    }
+    const payload = await checked.json();
+    const count = Number(payload?.results?.bindings?.[0]?.count?.value ?? NaN);
+    if (count !== 0) {
+      throw new Error(`namespace still contains ${Number.isFinite(count) ? count : 'unknown'} triples`);
+    }
+    process.stdout.write(`${JSON.stringify({ ok: true, namespace: expectedNamespace, triples: 0 })}\n`);
+    process.exit(0);
+  } catch (error) {
+    fail(error instanceof Error ? error.message : String(error));
+  }
 }
 
 if (healthCheck) {
