@@ -88,7 +88,7 @@ def test_blackbox_sync_parser_accepts_wait_timeout():
     assert args.require_rules is True
 
 
-def test_managed_sync_uses_temporary_durable_window_and_restores_steady_state(
+def test_managed_sync_enables_hybrid_steady_state_without_second_restart(
     monkeypatch, tmp_path
 ):
     dkg_home = tmp_path / "dkg-home"
@@ -146,18 +146,17 @@ def test_managed_sync_uses_temporary_durable_window_and_restores_steady_state(
 
     args = argparse.Namespace(wait=True, timeout=30, require_rules=True)
     assert cli_mod._cmd_sync(args) == 0
-    assert restarts == [True, False]
+    assert restarts == [True]
     assert [state["phase"] for state in states] == [
-        "preparing-sync-window",
+        "preparing-hybrid-sync",
         "complete",
-        "restoring-steady-state",
         "complete",
     ]
     assert states[0]["public_entries"] == 17_000
     persisted = json.loads((dkg_home / "config.json").read_text(encoding="utf-8"))
     assert persisted["syncOnConnectEnabled"] is False
     assert persisted["syncReconcilerEnabled"] is False
-    assert persisted["durableSyncEnabled"] is False
+    assert persisted["durableSyncEnabled"] is True
     assert persisted["syncGlobalMaxInflight"] == 1
     assert persisted["syncGlobalQueueLimit"] == 0
 
@@ -173,9 +172,8 @@ def test_managed_dkg_sync_environment_changes_only_durable_mode(tmp_path, monkey
     assert steady["DKG_DURABLE_SYNC_ENABLED"] == "0"
     assert active["DKG_CATCHUP_MAX_CONCURRENT_PEERS"] == "1"
     assert active["DKG_SYNC_TOTAL_TIMEOUT_MS"] == "1800000"
-    assert active["PATH"].split(cli_mod.os.pathsep)[0] == str(
-        cli_mod.Path(cli_mod.sys.executable).resolve().parent
-    )
+    assert active["PATH"].split(cli_mod.os.pathsep)[0]
+    assert active["PATH"] == steady["PATH"]
     for name, value in cli_mod._DKG_STEADY_SYNC_SETTINGS.items():
         if name != "DKG_DURABLE_SYNC_ENABLED":
             assert active[name] == value
@@ -203,6 +201,70 @@ def test_managed_dkg_sync_environment_finds_runtime_without_pid_file(tmp_path, m
     env = cli_mod._dkg_sync_environment(cfg, durable=False)
 
     assert env["PATH"].split(cli_mod.os.pathsep)[0] == str(node.parent)
+
+
+def test_managed_sync_lock_drops_a_second_cli_or_dashboard_owner(monkeypatch, capsys):
+    ran = []
+
+    @cli_mod.contextmanager
+    def busy_lock():
+        yield False
+
+    monkeypatch.setattr(cli_mod, "_managed_sync_lock", busy_lock)
+    monkeypatch.setattr(cli_mod, "_cmd_sync_impl", lambda _args: ran.append(True) or 0)
+
+    result = cli_mod._cmd_sync_in_managed_window(
+        config_mod.BlackboxConfig(),
+        argparse.Namespace(wait=True, timeout=30, require_rules=True),
+    )
+
+    assert result == 0
+    assert ran == []
+    assert "already running" in capsys.readouterr().out
+
+
+def test_uncertain_fallback_is_restarted_before_regular_sync(monkeypatch):
+    current = {
+        "status": "failed",
+        "sync_mode": "fallback",
+        "requires_dkg_restart": True,
+        "public_entries": 7,
+    }
+    restarts = []
+
+    def write_state(status, **details):
+        current.clear()
+        current.update(status=status, pid=cli_mod.os.getpid(), **details)
+        return dict(current)
+
+    def sync_impl(_args):
+        write_state("done", phase="complete", public_entries=7)
+        return 0
+
+    @cli_mod.contextmanager
+    def available_lock():
+        yield True
+
+    monkeypatch.setattr(cli_mod, "_managed_sync_lock", available_lock)
+    monkeypatch.setattr(cli_mod.sync_state, "read", lambda: dict(current))
+    monkeypatch.setattr(cli_mod.sync_state, "write", write_state)
+    monkeypatch.setattr(cli_mod, "_set_persisted_dkg_steady_state", lambda _cfg: False)
+    monkeypatch.setattr(
+        cli_mod,
+        "_restart_managed_dkg",
+        lambda _cfg, *, durable: restarts.append(durable),
+    )
+    monkeypatch.setattr(cli_mod, "_cmd_sync_impl", sync_impl)
+
+    result = cli_mod._cmd_sync_in_managed_window(
+        config_mod.BlackboxConfig(),
+        argparse.Namespace(wait=True, timeout=30, require_rules=True),
+    )
+
+    assert result == 0
+    assert restarts == [True]
+    assert current["status"] == "done"
+    assert "requires_dkg_restart" not in current
 
 
 def test_blackbox_sync_require_rules_fails_empty_ruleset(monkeypatch, capsys):
@@ -286,6 +348,10 @@ def test_blackbox_sync_waits_for_public_vm_when_community_arrives_first(monkeypa
             events.append(("status", cg_id))
             return {"jobId": "old", "status": "done"}
 
+        def unsubscribe_context_graph(self, cg_id):
+            events.append(("unsubscribe", cg_id))
+            return {"unsubscribed": cg_id}
+
         def restart_context_graph_catchup(self, cg_id):
             events.append(("restart", cg_id))
 
@@ -339,10 +405,13 @@ def test_blackbox_sync_waits_for_public_vm_when_community_arrives_first(monkeypa
     assert cli_mod._cmd_sync(args) == 0
     assert len(refreshes) == 2
     assert events == [
+        ("subscribe", constants.DEFAULT_CONTEXT_GRAPH_ID),
+        ("status", constants.DEFAULT_CONTEXT_GRAPH_ID),
+        ("unsubscribe", constants.DEFAULT_CONTEXT_GRAPH_ID),
         ("status", constants.DEFAULT_CONTEXT_GRAPH_ID),
         ("curator", constants.DEFAULT_GRAPH_METADATA_CONTEXT_GRAPH_ID),
         ("curator", constants.DEFAULT_CONTEXT_GRAPH_ID),
-        ("status", constants.DEFAULT_CONTEXT_GRAPH_ID),
+        ("subscribe", constants.DEFAULT_CONTEXT_GRAPH_ID),
     ]
     out = capsys.readouterr().out
     assert "2 public VM (curated)" in out
@@ -360,12 +429,19 @@ def test_blackbox_sync_recovers_curator_snapshot_then_waits_for_vm(monkeypatch, 
 
         def catchup_status(self, cg_id):
             events.append(("status", cg_id))
-            job_id = "old" if len([e for e in events if e[0] == "status"]) == 1 else "fresh"
-            return {"jobId": job_id, "status": "done"}
+            return {
+                "jobId": "fresh",
+                "status": "failed",
+                "error": "regular peers do not have the complete graph",
+            }
 
         def subscribe_context_graph(self, cg_id):
             events.append(("subscribe", cg_id))
-            return {"catchup": {"jobId": "fresh", "status": "done"}}
+            return {"catchup": {"jobId": "fresh", "status": "queued"}}
+
+        def unsubscribe_context_graph(self, cg_id):
+            events.append(("unsubscribe", cg_id))
+            return {"unsubscribed": cg_id}
 
         def catchup_from_peer(self, cg_id, peer_id, *, budget_ms):
             events.append(("curator", cg_id, peer_id, budget_ms))
@@ -439,8 +515,13 @@ def test_blackbox_sync_recovers_curator_snapshot_then_waits_for_vm(monkeypatch, 
     assert curator_events[0][1] == constants.DEFAULT_GRAPH_METADATA_CONTEXT_GRAPH_ID
     assert curator_events[1][1] == constants.DEFAULT_CONTEXT_GRAPH_ID
     curator_indexes = [index for index, event in enumerate(events) if event[0] == "curator"]
-    assert curator_indexes[1] < events.index(("refresh",)) < curator_indexes[2]
-    assert not any(event[0] == "subscribe" for event in events)
+    assert max(
+        index for index, event in enumerate(events) if event[0] == "status"
+    ) < curator_indexes[0]
+    assert events[0] == ("subscribe", constants.DEFAULT_CONTEXT_GRAPH_ID)
+    assert len([event for event in events if event[0] == "status"]) == 3
+    assert len([event for event in events if event[0] == "subscribe"]) == 2
+    assert len([event for event in events if event[0] == "unsubscribe"]) == 1
     assert states[-1][0] == "done"
     assert states[-1][1]["public_entries"] == 23_001
     assert states[-1][1]["expected_public_entries"] == 23_001
@@ -469,6 +550,10 @@ def test_blackbox_sync_uses_authoritative_publisher_for_empty_local_store(
         def subscribe_context_graph(self, cg_id):
             events.append(("subscribe", cg_id))
             return {"catchup": {"jobId": "fresh", "status": "queued"}}
+
+        def unsubscribe_context_graph(self, cg_id):
+            events.append(("unsubscribe", cg_id))
+            return {"unsubscribed": cg_id}
 
         def catchup_from_peer(self, cg_id, peer_id, *, budget_ms):
             events.append(("curator", cg_id, peer_id, budget_ms))
@@ -525,10 +610,14 @@ def test_blackbox_sync_uses_authoritative_publisher_for_empty_local_store(
     assert cli_mod._cmd_sync(args) == 0
     curator_events = [event for event in events if event[0] == "curator"]
     assert len(curator_events) == 2
-    assert not any(event[0] == "subscribe" for event in events)
+    assert events[0] == ("subscribe", constants.DEFAULT_CONTEXT_GRAPH_ID)
+    assert len([event for event in events if event[0] == "status"]) == 3
+    assert len([event for event in events if event[0] == "subscribe"]) == 2
+    assert len([event for event in events if event[0] == "unsubscribe"]) == 1
     assert curator_events[0][1] == constants.DEFAULT_GRAPH_METADATA_CONTEXT_GRAPH_ID
     assert curator_events[1][1] == constants.DEFAULT_CONTEXT_GRAPH_ID
-    assert len(refresh_calls) == 1
+    # One read evaluates the terminal regular result; one indexes fallback data.
+    assert len(refresh_calls) == 2
     assert "25,000 public VM" in capsys.readouterr().out
 
 
@@ -546,6 +635,9 @@ def test_blackbox_sync_fails_instead_of_waiting_on_empty_zero_insert_snapshot(
 
         def subscribe_context_graph(self, _cg_id):
             return {"catchup": {"jobId": "fresh", "status": "queued"}}
+
+        def unsubscribe_context_graph(self, cg_id):
+            return {"unsubscribed": cg_id}
 
         def catchup_from_peer(self, _cg_id, peer_id, *, budget_ms):
             return {
@@ -619,7 +711,7 @@ def test_required_release_sync_stops_after_one_non_discovery_connect_failure(
 
         def catchup_status(self, cg_id):
             events.append(("status", cg_id))
-            return {}
+            return {"jobId": "fresh", "status": "failed"}
 
         def connect_peer(self, peer_id):
             events.append(("connect", peer_id))
@@ -629,7 +721,10 @@ def test_required_release_sync_stops_after_one_non_discovery_connect_failure(
             raise AssertionError("catch-up must not run after connect failure")
 
         def subscribe_context_graph(self, *_args, **_kwargs):
-            raise AssertionError("required sync must not start a generic fan-out")
+            return {"catchup": {"jobId": "fresh", "status": "failed"}}
+
+        def unsubscribe_context_graph(self, cg_id):
+            return {"unsubscribed": cg_id}
 
     monkeypatch.setattr(cli_mod, "DkgClient", FakeClient)
     monkeypatch.setattr(
@@ -642,10 +737,25 @@ def test_required_release_sync_stops_after_one_non_discovery_connect_failure(
         ),
     )
 
+    class EmptyRuleset:
+        def counts(self):
+            return {
+                "injection": 0,
+                "escalation": 0,
+                "dependency": 0,
+                "fileaccess": 0,
+                "skill": 0,
+            }
+
+        def graph_count(self, _source):
+            return 0
+
+    monkeypatch.setattr(cli_mod.ruleset, "refresh", lambda *_args: EmptyRuleset())
+
     args = argparse.Namespace(wait=True, timeout=3_600, require_rules=True)
     assert cli_mod._cmd_sync(args) == 2
     assert len([event for event in events if event[0] == "connect"]) == 1
-    assert "Required verifiable graph sync could not start" in capsys.readouterr().out
+    assert "Required curator fallback recovery did not complete" in capsys.readouterr().out
 
 
 def test_authoritative_recovery_retries_fresh_node_peer_discovery(monkeypatch, capsys):
@@ -733,8 +843,6 @@ def test_blackbox_sync_does_not_accept_deferred_catchup_as_complete(
 
         def catchup_status(self, cg_id):
             status_calls.append(cg_id)
-            if len(status_calls) == 1:
-                return {"jobId": "old", "status": "done"}
             return {
                 "jobId": "fresh",
                 "status": "deferred",
@@ -743,6 +851,9 @@ def test_blackbox_sync_does_not_accept_deferred_catchup_as_complete(
 
         def subscribe_context_graph(self, cg_id):
             return {"catchup": {"jobId": "fresh", "status": "queued"}}
+
+        def unsubscribe_context_graph(self, cg_id):
+            return {"unsubscribed": cg_id}
 
         def catchup_from_peer(self, cg_id, peer_id, *, budget_ms):
             curator_calls.append((cg_id, peer_id, budget_ms))
@@ -798,9 +909,8 @@ def test_blackbox_sync_does_not_accept_deferred_catchup_as_complete(
     assert len(curator_calls) == 2
     assert curator_calls[0][0] == constants.DEFAULT_GRAPH_METADATA_CONTEXT_GRAPH_ID
     assert curator_calls[1][0] == constants.DEFAULT_CONTEXT_GRAPH_ID
-    # The release graph now takes the configured curator-first path and does
-    # not wait for a generic all-peer catch-up to become terminal.
-    assert len(status_calls) == 1
+    # Deferred is terminal, so the drain gate allows the curator fallback.
+    assert len(status_calls) == 3
     assert states[-1][0] == "done"
     assert any(
         status == "running"
@@ -852,7 +962,145 @@ def test_blackbox_sync_does_not_fall_back_to_generic_running_catchup(monkeypatch
 
     args = argparse.Namespace(wait=True, timeout=1, require_rules=True)
     assert cli_mod._cmd_sync(args) == 2
-    assert not status_calls
+    assert status_calls
+
+
+def test_fallback_drain_gate_blocks_a_new_regular_job(monkeypatch, capsys):
+    fallback_calls = []
+    states = []
+
+    class FakeClient:
+        def __init__(self, url, **_kwargs):
+            self.url = url
+
+        def subscribe_context_graph(self, _cg_id):
+            return {"catchup": {"jobId": "job-1", "status": "failed"}}
+
+        def catchup_status(self, _cg_id):
+            return {"jobId": "job-2", "status": "running"}
+
+        def catchup_from_peer(self, *_args, **_kwargs):
+            fallback_calls.append(True)
+            raise AssertionError("fallback must not cross an active regular drain gate")
+
+    class EmptyRuleset:
+        def counts(self):
+            return {
+                "injection": 0,
+                "escalation": 0,
+                "dependency": 0,
+                "fileaccess": 0,
+                "skill": 0,
+            }
+
+        def graph_count(self, _source):
+            return 0
+
+    monkeypatch.setattr(cli_mod, "DkgClient", FakeClient)
+    monkeypatch.setattr(
+        cli_mod,
+        "load_blackbox_config",
+        lambda: config_mod.BlackboxConfig(
+            context_graph_id=constants.DEFAULT_CONTEXT_GRAPH_ID,
+            dkg_url=constants.DEFAULT_DKG_URL,
+            graph_peer_id=constants.DEFAULT_GRAPH_PEER_ID,
+        ),
+    )
+    monkeypatch.setattr(cli_mod.ruleset, "refresh", lambda *_args: EmptyRuleset())
+    monkeypatch.setattr(
+        cli_mod.sync_state,
+        "write",
+        lambda status, **details: states.append((status, details)) or details,
+    )
+
+    result = cli_mod._cmd_sync_impl(
+        argparse.Namespace(wait=True, timeout=30, require_rules=True)
+    )
+
+    assert result == 2
+    assert fallback_calls == []
+    assert states[-1][0] == "failed"
+    assert states[-1][1]["phase"] == "fallback-drain-blocked"
+    assert "curator fallback was not started" in capsys.readouterr().out
+
+
+def test_paused_subscription_drains_race_winner_before_fallback(monkeypatch):
+    events = []
+    statuses = iter(["failed", "running", "failed"])
+    refreshes = {"count": 0}
+
+    class FakeClient:
+        def __init__(self, url, **_kwargs):
+            self.url = url
+
+        def subscribe_context_graph(self, cg_id):
+            events.append(("subscribe", cg_id))
+            return {"catchup": {"jobId": "job-1", "status": "failed"}}
+
+        def unsubscribe_context_graph(self, cg_id):
+            events.append(("unsubscribe", cg_id))
+            return {"unsubscribed": cg_id}
+
+        def catchup_status(self, _cg_id):
+            status = next(statuses)
+            events.append(("status", status))
+            return {"jobId": "job-1", "status": status}
+
+        def catchup_from_peer(self, *_args, **_kwargs):
+            raise AssertionError("the recovery helper is replaced in this test")
+
+    class FakeRuleset:
+        def __init__(self, public):
+            self.public = public
+
+        def counts(self):
+            return {
+                "injection": 0,
+                "escalation": 0,
+                "dependency": self.public,
+                "fileaccess": 0,
+                "skill": 0,
+            }
+
+        def graph_count(self, source):
+            return self.public if source == "public" else 0
+
+    def refresh(*_args):
+        refreshes["count"] += 1
+        return FakeRuleset(1 if refreshes["count"] > 1 else 0)
+
+    def fallback(*_args, **_kwargs):
+        events.append(("fallback",))
+        return True
+
+    monkeypatch.setattr(cli_mod, "DkgClient", FakeClient)
+    monkeypatch.setattr(cli_mod, "_catchup_authoritative_vm", fallback)
+    monkeypatch.setattr(cli_mod.ruleset, "refresh", refresh)
+    monkeypatch.setattr(cli_mod.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        cli_mod,
+        "load_blackbox_config",
+        lambda: config_mod.BlackboxConfig(
+            context_graph_id=constants.DEFAULT_CONTEXT_GRAPH_ID,
+            dkg_url=constants.DEFAULT_DKG_URL,
+            graph_peer_id=constants.DEFAULT_GRAPH_PEER_ID,
+        ),
+    )
+
+    result = cli_mod._cmd_sync_impl(
+        argparse.Namespace(wait=True, timeout=30, require_rules=True)
+    )
+
+    assert result == 0
+    assert events == [
+        ("subscribe", constants.DEFAULT_CONTEXT_GRAPH_ID),
+        ("status", "failed"),
+        ("unsubscribe", constants.DEFAULT_CONTEXT_GRAPH_ID),
+        ("status", "running"),
+        ("status", "failed"),
+        ("fallback",),
+        ("subscribe", constants.DEFAULT_CONTEXT_GRAPH_ID),
+    ]
 
 
 def test_authoritative_recovery_waits_for_dkg_backpressure(monkeypatch, capsys):
@@ -1163,10 +1411,16 @@ def test_blackbox_sync_ctrl_c_records_cancellation_and_returns_130(monkeypatch, 
             self.url = url
 
         def catchup_status(self, cg_id):
-            return {}
+            return {"jobId": "fresh", "status": "failed"}
 
         def subscribe_context_graph(self, cg_id):
-            return {}
+            return {"catchup": {"jobId": "fresh", "status": "failed"}}
+
+        def unsubscribe_context_graph(self, cg_id):
+            return {"unsubscribed": cg_id}
+
+        def connect_peer(self, _peer_id):
+            return {"connected": True}
 
         def catchup_from_peer(self, *_args, **_kwargs):
             raise KeyboardInterrupt()
@@ -1186,11 +1440,20 @@ def test_blackbox_sync_ctrl_c_records_cancellation_and_returns_130(monkeypatch, 
             graph_peer_id=constants.DEFAULT_GRAPH_PEER_ID,
         ),
     )
-    monkeypatch.setattr(
-        cli_mod.ruleset,
-        "refresh",
-        lambda _cfg, _client: (_ for _ in ()).throw(KeyboardInterrupt()),
-    )
+    class EmptyRuleset:
+        def counts(self):
+            return {
+                "injection": 0,
+                "escalation": 0,
+                "dependency": 0,
+                "fileaccess": 0,
+                "skill": 0,
+            }
+
+        def graph_count(self, _source):
+            return 0
+
+    monkeypatch.setattr(cli_mod.ruleset, "refresh", lambda _cfg, _client: EmptyRuleset())
     monkeypatch.setattr(cli_mod.sync_state, "write", write_state)
     monkeypatch.setattr(cli_mod.sync_state, "read", lambda: dict(state))
 
@@ -1253,8 +1516,6 @@ def test_blackbox_sync_does_not_accept_stale_public_rows_after_fresh_catchup_fai
     monkeypatch, capsys
 ):
     statuses = iter([
-        {"jobId": "old", "status": "done"},
-        {"jobId": "old", "status": "done"},
         {"jobId": "fresh", "status": "failed", "error": "protocol negotiation failed"},
     ])
 
@@ -1263,13 +1524,10 @@ def test_blackbox_sync_does_not_accept_stale_public_rows_after_fresh_catchup_fai
             self.url = url
 
         def subscribe_context_graph(self, cg_id):
-            return {"catchup": {"jobId": "old", "status": "done"}}
+            return {"catchup": {"jobId": "fresh", "status": "queued"}}
 
         def catchup_status(self, cg_id):
             return next(statuses)
-
-        def restart_context_graph_catchup(self, cg_id):
-            return {"catchup": {"status": "queued"}}
 
     class FakeRuleset:
         def counts(self):
@@ -1300,7 +1558,7 @@ def test_blackbox_sync_does_not_accept_stale_public_rows_after_fresh_catchup_fai
     args = argparse.Namespace(wait=True, timeout=30, require_rules=True)
     assert cli_mod._cmd_sync(args) == 2
     out = capsys.readouterr().out
-    assert "Required curator-pinned VM recovery is unavailable" in out
+    assert "curator fallback is unavailable" in out
 
 
 def test_blackbox_sync_uses_curator_when_generic_catchup_peer_fails(monkeypatch, capsys):
@@ -1320,6 +1578,9 @@ def test_blackbox_sync_uses_curator_when_generic_catchup_peer_fails(monkeypatch,
                 "status": "failed",
                 "error": "legacy peer protocol negotiation failed",
             }
+
+        def unsubscribe_context_graph(self, cg_id):
+            return {"unsubscribed": cg_id}
 
         def catchup_from_peer(self, cg_id, peer_id, *, budget_ms):
             events.append((cg_id, peer_id, budget_ms))
