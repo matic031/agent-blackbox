@@ -915,11 +915,7 @@ def _reset_for_tests() -> None:
     global _executor, _executor_max_workers
     with _executor_lock:
         if _executor is not None:
-            # Tests drain the shared completion queue immediately after this
-            # reset. Wait for already-running workers so a late completion from
-            # the previous test cannot cross that boundary and poison the next
-            # test with a stale event. Production shutdown remains non-blocking.
-            _executor.shutdown(wait=True)
+            _executor.shutdown(wait=False)
         _executor = None
         _executor_max_workers = 0
     with _records_lock:
