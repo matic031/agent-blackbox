@@ -1224,20 +1224,6 @@
     font-size: 13px;
     line-height: 1.65;
   }
-  .community-launch-now {
-    display: flex;
-    align-items: center;
-    gap: 9px;
-    margin-top: 24px;
-    padding-top: 17px;
-    border-top: 1px solid var(--border);
-    color: var(--muted-strong);
-    font-family: var(--mono-font);
-    font-size: 9px;
-    line-height: 1.5;
-    letter-spacing: 0.04em;
-  }
-  .community-launch-now svg { width: 15px; height: 15px; flex: 0 0 auto; color: var(--mint); }
   .community-launch-art {
     position: relative;
     min-width: 0;
@@ -2616,7 +2602,6 @@
     }
     .community-launch h3 { max-width: 100%; margin-top: 13px; font-size: clamp(24px, 7.2vw, 28px); }
     .community-launch-lede { font-size: 12px; line-height: 1.55; }
-    .community-launch-now { width: 100%; justify-content: center; margin-top: 16px; padding-top: 13px; }
     .community-launch-art { display: none; }
     .sync-progress-meta { gap: 8px; }
     .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
@@ -2831,10 +2816,6 @@
                 <div class="community-launch-eyebrow">Community graph · Coming soon</div>
                 <h3><span>One agent sees it.</span><span class="community-launch-title-accent">Every agent gets safer.</span></h3>
                 <p class="community-launch-lede">A shared layer of verified threat signals will help agents protect each other across the network.</p>
-                <div class="community-launch-now">
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="10" width="14" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg>
-                  Nothing is shared yet. Your findings and threat reports stay private.
-                </div>
               </div>
               <div class="community-launch-art" aria-hidden="true">
                 <svg class="community-network" viewBox="0 0 420 360">
@@ -2906,7 +2887,7 @@
           Threat sharing
         </div>
         <div class="value"><span class="stat-soon">Coming soon</span></div>
-        <div class="meta">findings and reports stay local</div>
+        <div class="meta">network distribution is in development</div>
       </div>
       </div>
     </section>
@@ -5605,11 +5586,11 @@
   // local-only sources, which never fold into public/candidate).
   var SRC_META = {
     public:    { label: "confirmed", tip: "Verifiable graph match, verified by Umanitek. Blockable in block mode." },
-    community: { label: "candidate", tip: "A locally recorded candidate from before community sharing was paused. It is not shared." },
-    heuristic: { label: "candidate", tip: "Built-in heuristic discovery — not in the verifiable graph. Local only and never shared." },
-    custom:    { label: "your rule", tip: "Matched one of your own protected paths. Local only — never shared." },
-    llm:       { label: "AI review", tip: "Flagged by the optional LLM injection reviewer. Local only — never blocks or shares." },
-    secret:    { label: "secret", tip: "Secret exposure caught locally. Never leaves your machine." }
+    community: { label: "candidate", tip: "A candidate awaiting community graph review." },
+    heuristic: { label: "candidate", tip: "Built-in heuristic discovery awaiting graph verification." },
+    custom:    { label: "your rule", tip: "Matched one of your own protected paths." },
+    llm:       { label: "AI review", tip: "Flagged by the optional LLM injection reviewer. Informational and never blocks." },
+    secret:    { label: "secret", tip: "Secret exposure detected by Blackbox." }
   };
   function srcKey(f) {
     var s = String(f.source || "").toLowerCase();
@@ -6703,7 +6684,7 @@
     bb.setAttribute("aria-pressed", block ? "true" : "false");
     $("set-mode-help").innerHTML = block
       ? "Stop confirmed threats at or above the chosen severity."
-      : "Log findings locally. Nothing is shared.";
+      : "Record findings without blocking agent actions.";
     // block-severity row is only meaningful in block mode
     var row = $("set-block-sev-row");
     row.style.display = block ? "" : "none";
@@ -7343,7 +7324,7 @@
       </div>
       <div class="set-htext">
         <div class="set-title" id="set-title">Blackbox settings</div>
-        <div class="set-sub">Changes stay on this machine.</div>
+        <div class="set-sub">Configure detection and enforcement.</div>
       </div>
     </div>
 
@@ -7381,7 +7362,7 @@
         <div class="set-row">
           <div class="set-rl">
             <div class="set-rt">Enforcement</div>
-            <div class="set-rh"><b id="set-mode-help">Log findings locally. Nothing is shared.</b></div>
+            <div class="set-rh"><b id="set-mode-help">Record findings without blocking agent actions.</b></div>
           </div>
           <div class="set-rc">
             <div class="set-seg" role="group" aria-label="Protection mode">
@@ -7428,7 +7409,7 @@
         <div class="set-row">
           <div class="set-rl">
             <div class="set-rt">Community sharing</div>
-            <div class="set-rh">Threat reports are not shared. Your findings stay private on this machine.</div>
+            <div class="set-rh">Network threat distribution is in development.</div>
           </div>
           <div class="set-rc">
             <span class="set-soon">Coming soon</span>

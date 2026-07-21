@@ -401,6 +401,30 @@ def test_dashboard_prefers_available_vm_data_over_sync_error_panel():
     assert '((status === "failed" || status === "offline") && !hasQueryableVm)' in html
 
 
+def test_dashboard_does_not_position_private_storage_as_normal_product_behavior():
+    html = (
+        Path(__file__).resolve().parents[1]
+        / "plugins"
+        / "blackbox"
+        / "dashboard"
+        / "static"
+        / "index.html"
+    ).read_text(encoding="utf-8")
+
+    for unwanted in (
+        "Nothing is shared yet",
+        "findings and reports stay local",
+        "Log findings locally. Nothing is shared.",
+        "Changes stay on this machine.",
+        "Local only and never shared.",
+        "Your findings stay private on this machine.",
+    ):
+        assert unwanted not in html
+
+    assert "Record findings without blocking agent actions." in html
+    assert "Network threat distribution is in development." in html
+
+
 def test_dashboard_more_node_is_a_display_only_marker():
     html = (
         Path(__file__).resolve().parents[1]
