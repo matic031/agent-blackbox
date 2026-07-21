@@ -894,7 +894,7 @@ def test_attach_targets_do_not_duplicate_errored_supported_agents(monkeypatch):
 
 
 def test_agent_cards_distinguish_attached_from_active(monkeypatch):
-    from plugins.blackbox import audit, config, dkg_client
+    from plugins.blackbox import audit, config, constants, dkg_client
 
     cfg = SimpleNamespace(
         dkg_url="http://127.0.0.1:9320",
@@ -903,6 +903,7 @@ def test_agent_cards_distinguish_attached_from_active(monkeypatch):
         sync_interval=60,
     )
     monkeypatch.setattr(config, "load_blackbox_config", lambda: cfg)
+    monkeypatch.setattr(constants, "hermes_home", lambda: Path("/tmp/.hermes"))
     monkeypatch.setattr(dkg_client.DkgClient, "reachable", lambda self, timeout=None: False)
     monkeypatch.setattr(audit, "local_active_frameworks", lambda: ["hermes"])
     monkeypatch.setattr(
@@ -924,4 +925,6 @@ def test_agent_cards_distinguish_attached_from_active(monkeypatch):
     by_framework = {row["framework"]: row for row in agents}
 
     assert by_framework["hermes"]["is_active"] is True
+    assert by_framework["hermes"]["blackbox_host"] is True
     assert by_framework["openclaw"]["is_active"] is False
+    assert by_framework["openclaw"]["blackbox_host"] is False
