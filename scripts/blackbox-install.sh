@@ -75,7 +75,7 @@ BLACKBOX_DKG_NODE_OPTIONS=""
 NODE_MAJOR="${BLACKBOX_NODE_MAJOR:-22}"
 BLACKBOX_CONTEXT_GRAPH_ID="${BLACKBOX_CONTEXT_GRAPH_ID:-0x37b1Fdfd134e2b17583bCBdD3034F91504cD9C70/agent-blackbox-vm}"
 BLACKBOX_GRAPH_PEER_ID="${BLACKBOX_GRAPH_PEER_ID:-12D3KooWBJskzr2unXQG9mR3LRZFUJoxWr1PN6hTbyWyKndHXjZM}"
-BLACKBOX_DKG_CATCHUP_TIMEOUT="${BLACKBOX_DKG_CATCHUP_TIMEOUT:-900}"
+BLACKBOX_DKG_CATCHUP_TIMEOUT="${BLACKBOX_DKG_CATCHUP_TIMEOUT:-3600}"
 BLACKBOX_LLM_PROVIDER="${BLACKBOX_LLM_PROVIDER:-}"
 BLACKBOX_LLM_MODEL="${BLACKBOX_LLM_MODEL:-}"
 BLACKBOX_LLM_KEY_SOURCE="${BLACKBOX_LLM_KEY_SOURCE:-}"
@@ -1481,9 +1481,9 @@ sync_ruleset() {
     else
         BLACKBOX_INSTALL_INCOMPLETE=true
         BLACKBOX_THREAT_GRAPH_INCOMPLETE=true
-        err "Initial threat-graph sync did not load any rules."
-        step "Blackbox is installed, but setup is incomplete until DKG returns a non-empty ruleset."
-        step "Retry after fixing DKG/catch-up with: blackbox sync --wait --require-rules"
+        err "Initial verified threat-graph sync did not complete."
+        step "A partial verified ruleset may already be active, but setup is incomplete until the curator snapshot settles."
+        step "Retry the full sync with: blackbox sync --wait --require-rules"
     fi
     if [ "$BLACKBOX_DKG_STEADY_DURABLE_SYNC_ENABLED" = "0" ]; then
         ok "DKG stabilized: controlled Blackbox auto-sync enabled; one in-flight slot; zero queue"

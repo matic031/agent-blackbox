@@ -85,7 +85,7 @@ $script:DkgNodeOptions = ""
 $NodeMajor   = if ($env:BLACKBOX_NODE_MAJOR)  { [int]$env:BLACKBOX_NODE_MAJOR } else { 22 }
 $ContextGraphId = if ($env:BLACKBOX_CONTEXT_GRAPH_ID) { $env:BLACKBOX_CONTEXT_GRAPH_ID } else { "0x37b1Fdfd134e2b17583bCBdD3034F91504cD9C70/agent-blackbox-vm" }
 $GraphPeerId = if ($env:BLACKBOX_GRAPH_PEER_ID) { $env:BLACKBOX_GRAPH_PEER_ID } else { "12D3KooWBJskzr2unXQG9mR3LRZFUJoxWr1PN6hTbyWyKndHXjZM" }
-$CatchupTimeout = if ($env:BLACKBOX_DKG_CATCHUP_TIMEOUT) { [int]$env:BLACKBOX_DKG_CATCHUP_TIMEOUT } else { 900 }
+$CatchupTimeout = if ($env:BLACKBOX_DKG_CATCHUP_TIMEOUT) { [int]$env:BLACKBOX_DKG_CATCHUP_TIMEOUT } else { 3600 }
 $script:InstallIncomplete = $false
 $script:DkgAlreadyRunning = $false
 $script:DkgFreshState = $false
@@ -1176,9 +1176,9 @@ function Sync-Ruleset {
         Write-Ok "Ruleset synced - Blackbox is watching with the latest threats"
     } else {
         $script:InstallIncomplete = $true
-        Write-Err2 "Initial threat-graph sync did not load any rules."
-        Write-Step "Blackbox is installed, but setup is incomplete until DKG returns a non-empty ruleset."
-        Write-Step "Retry after fixing DKG/catch-up with: blackbox sync --wait --require-rules"
+        Write-Err2 "Initial verified threat-graph sync did not complete."
+        Write-Step "A partial verified ruleset may already be active, but setup is incomplete until the curator snapshot settles."
+        Write-Step "Retry the full sync with: blackbox sync --wait --require-rules"
     }
     if ($DkgSteadyDurableSyncEnabled -eq "0") {
         Write-Ok "DKG stabilized: controlled Blackbox auto-sync enabled; one in-flight slot; zero queue"

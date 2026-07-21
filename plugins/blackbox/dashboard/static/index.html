@@ -3023,6 +3023,7 @@
   var activeTier = "public";
   var graphCache = { public: null, community: null, local: null };
   var graphLoadInFlight = { public: false, community: false };
+  var graphGeneration = { public: 0, community: 0 };
   var graphRevision = { public: 0, community: 0 };
   var graphSearchQuery = { public: "", community: "" };
   var graphSearchCache = { public: null, community: null };
@@ -3333,11 +3334,36 @@
     // pass is still running. Once graph status exposes real threats, discard
     // only that empty generation so the poll below fetches the first usable
     // page. Non-empty graph scenes remain stable throughout later sync passes.
+    resetGraphTierData(tier);
+    return true;
+  }
+
+  function rulesetVersion(status) {
+    if (!status) return null;
+    var value = status.last_sync != null ? status.last_sync : status.lastSync;
+    return value == null ? null : String(value);
+  }
+
+  function resetGraphTierData(tier) {
+    // Cancel the current client generation. Late responses are ignored by the
+    // token checks below, so an older graph page cannot overwrite a freshly
+    // materialized ruleset.
+    graphGeneration[tier] += 1;
+    graphLoadInFlight[tier] = false;
+    graphSearchInFlight[tier] = false;
+    graphFocusLoadInFlight[tier] = false;
     graphCache[tier] = null;
     graphSearchCache[tier] = null;
     graphRevision[tier] += 1;
     graphSearchRevision[tier] += 1;
     invalidateGraphTier(tier);
+  }
+
+  function resetGraphOnRulesetRefresh(tier, previousVersion) {
+    var currentVersion = rulesetVersion(lastStatus);
+    if (previousVersion == null || currentVersion == null) return false;
+    if (String(previousVersion) === String(currentVersion)) return false;
+    resetGraphTierData(tier);
     return true;
   }
 
@@ -3352,17 +3378,20 @@
 
   function loadGraphPage(tier) {
     if (graphLoadInFlight[tier] || !graphHasMore(tier)) return Promise.resolve(false);
-    graphLoadInFlight[tier] = true;
+    var requestToken = {};
+    var requestGeneration = graphGeneration[tier];
+    graphLoadInFlight[tier] = requestToken;
     var target = graphTotalForTier(tier);
     var loaded = graphLoaded(tier);
     var offset = target != null && target >= loaded ? loaded : 0;
     return getJSON(graphPageUrl(tier, offset)).then(function (page) {
+      if (graphLoadInFlight[tier] !== requestToken || graphGeneration[tier] !== requestGeneration) return false;
       mergeGraphPage(tier, page);
       graphLoadInFlight[tier] = false;
       if (tier === activeTier) renderGraphTab();
       return true;
     }, function (err) {
-      graphLoadInFlight[tier] = false;
+      if (graphLoadInFlight[tier] === requestToken) graphLoadInFlight[tier] = false;
       throw err;
     });
   }
@@ -3371,8 +3400,11 @@
     if (!focus || graphFocusLoadInFlight[tier]) return Promise.resolve(false);
     var current = graphCache[tier] ? asList(graphCache[tier]) : [];
     var offset = current.filter(function (t) { return graphMatchesFocus(t, focus); }).length;
-    graphFocusLoadInFlight[tier] = true;
+    var requestToken = {};
+    var requestGeneration = graphGeneration[tier];
+    graphFocusLoadInFlight[tier] = requestToken;
     return getJSON(graphFocusPageUrl(tier, focus, offset)).then(function (page) {
+      if (graphFocusLoadInFlight[tier] !== requestToken || graphGeneration[tier] !== requestGeneration) return false;
       var existing = graphCache[tier] || { tier: tier, threats: [], total: graphTotalForTier(tier) || 0 };
       var seen = {};
       var added = 0;
@@ -3392,7 +3424,7 @@
       }
       return added > 0;
     }, function (err) {
-      graphFocusLoadInFlight[tier] = false;
+      if (graphFocusLoadInFlight[tier] === requestToken) graphFocusLoadInFlight[tier] = false;
       throw err;
     });
   }
@@ -3424,11 +3456,14 @@
       renderGraphTab();
       return Promise.resolve(false);
     }
-    graphSearchInFlight[tier] = true;
+    var requestToken = {};
+    var requestGeneration = graphGeneration[tier];
+    graphSearchInFlight[tier] = requestToken;
     graphSearchCache[tier] = null;
     if (tier === activeTier) updateGraphControls(false, graphRenderMeta[tier]);
     var requested = query;
     return getJSON(graphPageUrl(tier, 0, query, GRAPH_SEARCH_LIMIT)).then(function (page) {
+      if (graphSearchInFlight[tier] !== requestToken || graphGeneration[tier] !== requestGeneration) return false;
       if (graphSearchQuery[tier] !== requested) return false;
       graphSearchCache[tier] = page;
       graphSearchRevision[tier] += 1;
@@ -3437,7 +3472,7 @@
       if (tier === activeTier) renderGraphTab();
       return true;
     }, function (err) {
-      if (graphSearchQuery[tier] === requested) graphSearchInFlight[tier] = false;
+      if (graphSearchInFlight[tier] === requestToken) graphSearchInFlight[tier] = false;
       throw err;
     });
   }
@@ -6119,8 +6154,10 @@
   function renderGraphStatus(data) {
     data = data || {};
     var previousPublicTotal = graphTotalForTier("public");
+    var previousRulesetVersion = rulesetVersion(lastStatus);
     lastStatus = data;
     resetEmptyGraphOnFirstVerifiedThreats("public", previousPublicTotal);
+    resetGraphOnRulesetRefresh("public", previousRulesetVersion);
     updateTierNote();
     var curated = data.curated_threats != null ? data.curated_threats
                 : data.curated != null ? data.curated
@@ -6181,7 +6218,11 @@
       if (res[3].status === "fulfilled") { localCache = res[3].value; anyGraph = true; }
 
       return Promise.allSettled([
-        loadGraphTier("public")
+        loadGraphTier("public").then(function (changed) {
+          var query = graphSearchQuery.public;
+          if (!query || graphSearchCache.public || graphSearchInFlight.public) return changed;
+          return searchGraphTier("public", query).then(function () { return true; });
+        })
       ]).then(function (graphRes) {
         if (graphRes.some(function (r) { return r.status === "fulfilled" && r.value; })) anyGraph = true;
         if (anyGraph) renderGraphTab();
