@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="./docs/agent-blackbox-hq.png" alt="Agent Blackbox" width="638">
+<img src="./docs/blackbox-header.gif" alt="Agent Blackbox" width="100%">
 
 **Stop dangerous AI agent actions before they happen.**
 
