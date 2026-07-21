@@ -26,6 +26,19 @@ CURATOR_SERVICE = REPO_ROOT / "scripts" / "blackbox-dkg-curator.service.conf"
 BLAZEGRAPH_URL = "http://127.0.0.1:9999/bigdata/namespace/test/sparql"
 
 
+def test_installers_default_catchup_timeout_to_900_seconds() -> None:
+    unix = INSTALL_SH.read_text(encoding="utf-8")
+    windows = INSTALL_PS1.read_text(encoding="utf-8")
+
+    assert 'BLACKBOX_DKG_CATCHUP_TIMEOUT="${BLACKBOX_DKG_CATCHUP_TIMEOUT:-900}"' in unix
+    assert (
+        '$CatchupTimeout = if ($env:BLACKBOX_DKG_CATCHUP_TIMEOUT) '
+        '{ [int]$env:BLACKBOX_DKG_CATCHUP_TIMEOUT } else { 900 }'
+    ) in windows
+    assert '"sync_interval": 3600' in unix
+    assert '"sync_interval": 3600' in windows
+
+
 def _extract_function_body(name: str) -> str:
     text = INSTALL_SH.read_text()
     match = re.search(
