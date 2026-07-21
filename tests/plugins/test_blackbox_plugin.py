@@ -1737,6 +1737,8 @@ def test_blackbox_chat_profile_writes_identity_and_attaches(tmp_path, monkeypatc
     assert "connected agents" in soul
     assert "http://127.0.0.1:9700" in soul  # dashboard API base
     assert "/api/agents" in soul            # connected-agents endpoint
+    assert "Before naming any threat" in soul
+    assert "never fill" in soul
     assert "Hermes default identity" in (profile_dir / "SOUL.md.before-blackbox-chat").read_text(
         encoding="utf-8"
     )

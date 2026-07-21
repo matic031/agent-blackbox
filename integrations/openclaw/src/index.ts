@@ -56,10 +56,10 @@ const FRAMEWORK = "openclaw" as const;
 
 /**
  * Idempotent-registration guard. OpenClaw has NO unsubscribe primitive, so a
- * second `register(api)` for the same plugin id must not double-wire hooks.
+ * second `register(api)` for the same host API must not double-wire hooks. A
+ * hot reload supplies a fresh API/registry and must register again.
  */
-const registeredApis = new WeakSet<object>();
-let registeredOnce = false;
+let registeredApis = new WeakSet<object>();
 
 interface BlackboxRuntime {
   cfg: BlackboxConfig;
@@ -621,7 +621,7 @@ function buildRuntime(api: OpenClawPluginApi): BlackboxRuntime {
 
 export function register(api: OpenClawPluginApi): void {
   // Idempotent guard: no unsubscribe primitive exists, so never double-wire.
-  if (registeredApis.has(api) || registeredOnce) {
+  if (registeredApis.has(api)) {
     try {
       (api.logger as unknown as { debug?: (m: string) => void })?.debug?.(
         "blackbox: register() called again; skipping duplicate hook wiring",
@@ -632,7 +632,6 @@ export function register(api: OpenClawPluginApi): void {
     return;
   }
   registeredApis.add(api);
-  registeredOnce = true;
 
   const rt = buildRuntime(api);
 
@@ -651,7 +650,7 @@ export function register(api: OpenClawPluginApi): void {
 
 /** For tests: reset the process-level idempotency latch. */
 export function __resetRegistrationGuardForTests(): void {
-  registeredOnce = false;
+  registeredApis = new WeakSet<object>();
 }
 
 export default definePluginEntry({

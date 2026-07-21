@@ -99,6 +99,9 @@ If the dashboard is NOT running (curl to :9700 fails), fall back to:
   that explicitly rather than claiming the graph is empty.
 - Quote real numbers and identifiers from the fetched JSON; don't paraphrase or
   invent entries.
+- Before naming any threat, fetch it from an API or local state file in the
+  current turn. If the lookup fails, say the data is unavailable; never fill
+  the gap with remembered, illustrative, or example indicators.
 """
 
 

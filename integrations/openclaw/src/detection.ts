@@ -774,6 +774,7 @@ const SKILL_TOOLS = new Set([
   "install_skill",
   "plugin_install",
   "install_plugin",
+  "skill_workshop",
 ]);
 const SKILL_NAME_KEYS = ["name", "skill", "skill_name", "id", "plugin"] as const;
 const SKILL_VERSION_KEYS = ["version", "skill_version", "ver"] as const;
@@ -808,10 +809,33 @@ export interface SkillInstall {
  */
 export function skillInstallArg(toolName: string, args: unknown): SkillInstall | null {
   const tool = (toolName || "").trim().toLowerCase();
+  if (isShellTool(tool)) {
+    const tokens = tokenizeShell(commandText(args));
+    for (let i = 0; i + 3 < tokens.length; i += 1) {
+      if (
+        tokens[i]?.toLowerCase() !== "openclaw" ||
+        tokens[i + 1]?.toLowerCase() !== "skills" ||
+        tokens[i + 2]?.toLowerCase() !== "install"
+      ) continue;
+      const name = tokens[i + 3] ?? "";
+      if (!name || name.startsWith("-")) return null;
+      let version = "";
+      for (let j = i + 4; j < tokens.length; j += 1) {
+        if (tokens[j] === "--version") version = tokens[j + 1] ?? "";
+        else if (tokens[j]?.startsWith("--version=")) version = tokens[j]!.slice(10);
+      }
+      return { name, version, code: "", permissions: "" };
+    }
+    return null;
+  }
   if (!SKILL_TOOLS.has(tool) || args == null || typeof args !== "object" || Array.isArray(args)) {
     return null;
   }
   const obj = args as Record<string, unknown>;
+  if (
+    tool === "skill_workshop" &&
+    !new Set(["create", "update", "revise"]).has(String(obj.action ?? "").toLowerCase())
+  ) return null;
   let name = "";
   for (const key of SKILL_NAME_KEYS) {
     const val = obj[key];
@@ -829,7 +853,7 @@ export function skillInstallArg(toolName: string, args: unknown): SkillInstall |
       break;
     }
   }
-  const code = SKILL_CODE_KEYS.filter((k) => obj[k])
+  const code = [...SKILL_CODE_KEYS, "proposal_content"].filter((k) => obj[k])
     .map((k) => stringify(obj[k]))
     .join(" ");
   const perms = SKILL_PERM_KEYS.filter((k) => obj[k])

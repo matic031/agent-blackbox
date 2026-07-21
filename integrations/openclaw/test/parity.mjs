@@ -12,7 +12,8 @@
  *
  * Exits non-zero on any mismatch.
  */
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
@@ -36,7 +37,8 @@ import {
   parseDownloads,
   parseShellReads,
 } from "../src/detection.ts";
-import { skillNameFromTitle } from "../src/ruleset.ts";
+import { __resetRegistrationGuardForTests, register } from "../src/index.ts";
+import { RulesetCache, skillNameFromTitle } from "../src/ruleset.ts";
 import { DkgClient } from "../src/dkgClient.ts";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -182,6 +184,35 @@ report("dependencyParses", ok, mismatches.join("\n"));
   );
 }
 
+// --- append-only VM correction precedence ---------------------------------
+{
+  const subject = "urn:defender:signal:bad-easy-day";
+  const correction = "urn:defender:correction:bad-easy-day";
+  const rdfType = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
+  const bindings = [
+    [subject, rdfType, "urn:defender:DependencySignal"],
+    [subject, "urn:defender:p:ecosystem", "npm"],
+    [subject, "urn:defender:p:package", "easy-day-js"],
+    [subject, "urn:defender:p:version", "1.11.21"],
+    [correction, rdfType, "urn:defender:CorrectionSignal"],
+    [correction, "urn:defender:p:targetSubject", subject],
+    [correction, "urn:defender:p:action", "suppress"],
+  ].map(([s, p, o]) => ({ s: { value: s }, p: { value: p }, o: { value: o } }));
+  const stateDir = mkdtempSync(join(tmpdir(), "blackbox-correction-parity-"));
+  try {
+    const client = { query: async () => ({ result: { bindings } }) };
+    const cache = new RulesetCache({ client, contextGraphId: "test", stateDir });
+    const rs = await cache.sync();
+    report(
+      "append-only VM correction suppresses exact subject",
+      Object.keys(rs.dependency).length === 0,
+      `dependencies=${JSON.stringify(rs.dependency)}`,
+    );
+  } finally {
+    rmSync(stateDir, { recursive: true, force: true });
+  }
+}
+
 // --- legacy versionless skill matching -----------------------------------
 {
   const rs = emptyRuleset();
@@ -210,6 +241,62 @@ report("dependencyParses", ok, mismatches.join("\n"));
       finding?.evidence.includes("was exploited in the past") &&
       finding?.evidence.includes("may be fixed in newer releases"),
     `findings=${JSON.stringify(findings)}`,
+  );
+}
+
+// --- native OpenClaw skill mutation paths ---------------------------------
+{
+  const rs = emptyRuleset();
+  rs.skill.push({
+    identifier: "skill:known-bad",
+    skillName: "known-bad",
+    skillVersion: "",
+    dangerShape: "",
+    severity: "critical",
+    name: "known-bad skill",
+    source: "public",
+  });
+  const shell = detectSkill(
+    "exec",
+    { command: "false && openclaw skills install 'known-bad' --version 1.2.3" },
+    rs,
+  );
+  const workshop = detectSkill(
+    "skill_workshop",
+    { action: "create", name: "known-bad", proposal_content: "Do the thing." },
+    rs,
+  );
+  const readOnly = detectSkill("skill_workshop", { action: "inspect", name: "known-bad" }, rs);
+  report(
+    "native OpenClaw skill mutation detection",
+    shell.some((f) => f.identifier === "skill:known-bad") &&
+      workshop.some((f) => f.identifier === "skill:known-bad") &&
+      readOnly.length === 0,
+    `shell=${JSON.stringify(shell)} workshop=${JSON.stringify(workshop)} readOnly=${JSON.stringify(readOnly)}`,
+  );
+}
+
+// --- registration survives a host hot reload ------------------------------
+{
+  const makeApi = () => {
+    const hooks = [];
+    return {
+      hooks,
+      pluginConfig: {},
+      logger: { debug() {}, info() {}, warn() {} },
+      on(name, handler, options) { hooks.push({ name, handler, options }); },
+    };
+  };
+  __resetRegistrationGuardForTests();
+  const first = makeApi();
+  const reloaded = makeApi();
+  register(first);
+  register(first);
+  register(reloaded);
+  report(
+    "OpenClaw hot-reload hook registration",
+    first.hooks.length === 6 && reloaded.hooks.length === 6,
+    `first=${first.hooks.length} reloaded=${reloaded.hooks.length}`,
   );
 }
 

@@ -67,6 +67,12 @@ export const BLACKBOX_CATEGORY_PRED = `${BLACKBOX_ONTOLOGY}category`;
 export const BLACKBOX_SKILL_NAME_PRED = `${BLACKBOX_ONTOLOGY}skillName`;
 export const BLACKBOX_SKILL_VERSION_PRED = `${BLACKBOX_ONTOLOGY}skillVersion`;
 export const BLACKBOX_DANGER_SHAPE_PRED = `${BLACKBOX_ONTOLOGY}dangerShape`;
+// Append-only VM correction vocabulary. Corrections suppress an exact RDF
+// subject without mutating the original published knowledge asset.
+export const DEFENDER_CORRECTION_TYPE_IRI = "urn:defender:CorrectionSignal";
+export const DEFENDER_CORRECTION_TARGET_PRED = "urn:defender:p:targetSubject";
+export const DEFENDER_CORRECTION_ACTION_PRED = "urn:defender:p:action";
+export const DEFENDER_CORRECTION_SUPPRESS = "suppress";
 export const IOC_TYPES = ["domain", "url", "ip", "hash", "wallet", "contract"] as const;
 
 const RDF_TYPE = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";

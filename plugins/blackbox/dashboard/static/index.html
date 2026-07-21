@@ -5604,15 +5604,71 @@
     return isNaN(t) ? 0 : t;
   }
 
-  function findingNotificationKey(f) {
+  function normalizedFindingText(value) {
+    return String(value || "").trim().replace(/\s+/g, " ").toLowerCase();
+  }
+
+  function findingLastUserText(f) {
+    var turns = f && f.context && Array.isArray(f.context.turns) ? f.context.turns : [];
+    for (var i = turns.length - 1; i >= 0; i--) {
+      if (turns[i] && turns[i].role === "user" && turns[i].text) return turns[i].text;
+    }
+    return "";
+  }
+
+  // A single agent turn can be flagged by more than one detector. Those raw
+  // findings remain in the audit log, but the live UI presents one row and one
+  // notification for the same visible threat. Agent/occurrence scope is part
+  // of the key, so an identical threat observed by another agent still shows.
+  function findingDisplayKey(f) {
     f = f || {};
-    return [
-      f.ts != null ? f.ts : (f.time || f.timestamp || ""),
-      f.identifier || "",
+    var agent = [
       f.framework || "",
-      f.event || "",
-      f.evidence || f.matched || f.title || ""
+      f.workspace || "",
+      f.agent_id || f.agentId || f.profile || ""
+    ].join("\u001e");
+    var occurrence = f.turn_id || f.turnId || f.task_id || f.taskId || "";
+    if (!occurrence) {
+      // Older adapters do not expose turn/task ids. Bound their fallback to
+      // the session, observed prompt, and timestamp second so later repeats
+      // are not hidden as duplicates.
+      occurrence = [
+        f.session_id || f.sessionId || "",
+        normalizedFindingText(findingLastUserText(f)),
+        Math.floor(findingTime(f) / 1000)
+      ].join("\u001e");
+    }
+    return [
+      agent,
+      occurrence,
+      catKey(f.category || f.type),
+      normalizedFindingText(f.evidence || f.matched || f.title || f.identifier || "")
     ].join("\u001f");
+  }
+
+  function findingRepresentativeRank(f) {
+    var sourceRank = { public: 6, custom: 5, community: 4, secret: 3, llm: 2, heuristic: 1 };
+    return (sourceRank[srcKey(f)] || 0) * 10 + (SEV_RANK[sevClass(f.severity)] || 0);
+  }
+
+  function dedupeFindings(list) {
+    var unique = [];
+    var indexByKey = new Map();
+    (list || []).forEach(function (f) {
+      var key = findingDisplayKey(f);
+      if (!indexByKey.has(key)) {
+        indexByKey.set(key, unique.length);
+        unique.push(f);
+        return;
+      }
+      var index = indexByKey.get(key);
+      if (findingRepresentativeRank(f) > findingRepresentativeRank(unique[index])) unique[index] = f;
+    });
+    return unique;
+  }
+
+  function findingNotificationKey(f) {
+    return findingDisplayKey(f);
   }
 
   function updateThreatNotificationUI() {
@@ -5719,7 +5775,7 @@
   }
 
   function processThreatNotifications(data) {
-    var list = asList(data);
+    var list = dedupeFindings(asList(data));
     var keys = list.map(findingNotificationKey);
     if (knownFindingKeys === null) {
       knownFindingKeys = new Set(keys);
@@ -6185,11 +6241,16 @@
   function renderFindings(data) {
     if (data !== undefined) findingsCache = data;   // cache latest fetch
     data = findingsCache;
-    var list = asList(data);
+    var rawList = asList(data);
+    var list = dedupeFindings(rawList);
     var total = (data && (data.total != null ? data.total : (data.open != null ? data.open : null)));
     var body = $("findings-body");
 
-    var openCount = (total != null) ? total : list.length;
+    // The backend total intentionally counts raw audit findings. Subtract the
+    // duplicates observed in the loaded window so the visible UI does not
+    // claim that two detector records are two separate threats.
+    var duplicateCount = rawList.length - list.length;
+    var openCount = (total != null) ? Math.max(list.length, total - duplicateCount) : list.length;
     $("stat-findings").textContent = num(openCount);
     var crit = 0;
     for (var i = 0; i < list.length; i++) {

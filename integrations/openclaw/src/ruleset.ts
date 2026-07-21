@@ -45,6 +45,10 @@ import {
   BLACKBOX_SKILL_NAME_PRED,
   BLACKBOX_SKILL_VERSION_PRED,
   BLACKBOX_TOOL_NAME_PRED,
+  DEFENDER_CORRECTION_ACTION_PRED,
+  DEFENDER_CORRECTION_SUPPRESS,
+  DEFENDER_CORRECTION_TARGET_PRED,
+  DEFENDER_CORRECTION_TYPE_IRI,
   SCHEMA_DESCRIPTION,
   SCHEMA_NAME,
   RDF_TYPE,
@@ -70,6 +74,7 @@ SELECT ?s ?p ?o WHERE {
     VALUES ?signalType {
       <${DEFENDER}DependencySignal> <${DEFENDER}InjectionSignal>
       <${DEFENDER}SkillSignal> <${DEFENDER}IocSignal>
+      <${DEFENDER_CORRECTION_TYPE_IRI}>
     }
   }
   ?s ?p ?o .
@@ -138,6 +143,9 @@ interface ThreatAccum {
   dangerShape?: string;
   // IOC
   iocValue?: string;
+  // append-only correction
+  targetSubject?: string;
+  correctionAction?: string;
 }
 
 /** Accumulate the s/p/o rows of one tier's response into per-subject threats. */
@@ -178,6 +186,8 @@ function collectThreats(resp: unknown): ThreatAccum[] {
       case BLACKBOX_SKILL_NAME_PRED: acc.skillName = o; break;
       case BLACKBOX_SKILL_VERSION_PRED: acc.skillVersion = o; break;
       case BLACKBOX_DANGER_SHAPE_PRED: acc.dangerShape = o; break;
+      case DEFENDER_CORRECTION_TARGET_PRED: acc.targetSubject = o; break;
+      case DEFENDER_CORRECTION_ACTION_PRED: acc.correctionAction = o; break;
       default: break;
     }
     bySubject.set(s, acc);
@@ -346,6 +356,19 @@ function accumToRule(acc: ThreatAccum, source: RuleSource): MappedRule | null {
 function buildRuleset(tiers: ReadonlyArray<readonly [ThreatAccum[], RuleSource]>): Ruleset {
   const ruleset = emptyRuleset();
   ruleset.fetchedAt = Date.now();
+  const suppressedSubjects = new Set<string>();
+  for (const [accums, source] of tiers) {
+    if (source !== "public") continue;
+    for (const acc of accums) {
+      if (
+        acc.rdfType === DEFENDER_CORRECTION_TYPE_IRI &&
+        acc.correctionAction?.trim().toLowerCase() === DEFENDER_CORRECTION_SUPPRESS &&
+        acc.targetSubject
+      ) {
+        suppressedSubjects.add(acc.targetSubject);
+      }
+    }
+  }
   const seen: Record<MappedRule["category"], Set<string>> = {
     injection: new Set(),
     escalation: new Set(),
@@ -356,6 +379,7 @@ function buildRuleset(tiers: ReadonlyArray<readonly [ThreatAccum[], RuleSource]>
   };
   for (const [accums, source] of tiers) {
     for (const acc of accums) {
+      if (acc.subject && suppressedSubjects.has(acc.subject)) continue;
       const mapped = accumToRule(acc, source);
       if (!mapped || seen[mapped.category].has(mapped.key)) continue;
       seen[mapped.category].add(mapped.key);

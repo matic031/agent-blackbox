@@ -32,7 +32,8 @@ logger = logging.getLogger(__name__)
 _SELECT_COLUMNS = """?threat ?rdfType ?identifier ?severity ?name ?description
        ?pattern ?toolName ?argShape ?packageName ?packageVersion
        ?packageEcosystem ?advisoryId ?curated ?category ?skillName
-       ?skillVersion ?dangerShape ?kind ?iocValue"""
+       ?skillVersion ?dangerShape ?kind ?iocValue ?targetSubject
+       ?correctionAction"""
 
 _LEGACY_THREATS_SELECT = f"""PREFIX g: <http://umanitek.ai/ontology/guardian/>
 PREFIX schema: <http://schema.org/>
@@ -136,6 +137,17 @@ WHERE {{
 ORDER BY ?threat
 """
 
+_DEFENDER_CORRECTION_SELECT = f"""{_DEFENDER_PREFIXES}
+SELECT DISTINCT {_SELECT_COLUMNS}
+WHERE {{
+    ?threat a defender:CorrectionSignal .
+    BIND(defender:CorrectionSignal AS ?rdfType)
+    ?threat dp:targetSubject ?targetSubject .
+    ?threat dp:action ?correctionAction .
+}}
+ORDER BY ?threat
+"""
+
 # Rows fetched per page when syncing a tier. One SPARQL round-trip each.
 _PAGE_SIZE = 5000
 # Safety ceiling so a misbehaving node can never spin the pager forever.
@@ -154,6 +166,7 @@ def _defender_threats_sparql(limit: int, offset: int) -> tuple:
         f"{_DEFENDER_INJECTION_SELECT}LIMIT {limit} OFFSET {offset}",
         f"{_DEFENDER_SKILL_SELECT}LIMIT {limit} OFFSET {offset}",
         f"{_DEFENDER_IOC_SELECT}LIMIT {limit} OFFSET {offset}",
+        f"{_DEFENDER_CORRECTION_SELECT}LIMIT {limit} OFFSET {offset}",
     )
 
 
@@ -521,11 +534,26 @@ def build_from_rows(rows: List[Dict[str, Any]], source: str = "public") -> Rules
     fa_seen: set = set()
     skill_seen: set = set()
     graph_seen: set = set()
+    tagged_rows = []
+    suppressed_subjects: set = set()
     for item in rows:
         if isinstance(item, tuple):
             row, row_source = item
         else:
             row, row_source = item, source
+        tagged_rows.append((row, row_source))
+        if row_source != "public":
+            continue
+        if extract_binding(row.get("rdfType")) != constants.DEFENDER_CORRECTION_TYPE_IRI:
+            continue
+        action = extract_binding(row.get("correctionAction")).strip().lower()
+        target = extract_binding(row.get("targetSubject")).strip()
+        if action == constants.DEFENDER_CORRECTION_SUPPRESS and target:
+            suppressed_subjects.add(target)
+
+    for row, row_source in tagged_rows:
+        if extract_binding(row.get("threat")) in suppressed_subjects:
+            continue
         graph_entry = _row_to_graph_entry(row, row_source)
         if graph_entry:
             graph_key = (row_source, graph_entry["identifier"])

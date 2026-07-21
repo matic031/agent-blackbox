@@ -143,8 +143,58 @@ def test_graph_schemas_are_queried_separately_and_merged():
     rows = ruleset_mod._fetch_tier(_Client(), "cg", "verifiable-memory")
 
     assert len(rows) == 2
-    assert len(queries) == 5
+    assert len(queries) == 6
     assert all("UNION" not in query for query in queries)
+
+
+def test_vm_correction_suppresses_exact_subject_from_detection_and_graph():
+    subject = "urn:defender:signal:bad-easy-day"
+    threat = {
+        "threat": subject,
+        "rdfType": "urn:defender:DependencySignal",
+        "packageEcosystem": "npm",
+        "packageName": "easy-day-js",
+        "packageVersion": "1.11.21",
+        "severity": "critical",
+        "name": "incorrect malicious version",
+    }
+    correction = {
+        "threat": "urn:defender:correction:easy-day-1-11-21",
+        "rdfType": "urn:defender:CorrectionSignal",
+        "targetSubject": subject,
+        "correctionAction": "suppress",
+    }
+
+    rs = ruleset_mod.build_from_rows([threat, correction], source="public")
+
+    assert rs.dependency == {}
+    assert rs.graph_entries("public") == []
+
+
+def test_only_public_monotonic_suppress_corrections_take_effect():
+    subject = "urn:defender:signal:known-threat"
+    threat = {
+        "threat": subject,
+        "rdfType": "urn:defender:DependencySignal",
+        "packageEcosystem": "npm",
+        "packageName": "known-threat",
+        "packageVersion": "1.0.0",
+    }
+    correction = {
+        "threat": "urn:defender:correction:not-authoritative",
+        "rdfType": "urn:defender:CorrectionSignal",
+        "targetSubject": subject,
+        "correctionAction": "suppress",
+    }
+    restore = {**correction, "correctionAction": "restore"}
+
+    community = ruleset_mod.build_from_rows(
+        [(threat, "public"), (correction, "community")]
+    )
+    unsupported = ruleset_mod.build_from_rows([threat, restore], source="public")
+
+    assert "npm:known-threat@1.0.0" in community.dependency
+    assert "npm:known-threat@1.0.0" in unsupported.dependency
 
 
 def test_graph_keeps_threat_with_invalid_detection_pattern():

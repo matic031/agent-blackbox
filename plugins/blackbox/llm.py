@@ -76,6 +76,20 @@ _SYSTEM_PROMPT = (
 # not become security alerts.
 _MIN_INJECTION_CONFIDENCE = 0.90
 
+# Package-manager commands are ordinary first-party requests. Do not let a
+# classifier turn them into injection alerts unless the text also contains an
+# actual authority-override, jailbreak, or exfiltration cue.
+_PACKAGE_COMMAND_RE = re.compile(
+    r"\b(?:npm\s+(?:install|i|add)|pnpm\s+add|yarn\s+add|bun\s+add|"
+    r"(?:python(?:3)?\s+-m\s+)?pip3?\s+install|uv\s+(?:pip\s+install|add))\b",
+    re.IGNORECASE,
+)
+_INJECTION_CUE_RE = re.compile(
+    r"\b(?:ignore|forget|disregard|override|bypass)\b[\s\S]{0,80}\b(?:instructions?|rules?|system|developer)\b|"
+    r"\b(?:jailbreak|developer\s+mode|system\s+prompt|prompt\s+injection|exfiltrat(?:e|ion)|steal|leak)\b",
+    re.IGNORECASE,
+)
+
 
 def default_model(provider: str) -> str:
     """Return the recommended default model id for *provider* (``""`` if unknown)."""
@@ -102,6 +116,8 @@ def review_injection(text: str, cfg: Any) -> Optional[Dict[str, Any]]:
     caller can treat truthiness as "the LLM raised a finding". Never raises.
     """
     if not text or not available(cfg):
+        return None
+    if _PACKAGE_COMMAND_RE.search(text) and not _INJECTION_CUE_RE.search(text):
         return None
     # Redact BEFORE truncating: a secret straddling the cutoff must not survive
     # as a partial. Redact a small margin past the cap, then truncate.
