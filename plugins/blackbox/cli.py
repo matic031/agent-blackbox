@@ -650,6 +650,19 @@ def _terminal_sync_details(state: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _last_sync_counts() -> tuple[int, int]:
+    previous = sync_state.read()
+    try:
+        public = max(0, int(previous.get("public_entries") or 0))
+    except (TypeError, ValueError):
+        public = 0
+    try:
+        community = max(0, int(previous.get("community_entries") or 0))
+    except (TypeError, ValueError):
+        community = 0
+    return public, community
+
+
 def _cmd_sync_in_managed_window(cfg: BlackboxConfig, args: argparse.Namespace) -> int:
     """Run one durable catch-up, restoring stabilized settings before completion."""
     with _managed_sync_lock() as acquired:
@@ -657,13 +670,14 @@ def _cmd_sync_in_managed_window(cfg: BlackboxConfig, args: argparse.Namespace) -
             print("Blackbox sync is already running; no second transfer was queued.")
             return 0
 
+        known_public, known_community = _last_sync_counts()
         sync_state.write(
             "running",
             context_graph_id=cfg.context_graph_id,
             graph_peer_id=cfg.graph_peer_id,
             phase="preparing-sync-window",
-            public_entries=0,
-            community_entries=0,
+            public_entries=known_public,
+            community_entries=known_community,
         )
         terminal_state: Dict[str, Any] = {}
         result = 2
@@ -741,13 +755,14 @@ def _cmd_sync_impl(args: argparse.Namespace) -> int:
     track_sync = bool(managed_graph and getattr(args, "wait", False))
 
     if track_sync:
+        known_public, known_community = _last_sync_counts()
         sync_state.write(
             "running",
             context_graph_id=cfg.context_graph_id,
             graph_peer_id=cfg.graph_peer_id,
             phase="joining" if private_graph else "network-catchup",
-            public_entries=0,
-            community_entries=0,
+            public_entries=known_public,
+            community_entries=known_community,
         )
 
     agent_address = ""

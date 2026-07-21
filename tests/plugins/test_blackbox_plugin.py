@@ -114,7 +114,11 @@ def test_managed_sync_uses_temporary_durable_window_and_restores_steady_state(
         dkg_bin=str(dkg_bin),
     )
     states = []
-    current = {}
+    current = {
+        "status": "done",
+        "public_entries": 17_000,
+        "community_entries": 0,
+    }
     restarts = []
 
     def write_state(status, **details):
@@ -149,6 +153,7 @@ def test_managed_sync_uses_temporary_durable_window_and_restores_steady_state(
         "restoring-steady-state",
         "complete",
     ]
+    assert states[0]["public_entries"] == 17_000
     persisted = json.loads((dkg_home / "config.json").read_text(encoding="utf-8"))
     assert persisted["syncOnConnectEnabled"] is False
     assert persisted["syncReconcilerEnabled"] is False
