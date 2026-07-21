@@ -59,7 +59,7 @@ def test_blackbox_host_hermes_has_a_distinct_agent_name():
         encoding="utf-8"
     )
 
-    assert 'isBlackboxHermes ? "Agent Blackbox Hermes Agent" : fwLabel(a.framework)' in html
+    assert 'isBlackboxHermes ? "Blackbox Hermes Agent" : fwLabel(a.framework)' in html
     assert "(a.blackbox_host || a.dashboard_managed)" in html
     assert 'a.dashboard_managed\n        ? "blackbox"' in html
     assert 'isBlackboxHermes ? "Hermes agent hosting Agent Blackbox"' in html
@@ -441,6 +441,81 @@ def test_dashboard_sync_copy_and_last_sync_guard_match_runtime_contract():
     assert "take up to 2 hours" not in html
     assert "Verification continues after the download completes." in html
     assert "lastSyncMs != null && lastSyncMs > 0" in html
+
+
+def test_blackbox_health_uses_live_snapshot_progress_without_remote_count():
+    below = server._blackbox_sync_health(
+        public=338_000,
+        sync_interval=3_600,
+        activity={"status": "running", "percent": 79.9},
+        transfer={"status": "running"},
+        now=10_000,
+    )
+    ready = server._blackbox_sync_health(
+        public=338_000,
+        sync_interval=3_600,
+        activity={"status": "running", "percent": 80.0},
+        transfer={"status": "running"},
+        now=10_000,
+    )
+
+    assert below["out_of_sync"] is True
+    assert below["reason"] == "sync-progress"
+    assert ready["out_of_sync"] is False
+
+
+def test_blackbox_health_warns_after_two_missed_sync_cycles():
+    fresh = server._blackbox_sync_health(
+        public=338_000,
+        sync_interval=3_600,
+        activity={"status": "ready", "percent": 100.0},
+        transfer={"status": "done", "updated_at": 10_000},
+        now=17_200,
+    )
+    overdue = server._blackbox_sync_health(
+        public=338_000,
+        sync_interval=3_600,
+        activity={"status": "ready", "percent": 100.0},
+        transfer={"status": "done", "updated_at": 10_000},
+        now=17_201,
+    )
+
+    assert fresh["out_of_sync"] is False
+    assert overdue["out_of_sync"] is True
+    assert overdue["reason"] == "last-success-overdue"
+
+
+def test_blackbox_health_surfaces_failed_and_first_sync_states():
+    failed = server._blackbox_sync_health(
+        public=338_000,
+        sync_interval=3_600,
+        activity={"status": "failed", "percent": None},
+        transfer={"status": "failed"},
+        now=10_000,
+    )
+    empty = server._blackbox_sync_health(
+        public=0,
+        sync_interval=3_600,
+        activity={"status": "idle", "percent": None},
+        transfer={},
+        now=10_000,
+    )
+
+    assert failed["reason"] == "last-sync-failed"
+    assert failed["out_of_sync"] is True
+    assert empty["reason"] == "no-local-threats"
+    assert empty["out_of_sync"] is True
+
+
+def test_dashboard_blackbox_warning_reuses_the_existing_graph_refresh():
+    html = (Path(server.__file__).with_name("static") / "index.html").read_text(
+        encoding="utf-8"
+    )
+
+    assert 'id="blackbox-sync-alert"' in html
+    assert "function renderBlackboxSyncHealth()" in html
+    assert 'graphRefreshBtn.addEventListener("click", refreshGraphs)' in html
+    assert html.count('addEventListener("click", refreshGraphs)') == 1
 
 
 def test_sync_activity_keeps_atomic_catchup_indeterminate():

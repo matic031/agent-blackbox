@@ -986,6 +986,41 @@
   }
   .sync-progress.failed .sync-progress-bar,
   .sync-progress.offline .sync-progress-bar { background: var(--signal); }
+  .blackbox-sync-alert {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    align-items: center;
+    gap: 12px;
+    padding: 12px 14px;
+    border-bottom: 1px solid color-mix(in srgb, var(--signal) 36%, var(--border));
+    background: var(--signal-soft);
+  }
+  .blackbox-sync-alert[hidden] { display: none; }
+  .blackbox-sync-icon {
+    width: 30px;
+    height: 30px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--signal);
+    border: 1px solid color-mix(in srgb, var(--signal) 42%, transparent);
+    border-radius: 2px;
+  }
+  .blackbox-sync-icon svg { width: 17px; height: 17px; }
+  .blackbox-sync-copy { min-width: 0; }
+  .blackbox-sync-title {
+    display: block;
+    color: var(--text);
+    font-size: 12px;
+    font-weight: 700;
+  }
+  .blackbox-sync-detail {
+    display: block;
+    margin-top: 3px;
+    color: var(--muted);
+    font-size: 10px;
+    line-height: 1.45;
+  }
   @keyframes bb-sync-slide {
     0% { transform: translateX(-110%); }
     100% { transform: translateX(300%); }
@@ -2783,6 +2818,15 @@
         </div>
       </div>
       <div class="panel" id="graph-panel">
+        <div class="blackbox-sync-alert" id="blackbox-sync-alert" role="status" aria-live="polite" hidden>
+          <span class="blackbox-sync-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="M12 8v5M12 17h.01"/></svg>
+          </span>
+          <span class="blackbox-sync-copy">
+            <span class="blackbox-sync-title" id="blackbox-sync-title">Agent Blackbox is out of sync</span>
+            <span class="blackbox-sync-detail" id="blackbox-sync-detail"></span>
+          </span>
+        </div>
         <div class="sync-progress indeterminate" id="sync-progress" aria-live="polite" hidden>
           <div class="sync-progress-head">
             <span class="sync-progress-title"><span class="bb-loader" id="sync-progress-loader"></span><span id="sync-progress-title">Syncing threat graph</span></span>
@@ -3256,7 +3300,14 @@
     $("sync-progress-detail").textContent = activity.detail || "Graph sync is active.";
     $("sync-progress-expectation").hidden = !(status === "running" || status === "waiting");
     var loader = $("sync-progress-loader");
-    if (loader) loader.style.display = (status === "running" || status === "waiting") ? "" : "none";
+    // A stale backend can briefly report a determinate 100% while switching
+    // durable-sync passes. Do not leave the transfer spinner running in that
+    // contradictory state. Legitimate verification/finalization is explicitly
+    // indeterminate, so it continues to show activity until the backend is ready.
+    var showLoader = (status === "running" || status === "waiting") && (
+      indeterminate || activity.percent == null || Number(activity.percent) < 100
+    );
+    if (loader) loader.style.display = showLoader ? "" : "none";
 
     var percent = Number(activity.percent);
     var percentText = "";
@@ -3277,6 +3328,35 @@
     var elapsed = started == null ? null : Math.max(0, Math.floor((Date.now() - started) / 1000));
     $("sync-progress-elapsed").textContent = elapsed == null ? "" : fmtElapsedSeconds(elapsed) + " elapsed";
     $("sync-progress-updated").textContent = activity.updated_at == null ? "" : "Status updated " + fmtAgo(activity.updated_at);
+  }
+
+  function renderBlackboxSyncHealth() {
+    var alert = $("blackbox-sync-alert");
+    if (!alert) return;
+    var progress = lastStatus && lastStatus.sync_progress;
+    var health = progress && progress.blackbox;
+    var visible = activeTier === "public" && !!(health && health.out_of_sync);
+    alert.hidden = !visible;
+    if (!visible) return;
+
+    var reason = String(health.reason || "");
+    var percent = Number(health.coverage_percent);
+    var threshold = Number(health.ready_percent || 80);
+    var title = "Agent Blackbox is out of sync";
+    var detail = "Refresh the graph to check for the latest verified threats.";
+    if (reason === "sync-progress" && isFinite(percent)) {
+      detail = percent.toFixed(percent % 1 ? 1 : 0) + "% of the latest verified snapshot is received. " +
+        "Protection is ready once it reaches " + threshold.toFixed(0) + "% while the remaining update continues.";
+    } else if (reason === "last-sync-failed") {
+      detail = "The last graph update did not complete. Your existing verified protection remains active.";
+    } else if (reason === "last-success-overdue") {
+      detail = "The last successful graph update is overdue. Refresh the graph to check for the latest verified threats.";
+    } else if (reason === "no-local-threats") {
+      title = "Agent Blackbox needs its first graph sync";
+      detail = "Sync verified threats before relying on graph-backed detection.";
+    }
+    $("blackbox-sync-title").textContent = title;
+    $("blackbox-sync-detail").textContent = detail;
   }
 
   function updateTierNote() {
@@ -3637,7 +3717,7 @@
       var isActive = !!a.is_active;
       var isBlackboxHermes = String(a.framework || "").toLowerCase() === "hermes" &&
         (a.blackbox_host || a.dashboard_managed);
-      var agentName = isBlackboxHermes ? "Agent Blackbox Hermes Agent" : fwLabel(a.framework);
+      var agentName = isBlackboxHermes ? "Blackbox Hermes Agent" : fwLabel(a.framework);
       var reports = Number(a.reports) || 0;
       var reportsHtml = SHOW_AGENT_REPORTS
         ? '<div class="agent-reports"><strong>' + num(reports) + '</strong> report' + (reports === 1 ? '' : 's') + '</div>'
@@ -3772,11 +3852,12 @@
   var graphRefreshBusy = false;
   function renderGraphRefreshState(syncActive) {
     var btn = $("graph-refresh");
-    if (!btn) return;
     var busy = graphRefreshBusy || !!syncActive;
-    btn.classList.toggle("spinning", busy);
-    btn.disabled = busy;
-    btn.setAttribute("aria-busy", busy ? "true" : "false");
+    if (btn) {
+      btn.classList.toggle("spinning", busy);
+      btn.disabled = busy;
+      btn.setAttribute("aria-busy", busy ? "true" : "false");
+    }
   }
   function refreshGraphs() {
     if (graphRefreshBusy) return;
@@ -6360,6 +6441,7 @@
     resetEmptyGraphOnFirstVerifiedThreats("public", previousPublicTotal);
     resetGraphOnRulesetRefresh("public", previousRulesetVersion);
     updateTierNote();
+    renderBlackboxSyncHealth();
     var curated = data.curated_threats != null ? data.curated_threats
                 : data.curated != null ? data.curated
                 : data.threats;

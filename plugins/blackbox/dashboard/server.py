@@ -40,6 +40,8 @@ _RULESET_MIN_RETRY_SEC = 5.0
 # can take several minutes and saturate Blazegraph, so never repeat it on the
 # dashboard's short status-poll interval. Manual sync remains available.
 _RULESET_HEAVY_REFRESH_MIN_SEC = 15 * 60.0
+_BLACKBOX_READY_PERCENT = 80.0
+_BLACKBOX_MIN_OVERDUE_SEC = 10 * 60.0
 _BLACKBOX_PROFILE = "agent-blackbox"
 _BLACKBOX_RUNTIME_HOST = "127.0.0.1"
 _BLACKBOX_RUNTIME_PORT = 9121
@@ -613,6 +615,87 @@ def _sync_activity(
             detail="The DKG node is online and will retry graph catch-up automatically.",
         )
     return progress
+
+
+def _blackbox_sync_health(
+    *,
+    public: int,
+    sync_interval: Any,
+    activity: Dict[str, Any],
+    transfer: Dict[str, Any],
+    now: Any = None,
+) -> Dict[str, Any]:
+    """Describe whether Agent Blackbox needs a graph update.
+
+    The DKG has no lightweight remote threat-count endpoint, so an idle node
+    cannot honestly claim an exact percentage of the curator graph. During a
+    transfer we can use the verified snapshot manifest progress; while idle we
+    use the authoritative cross-process result and its age.
+    """
+    current_time = float(time.time() if now is None else now)
+    interval = max(1.0, float(sync_interval or 1.0))
+    overdue_after = max(_BLACKBOX_MIN_OVERDUE_SEC, interval * 2.0)
+    activity_status = str(activity.get("status") or "idle").lower()
+    transfer_status = str(transfer.get("status") or "").lower()
+    raw_percent = activity.get("percent")
+    try:
+        percent = float(raw_percent) if raw_percent is not None else None
+    except (TypeError, ValueError):
+        percent = None
+
+    base: Dict[str, Any] = {
+        "out_of_sync": False,
+        "state": "ready",
+        "reason": "fresh",
+        "coverage_percent": percent,
+        "ready_percent": _BLACKBOX_READY_PERCENT,
+        "overdue_after_seconds": int(overdue_after),
+        "last_success_at": (
+            transfer.get("updated_at") if transfer_status == "done" else None
+        ),
+    }
+
+    if activity_status in {"running", "waiting"}:
+        below_threshold = percent is not None and percent < _BLACKBOX_READY_PERCENT
+        no_protection_yet = int(public or 0) <= 0
+        return {
+            **base,
+            "out_of_sync": bool(below_threshold or no_protection_yet),
+            "state": "updating",
+            "reason": "sync-progress",
+        }
+
+    if int(public or 0) <= 0:
+        return {
+            **base,
+            "out_of_sync": True,
+            "state": "needs-update",
+            "reason": "no-local-threats",
+        }
+
+    if transfer_status == "failed" or activity_status == "failed":
+        return {
+            **base,
+            "out_of_sync": True,
+            "state": "update-failed",
+            "reason": "last-sync-failed",
+        }
+
+    last_success = base["last_success_at"]
+    if last_success is not None:
+        try:
+            age = max(0.0, current_time - float(last_success))
+        except (TypeError, ValueError):
+            age = 0.0
+        if age > overdue_after:
+            return {
+                **base,
+                "out_of_sync": True,
+                "state": "overdue",
+                "reason": "last-success-overdue",
+            }
+
+    return base
 
 
 def _workspace_key(value: Any) -> str:
@@ -1321,6 +1404,12 @@ def create_app(*, manage_blackbox: bool = False):
             connection=connection,
             transfer=authoritative_sync,
         )
+        blackbox_health = _blackbox_sync_health(
+            public=public,
+            sync_interval=cfg.sync_interval,
+            activity=activity,
+            transfer=authoritative_sync,
+        )
         if activity["status"] in {"running", "waiting"}:
             if public_state == "empty":
                 public_state = "syncing"
@@ -1376,6 +1465,7 @@ def create_app(*, manage_blackbox: bool = False):
                 },
                 "authoritative": authoritative_sync,
                 "activity": activity,
+                "blackbox": blackbox_health,
                 "ruleset_total": total_rules,
                 "age_seconds": max(0, int(time.time() - float(rs.synced_at or 0))) if rs.synced_at else None,
             },
