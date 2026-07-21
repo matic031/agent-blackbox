@@ -341,6 +341,27 @@ def test_dashboard_graph_expands_explicitly_and_keeps_scene_state():
     assert 'magnitude.toLocaleString() + " THREAT"' in html
 
 
+def test_dashboard_more_node_is_a_display_only_marker():
+    html = (
+        Path(__file__).resolve().parents[1]
+        / "plugins"
+        / "blackbox"
+        / "dashboard"
+        / "static"
+        / "index.html"
+    ).read_text(encoding="utf-8")
+
+    click_handler = html[html.index("function onNodeClick(node)"):]
+    click_handler = click_handler[:click_handler.index("\n  function graphClickableNode")]
+    clickable = html[html.index("function graphClickableNode(node)"):]
+    clickable = clickable[:clickable.index("\n  function graphPriorityClickNode")]
+
+    assert 'if (node.kind === "more") return;' in click_handler
+    assert "openSessionModal(node.session)" not in click_handler
+    assert 'node.kind === "more"' not in clickable
+    assert "click to see the whole session" not in html
+
+
 def test_dashboard_refetches_empty_graph_when_first_verified_threats_arrive():
     html = (
         Path(__file__).resolve().parents[1]

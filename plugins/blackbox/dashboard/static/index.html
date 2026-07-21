@@ -4180,8 +4180,9 @@
       });
       if (acts.length > CAP) {
         var moreId = sid + ":more";
-        // Clicking "+N more" opens the parent session's full detail.
-        nodes.push({ id: moreId, kind: "more", label: "+" + (acts.length - CAP) + " more", color: LABEL_MUTED, val: 4, session: sessionNode });
+        // Display-only truncation marker. Session details remain available from
+        // the parent session node without making this synthetic node modal-like.
+        nodes.push({ id: moreId, kind: "more", label: "+" + (acts.length - CAP) + " more", color: LABEL_MUTED, val: 4 });
         links.push({ source: moreId, target: prev, kind: "step" });
       }
 
@@ -4530,7 +4531,7 @@
     }
       if (node.kind === "more") {
         return '<div class="graph-tip"><div class="t-name">' + esc(node.label) + '</div>' +
-          '<div class="t-cat">click to see the whole session</div></div>';
+          '<div class="t-cat">additional calls hidden</div></div>';
       }
       if (node.kind === "gmore") {
         return '<div class="graph-tip"><div class="t-name">' + esc(node.label) + '</div>' +
@@ -5048,6 +5049,7 @@
   function onNodeClick(node) {
     if (!node) return;
     graphLastNodeClickAt = Date.now();
+    if (node.kind === "more") return;
     // Every local node opens a real detail panel; catalog leaves use the threat
     // modal; the machine root just reframes the whole graph.
     if (node.kind === "lthreat") { if (node.finding) openFindingModal(node.finding); return; }
@@ -5068,7 +5070,6 @@
     }
     if (node.kind === "session") { openSessionModal(node); return; }
     if (node.kind === "call") { openCallModal(node); return; }
-    if (node.kind === "more" && node.session) { openSessionModal(node.session); return; }
     if (fg && typeof node.x === "number") {          // center/hub: frame it
       try { fg.centerAt(node.x, node.y, 500); fg.zoom(node.kind === "center" ? 1.4 : 2.4, 500); } catch (e) {}
     }
@@ -5077,14 +5078,13 @@
   function graphClickableNode(node) {
     return node && (
       node.kind === "hub" || node.kind === "gmore" || node.kind === "leaf" ||
-      node.kind === "lthreat" || node.kind === "session" || node.kind === "call" ||
-      node.kind === "more"
+      node.kind === "lthreat" || node.kind === "session" || node.kind === "call"
     );
   }
   function graphPriorityClickNode(node) {
     return node && (
       node.kind === "hub" || node.kind === "gmore" || node.kind === "session" ||
-      node.kind === "call" || node.kind === "more"
+      node.kind === "call"
     );
   }
 
