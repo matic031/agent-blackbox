@@ -152,7 +152,8 @@ def _graph_source_count(rs: Any, source: str) -> int:
 def _graph_entries(rs: Any, source: str) -> List[Dict[str, Any]]:
     getter = getattr(rs, "graph_entries", None)
     if callable(getter):
-        return list(getter(source) or [])
+        entries = getter(source) or []
+        return entries if isinstance(entries, list) else list(entries)
     return [
         {
             "identifier": rule.get("identifier"),

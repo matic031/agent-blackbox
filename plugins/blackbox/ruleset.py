@@ -35,10 +35,132 @@ _SELECT_COLUMNS = """?threat ?rdfType ?identifier ?severity ?name ?description
        ?skillVersion ?dangerShape ?kind ?iocValue ?targetSubject
        ?correctionAction"""
 
-_LEGACY_THREATS_SELECT = f"""PREFIX g: <http://umanitek.ai/ontology/guardian/>
+_DEFENDER_PREFIXES = """PREFIX defender: <urn:defender:>
+PREFIX dp: <urn:defender:p:>
+PREFIX schema: <http://schema.org/>
+"""
+
+# Rows fetched per page when syncing a tier. One SPARQL round-trip each.
+_PAGE_SIZE = 5000
+# Safety ceiling so a misbehaving node can never spin the pager forever.
+_MAX_ROWS = 1_000_000
+# Public VM snapshots are stored in bounded, confirmed named graphs. Querying
+# five partitions at a time keeps Blazegraph responses comfortably below the
+# client timeout while avoiding the expensive all-VM deduplication rewrite.
+_VM_PARTITION_BATCH_SIZE = 5
+_VM_PARTITION_QUERY_LIMIT = 50_000
+_VM_PARTITION_QUERY_TIMEOUT = 120.0
+_FORBIDDEN_IRI_CHARS = frozenset('<>"{}|^`\\\r\n\t')
+
+
+def _threat_cursor_filter(after: str) -> str:
+    if not after:
+        return ""
+    return f"FILTER(STR(?threat) > {json.dumps(after, ensure_ascii=True)})"
+
+
+def _defender_page_sparql(
+    signal_type: str,
+    properties: str,
+    limit: int,
+    after: str,
+) -> str:
+    cursor_filter = _threat_cursor_filter(after)
+    return f"""{_DEFENDER_PREFIXES}
+SELECT DISTINCT ?threat ?rdfType ?identifier ?severity ?name ?description
+       ?pattern ?toolName ?argShape ?packageName ?packageVersion
+       ?packageEcosystem ?advisoryId ?curated ?category ?skillName
+       ?skillVersion ?dangerShape ?kind ?iocValue ?targetSubject
+       ?correctionAction
+WHERE {{
+    {{
+        SELECT ?threat WHERE {{
+            ?threat a defender:{signal_type} .
+            {cursor_filter}
+        }}
+        ORDER BY STR(?threat)
+        LIMIT {int(limit)}
+    }}
+    BIND(defender:{signal_type} AS ?rdfType)
+{properties}
+}}
+ORDER BY STR(?threat)
+"""
+
+
+def _threats_sparql(limit: int, after: str = "") -> str:
+    return _defender_page_sparql(
+        "DependencySignal",
+        """    OPTIONAL { ?threat dp:kind ?kind . }
+    OPTIONAL { ?threat dp:severity ?severity . }
+    OPTIONAL { ?threat schema:name ?name . }
+    OPTIONAL { ?threat schema:description ?description . }
+    OPTIONAL { ?threat dp:package ?packageName . }
+    OPTIONAL { ?threat dp:version ?packageVersion . }
+    OPTIONAL { ?threat dp:ecosystem ?packageEcosystem . }
+    OPTIONAL { ?threat dp:advisoryId ?advisoryId . }""",
+        limit,
+        after,
+    )
+
+
+def _defender_threats_sparql(limit: int, after: str = "") -> tuple:
+    return (
+        _threats_sparql(limit, after),
+        _defender_page_sparql(
+            "InjectionSignal",
+            """    OPTIONAL { ?threat dp:kind ?kind . }
+    OPTIONAL { ?threat dp:severity ?severity . }
+    OPTIONAL { ?threat schema:name ?name . }
+    OPTIONAL { ?threat schema:description ?description . }
+    OPTIONAL { ?threat dp:pattern ?pattern . }""",
+            limit,
+            after,
+        ),
+        _defender_page_sparql(
+            "SkillSignal",
+            """    OPTIONAL { ?threat dp:kind ?kind . }
+    OPTIONAL { ?threat dp:severity ?severity . }
+    OPTIONAL { ?threat schema:name ?name . }
+    OPTIONAL { ?threat schema:description ?description . }""",
+            limit,
+            after,
+        ),
+        _defender_page_sparql(
+            "IocSignal",
+            """    OPTIONAL { ?threat dp:kind ?kind . }
+    OPTIONAL { ?threat dp:severity ?severity . }
+    OPTIONAL { ?threat schema:name ?name . }
+    OPTIONAL { ?threat schema:description ?description . }
+    OPTIONAL { ?threat dp:iocType ?category . }
+    OPTIONAL { ?threat dp:value ?iocValue . }""",
+            limit,
+            after,
+        ),
+        _defender_page_sparql(
+            "CorrectionSignal",
+            """    OPTIONAL { ?threat dp:targetSubject ?targetSubject . }
+    OPTIONAL { ?threat dp:action ?correctionAction . }""",
+            limit,
+            after,
+        ),
+    )
+
+
+def _legacy_threats_sparql(limit: int, after: str = "") -> str:
+    cursor_filter = _threat_cursor_filter(after)
+    return f"""PREFIX g: <http://umanitek.ai/ontology/guardian/>
 PREFIX schema: <http://schema.org/>
 SELECT DISTINCT {_SELECT_COLUMNS}
 WHERE {{
+  {{
+    SELECT ?threat WHERE {{
+      ?threat g:identifier ?cursorIdentifier .
+      {cursor_filter}
+    }}
+    ORDER BY STR(?threat)
+    LIMIT {int(limit)}
+  }}
   ?threat g:identifier ?identifier .
   OPTIONAL {{ ?threat a ?rdfType . }}
   OPTIONAL {{ ?threat g:kind ?kind . }}
@@ -58,120 +180,89 @@ WHERE {{
   OPTIONAL {{ ?threat g:skillVersion ?skillVersion . }}
   OPTIONAL {{ ?threat g:dangerShape ?dangerShape . }}
 }}
-ORDER BY ?threat
+ORDER BY STR(?threat)
 """
 
-_DEFENDER_PREFIXES = """PREFIX defender: <urn:defender:>
-PREFIX dp: <urn:defender:p:>
-PREFIX schema: <http://schema.org/>
-"""
 
-_DEFENDER_DEPENDENCY_SELECT = f"""{_DEFENDER_PREFIXES}
-SELECT DISTINCT ?threat ?rdfType ?identifier ?severity ?name ?description
-       ?pattern ?toolName ?argShape ?packageName ?packageVersion
-       ?packageEcosystem ?advisoryId ?curated ?category ?skillName
-       ?skillVersion ?dangerShape ?kind ?iocValue
-WHERE {{
-    ?threat a defender:DependencySignal .
-    BIND(defender:DependencySignal AS ?rdfType)
-    OPTIONAL {{ ?threat dp:kind ?kind . }}
-    OPTIONAL {{ ?threat dp:severity ?severity . }}
-    OPTIONAL {{ ?threat schema:name ?name . }}
-    OPTIONAL {{ ?threat schema:description ?description . }}
-    OPTIONAL {{ ?threat dp:package ?packageName . }}
-    OPTIONAL {{ ?threat dp:version ?packageVersion . }}
-    OPTIONAL {{ ?threat dp:ecosystem ?packageEcosystem . }}
-    OPTIONAL {{ ?threat dp:advisoryId ?advisoryId . }}
+def _context_graph_data_uri(cg_id: str) -> str:
+    value = str(cg_id or "").strip()
+    if not value or any(char in value for char in _FORBIDDEN_IRI_CHARS):
+        return ""
+    return f"did:dkg:context-graph:{value}"
+
+
+def _verified_partitions_sparql(cg_id: str) -> str:
+    data_graph = _context_graph_data_uri(cg_id)
+    if not data_graph:
+        return ""
+    vm_prefix = f"{data_graph}/_verifiable_memory/"
+    return f"""PREFIX dkg: <http://dkg.io/ontology/>
+SELECT DISTINCT ?assertionGraph WHERE {{
+  GRAPH <{data_graph}/_meta> {{
+    ?ka dkg:assertionGraph ?assertionGraph ;
+        dkg:status "confirmed" .
+  }}
+  FILTER(STRSTARTS(STR(?assertionGraph), {json.dumps(vm_prefix)}))
 }}
-ORDER BY ?threat
+ORDER BY ?assertionGraph
 """
 
-_DEFENDER_INJECTION_SELECT = f"""{_DEFENDER_PREFIXES}
-SELECT DISTINCT ?threat ?rdfType ?identifier ?severity ?name ?description
-       ?pattern ?toolName ?argShape ?packageName ?packageVersion
-       ?packageEcosystem ?advisoryId ?curated ?category ?skillName
-       ?skillVersion ?dangerShape ?kind ?iocValue
+
+def _partition_threats_sparql(
+    graph_uris: List[str],
+    *,
+    limit: int = _VM_PARTITION_QUERY_LIMIT,
+    offset: int = 0,
+) -> str:
+    values = " ".join(f"<{uri}>" for uri in graph_uris)
+    return f"""{_DEFENDER_PREFIXES}PREFIX g: <http://umanitek.ai/ontology/guardian/>
+SELECT DISTINCT ?sourceGraph {_SELECT_COLUMNS}
 WHERE {{
-    ?threat a defender:InjectionSignal .
-    BIND(defender:InjectionSignal AS ?rdfType)
+  VALUES ?sourceGraph {{ {values} }}
+  GRAPH ?sourceGraph {{
+    {{
+      ?threat a ?rdfType .
+      VALUES ?rdfType {{
+        defender:DependencySignal defender:InjectionSignal
+        defender:SkillSignal defender:IocSignal defender:CorrectionSignal
+      }}
+    }} UNION {{
+      ?threat g:identifier ?identifier .
+      OPTIONAL {{ ?threat a ?rdfType . }}
+    }}
     OPTIONAL {{ ?threat dp:kind ?kind . }}
+    OPTIONAL {{ ?threat g:kind ?kind . }}
     OPTIONAL {{ ?threat dp:severity ?severity . }}
+    OPTIONAL {{ ?threat g:severity ?severity . }}
     OPTIONAL {{ ?threat schema:name ?name . }}
     OPTIONAL {{ ?threat schema:description ?description . }}
     OPTIONAL {{ ?threat dp:pattern ?pattern . }}
-}}
-ORDER BY ?threat
-"""
-
-_DEFENDER_SKILL_SELECT = f"""{_DEFENDER_PREFIXES}
-SELECT DISTINCT ?threat ?rdfType ?identifier ?severity ?name ?description
-       ?pattern ?toolName ?argShape ?packageName ?packageVersion
-       ?packageEcosystem ?advisoryId ?curated ?category ?skillName
-       ?skillVersion ?dangerShape ?kind ?iocValue
-WHERE {{
-    ?threat a defender:SkillSignal .
-    BIND(defender:SkillSignal AS ?rdfType)
-    OPTIONAL {{ ?threat dp:kind ?kind . }}
-    OPTIONAL {{ ?threat dp:severity ?severity . }}
-    OPTIONAL {{ ?threat schema:name ?name . }}
-    OPTIONAL {{ ?threat schema:description ?description . }}
-}}
-ORDER BY ?threat
-"""
-
-_DEFENDER_IOC_SELECT = f"""{_DEFENDER_PREFIXES}
-SELECT DISTINCT ?threat ?rdfType ?identifier ?severity ?name ?description
-       ?pattern ?toolName ?argShape ?packageName ?packageVersion
-       ?packageEcosystem ?advisoryId ?curated ?category ?skillName
-       ?skillVersion ?dangerShape ?kind ?iocValue
-WHERE {{
-    ?threat a defender:IocSignal .
-    BIND(defender:IocSignal AS ?rdfType)
-    OPTIONAL {{ ?threat dp:kind ?kind . }}
-    OPTIONAL {{ ?threat dp:severity ?severity . }}
-    OPTIONAL {{ ?threat schema:name ?name . }}
-    OPTIONAL {{ ?threat schema:description ?description . }}
+    OPTIONAL {{ ?threat g:pattern ?pattern . }}
+    OPTIONAL {{ ?threat g:toolName ?toolName . }}
+    OPTIONAL {{ ?threat g:argShape ?argShape . }}
+    OPTIONAL {{ ?threat dp:package ?packageName . }}
+    OPTIONAL {{ ?threat g:packageName ?packageName . }}
+    OPTIONAL {{ ?threat dp:version ?packageVersion . }}
+    OPTIONAL {{ ?threat g:packageVersion ?packageVersion . }}
+    OPTIONAL {{ ?threat dp:ecosystem ?packageEcosystem . }}
+    OPTIONAL {{ ?threat g:packageEcosystem ?packageEcosystem . }}
+    OPTIONAL {{ ?threat dp:advisoryId ?advisoryId . }}
+    OPTIONAL {{ ?threat schema:identifier ?advisoryId . }}
+    OPTIONAL {{ ?threat g:curated ?curated . }}
     OPTIONAL {{ ?threat dp:iocType ?category . }}
+    OPTIONAL {{ ?threat g:category ?category . }}
+    OPTIONAL {{ ?threat g:skillName ?skillName . }}
+    OPTIONAL {{ ?threat g:skillVersion ?skillVersion . }}
+    OPTIONAL {{ ?threat g:dangerShape ?dangerShape . }}
     OPTIONAL {{ ?threat dp:value ?iocValue . }}
+    OPTIONAL {{ ?threat dp:targetSubject ?targetSubject . }}
+    OPTIONAL {{ ?threat dp:action ?correctionAction . }}
+  }}
 }}
-ORDER BY ?threat
+ORDER BY ?sourceGraph ?threat
+LIMIT {int(limit)}
+OFFSET {int(offset)}
 """
-
-_DEFENDER_CORRECTION_SELECT = f"""{_DEFENDER_PREFIXES}
-SELECT DISTINCT {_SELECT_COLUMNS}
-WHERE {{
-    ?threat a defender:CorrectionSignal .
-    BIND(defender:CorrectionSignal AS ?rdfType)
-    ?threat dp:targetSubject ?targetSubject .
-    ?threat dp:action ?correctionAction .
-}}
-ORDER BY ?threat
-"""
-
-# Rows fetched per page when syncing a tier. One SPARQL round-trip each.
-_PAGE_SIZE = 5000
-# Safety ceiling so a misbehaving node can never spin the pager forever.
-_MAX_ROWS = 1_000_000
-
-
-def _threats_sparql(limit: int, offset: int) -> str:
-    return f"{_DEFENDER_DEPENDENCY_SELECT}LIMIT {int(limit)} OFFSET {int(offset)}"
-
-
-def _defender_threats_sparql(limit: int, offset: int) -> tuple:
-    limit = int(limit)
-    offset = int(offset)
-    return (
-        f"{_DEFENDER_DEPENDENCY_SELECT}LIMIT {limit} OFFSET {offset}",
-        f"{_DEFENDER_INJECTION_SELECT}LIMIT {limit} OFFSET {offset}",
-        f"{_DEFENDER_SKILL_SELECT}LIMIT {limit} OFFSET {offset}",
-        f"{_DEFENDER_IOC_SELECT}LIMIT {limit} OFFSET {offset}",
-        f"{_DEFENDER_CORRECTION_SELECT}LIMIT {limit} OFFSET {offset}",
-    )
-
-
-def _legacy_threats_sparql(limit: int, offset: int) -> str:
-    return f"{_LEGACY_THREATS_SELECT}LIMIT {int(limit)} OFFSET {int(offset)}"
 
 
 def community_report_count(client: DkgClient, cfg: BlackboxConfig) -> int:
@@ -270,6 +361,11 @@ class Ruleset:
     ioc: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     graph_threats: List[Dict[str, Any]] = field(default_factory=list)
     synced_at: float = 0.0
+    _graph_entries_cache: Dict[str, List[Dict[str, Any]]] = field(
+        default_factory=dict,
+        init=False,
+        repr=False,
+    )
 
     def counts(self) -> Dict[str, int]:
         return {
@@ -303,6 +399,9 @@ class Ruleset:
         return sum(1 for _cat, r in self.iter_rules() if r.get("source") == source)
 
     def graph_entries(self, source: str) -> List[Dict[str, Any]]:
+        cached = self._graph_entries_cache.get(source)
+        if cached is not None:
+            return cached
         entries = [item for item in self.graph_threats if item.get("source") == source]
         seen = {item.get("identifier") for item in entries}
         for category, rule in self.iter_rules():
@@ -318,6 +417,7 @@ class Ruleset:
                 "subject": rule.get("subject") or "",
                 "source": source,
             })
+        self._graph_entries_cache[source] = entries
         return entries
 
     def graph_count(self, source: str) -> int:
@@ -718,27 +818,93 @@ def _fetch_tier(
     the caller can preserve a tier's last-good rules through a transient failure
     instead of wiping them.
     """
+    if view == constants.VIEW_VERIFIABLE_MEMORY:
+        partition_query = _verified_partitions_sparql(cg_id)
+        if not partition_query:
+            return None
+        metadata = client.query(
+            partition_query,
+            cg_id,
+            view=None,
+            on_error=_QUERY_ERROR,
+        )
+        if metadata is _QUERY_ERROR:
+            return None
+
+        data_graph = _context_graph_data_uri(cg_id)
+        vm_prefix = f"{data_graph}/_verifiable_memory/"
+        partitions = sorted({
+            graph
+            for row in metadata
+            if (graph := extract_binding(row.get("assertionGraph"))).startswith(vm_prefix)
+            and graph != vm_prefix
+            and not any(char in graph for char in _FORBIDDEN_IRI_CHARS)
+        })
+        if partitions:
+            rows: List[Dict[str, Any]] = []
+            for start in range(0, len(partitions), _VM_PARTITION_BATCH_SIZE):
+                batch = partitions[start:start + _VM_PARTITION_BATCH_SIZE]
+                offset = 0
+                while len(rows) < _MAX_ROWS:
+                    page = client.query(
+                        _partition_threats_sparql(batch, offset=offset),
+                        cg_id,
+                        view=None,
+                        on_error=_QUERY_ERROR,
+                        timeout=_VM_PARTITION_QUERY_TIMEOUT,
+                    )
+                    if page is _QUERY_ERROR:
+                        return None
+                    rows.extend(page)
+                    if len(page) < _VM_PARTITION_QUERY_LIMIT:
+                        break
+                    offset += _VM_PARTITION_QUERY_LIMIT
+            if len(rows) >= _MAX_ROWS:
+                return None
+            return rows
+
+        # Older root-only VM layouts do not have confirmed assertionGraph
+        # metadata. Keep the scoped pager as a compatibility fallback.
+
     rows: List[Dict[str, Any]] = []
-    query_groups = (
-        lambda limit, offset: (_legacy_threats_sparql(limit, offset),),
-        _defender_threats_sparql,
-    )
-    for query_group in query_groups:
-        offset = 0
-        while offset < _MAX_ROWS:
+
+    def query_lanes(limit: int, after: str) -> tuple:
+        return (
+            _legacy_threats_sparql(limit, after),
+            *_defender_threats_sparql(limit, after),
+        )
+
+    lane_count = len(query_lanes(1, ""))
+    for lane_index in range(lane_count):
+        after = ""
+        fetched_subjects = 0
+        while fetched_subjects < _MAX_ROWS:
             kwargs: Dict[str, Any] = {"view": view, "on_error": _QUERY_ERROR}
             if agent_address:
                 kwargs["agent_address"] = agent_address
-            pages = []
-            for query in query_group(_PAGE_SIZE, offset):
-                page = client.query(query, cg_id, **kwargs)
-                if page is _QUERY_ERROR:
+            query = query_lanes(_PAGE_SIZE, after)[lane_index]
+            page = client.query(query, cg_id, **kwargs)
+            if page is _QUERY_ERROR:
+                return None
+            rows.extend(page)
+            page_subjects = list(
+                dict.fromkeys(
+                    subject
+                    for row in page
+                    if (subject := extract_binding(row.get("threat")))
+                )
+            )
+            if not page_subjects:
+                if page:
                     return None
-                pages.append(page)
-                rows.extend(page)
-            if all(len(page) < _PAGE_SIZE for page in pages):
                 break
-            offset += _PAGE_SIZE
+            next_cursor = page_subjects[-1]
+            if next_cursor <= after:
+                return None
+            fetched_subjects += len(page_subjects)
+            if len(page_subjects) < _PAGE_SIZE:
+                break
+            after = next_cursor
     return rows
 
 
@@ -844,6 +1010,7 @@ def _restore_tiers(rs: Ruleset, prior: Ruleset, tiers: List[str]) -> None:
             existing = target.get(key)
             if existing is None or (existing.get("source") == "community" and rule.get("source") == "public"):
                 target[key] = rule
+    rs._graph_entries_cache.clear()
 
 
 def _background_refresh(config: BlackboxConfig) -> None:

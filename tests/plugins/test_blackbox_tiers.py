@@ -113,21 +113,26 @@ def test_defender_entities_are_expanded_into_individual_rules():
     assert rs.counts()["skill"] == 32
     assert rs.source_count("public") == 1000
     assert rs.graph_count("public") == 1000
+    assert rs.graph_entries("public") is rs.graph_entries("public")
     assert len({rule["identifier"] for _category, rule in rs.iter_rules()}) == 1000
-    sparql = ruleset_mod._threats_sparql(1000, 0)
+    sparql = ruleset_mod._threats_sparql(1000)
     assert "defender:DependencySignal" in sparql
-    split_sparql = "\n".join(ruleset_mod._defender_threats_sparql(1000, 0))
+    split_sparql = "\n".join(ruleset_mod._defender_threats_sparql(1000))
     assert "defender:InjectionSignal" in split_sparql
     assert "defender:SkillSignal" in split_sparql
     assert "UNION" not in sparql
+    assert "OFFSET" not in split_sparql
+    assert "SELECT ?threat WHERE" in split_sparql
 
 
-def test_graph_schemas_are_queried_separately_and_merged():
+def test_root_only_graph_schemas_are_queried_separately_and_merged():
     queries = []
 
     class _Client:
         def query(self, sparql, cg_id, **kwargs):
             queries.append(sparql)
+            if "dkg:assertionGraph" in sparql:
+                return []
             if "defender:DependencySignal" in sparql:
                 return [{
                     "threat": {"value": "urn:defender:signal:1"},
@@ -143,8 +148,8 @@ def test_graph_schemas_are_queried_separately_and_merged():
     rows = ruleset_mod._fetch_tier(_Client(), "cg", "verifiable-memory")
 
     assert len(rows) == 2
-    assert len(queries) == 6
-    assert all("UNION" not in query for query in queries)
+    assert len(queries) == 7
+    assert all("UNION" not in query for query in queries[1:])
 
 
 def test_vm_correction_suppresses_exact_subject_from_detection_and_graph():
