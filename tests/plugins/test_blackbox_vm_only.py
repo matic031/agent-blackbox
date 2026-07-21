@@ -362,13 +362,18 @@ def test_dashboard_reuses_fresh_large_ruleset_without_querying_blazegraph(monkey
 def test_dashboard_community_surfaces_are_static_coming_soon(monkeypatch):
     app = server.create_app()
     with TestClient(app) as client:
-        graph = client.get("/api/graph?tier=community").json()
+        graph = client.get("/api/graph?tier=community&limit=17&offset=3").json()
         reports = client.get("/api/reports").json()
         threat = client.get("/api/threat?tier=community&identifier=x").json()
 
-    assert graph == {
-        "tier": "community", "threats": [], "total": 0, "offset": 0,
-        "limit": 1000, "partial": False, "coming_soon": True,
-    }
+    assert graph["tier"] == "community"
+    assert graph["threats"] == []
+    assert graph["total"] == 0
+    assert graph["offset"] == 3
+    assert graph["limit"] == 17
+    assert graph["partial"] is False
+    assert graph["category_totals"] == {}
+    assert graph["ecosystem_totals"] == {}
+    assert graph["coming_soon"] is True
     assert reports == {"reports": [], "coming_soon": True, "sharing_enabled": False}
     assert threat["coming_soon"] is True

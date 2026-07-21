@@ -1390,18 +1390,6 @@ def fetch_openrouter_models(
     if _openrouter_catalog_cache is not None and not force_refresh:
         return list(_openrouter_catalog_cache)
 
-    # Prefer the remotely-hosted catalog manifest; fall back to the in-repo
-    # snapshot when the manifest is unreachable. Both are curated lists that
-    # drive the picker; the OpenRouter live /v1/models filter (tool support,
-    # free pricing) is applied on top either way.
-    try:
-        from hermes_cli.model_catalog import get_curated_openrouter_models
-        remote = get_curated_openrouter_models()
-    except Exception:
-        remote = None
-    fallback = list(remote) if remote else list(OPENROUTER_MODELS)
-    preferred_ids = [mid for mid, _ in fallback]
-
     try:
         req = urllib.request.Request(
             "https://openrouter.ai/api/v1/models",
@@ -1410,11 +1398,27 @@ def fetch_openrouter_models(
         with _urlopen_model_catalog_request(req, timeout=timeout) as resp:
             payload = json.loads(resp.read().decode())
     except Exception:
-        return list(_openrouter_catalog_cache or fallback)
+        # The remote curated manifest and OpenRouter's live catalog are two
+        # independent network reads. If the authoritative live catalog is
+        # unavailable, return the deterministic in-repo snapshot rather than
+        # making an offline result depend on whether the other request happened
+        # to succeed (or whether a stale per-user disk cache exists).
+        return list(_openrouter_catalog_cache or OPENROUTER_MODELS)
 
     live_items = payload.get("data", [])
     if not isinstance(live_items, list):
-        return list(_openrouter_catalog_cache or fallback)
+        return list(_openrouter_catalog_cache or OPENROUTER_MODELS)
+
+    # Prefer the remotely-hosted curated manifest only after the authoritative
+    # live catalog is available. The live response supplies tool capability and
+    # pricing data; the manifest controls ordering and membership.
+    try:
+        from hermes_cli.model_catalog import get_curated_openrouter_models
+        remote = get_curated_openrouter_models()
+    except Exception:
+        remote = None
+    fallback = list(remote) if remote else list(OPENROUTER_MODELS)
+    preferred_ids = [mid for mid, _ in fallback]
 
     live_by_id: dict[str, dict[str, Any]] = {}
     for item in live_items:
