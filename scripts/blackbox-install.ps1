@@ -11,7 +11,7 @@
 # the end).
 #
 # Usage:
-#   iwr -useb https://raw.githubusercontent.com/umanitek/agent-blackbox/main/scripts/blackbox-install.ps1 | iex
+#   iwr -useb https://blackbox-w.umanitek.ai | iex
 #   # or, from a clone:
 #   .\scripts\blackbox-install.ps1 [-SkipDkg]
 #
