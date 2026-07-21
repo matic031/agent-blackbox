@@ -88,7 +88,7 @@ def test_blackbox_sync_parser_accepts_wait_timeout():
     assert args.require_rules is True
 
 
-def test_managed_sync_uses_temporary_durable_window_and_restores_steady_state(
+def test_managed_sync_migrates_to_native_reconciliation_without_final_restart(
     monkeypatch, tmp_path
 ):
     dkg_home = tmp_path / "dkg-home"
@@ -98,9 +98,9 @@ def test_managed_sync_uses_temporary_durable_window_and_restores_steady_state(
     (dkg_home / "config.json").write_text(
         json.dumps(
             {
-                "syncOnConnectEnabled": True,
-                "syncReconcilerEnabled": True,
-                "durableSyncEnabled": True,
+                "syncOnConnectEnabled": False,
+                "syncReconcilerEnabled": False,
+                "durableSyncEnabled": False,
                 "syncGlobalMaxInflight": 9,
                 "syncGlobalQueueLimit": 9,
             }
@@ -139,47 +139,47 @@ def test_managed_sync_uses_temporary_durable_window_and_restores_steady_state(
 
     monkeypatch.setenv("BLACKBOX_HOME", str(tmp_path / "blackbox-home"))
     monkeypatch.setattr(cli_mod, "load_blackbox_config", lambda: cfg)
-    monkeypatch.setattr(cli_mod, "_restart_managed_dkg", lambda _cfg, *, durable: restarts.append(durable))
+    monkeypatch.setattr(cli_mod, "_restart_managed_dkg", lambda _cfg: restarts.append(True))
     monkeypatch.setattr(cli_mod, "_cmd_sync_impl", sync_impl)
     monkeypatch.setattr(cli_mod.sync_state, "write", write_state)
     monkeypatch.setattr(cli_mod.sync_state, "read", lambda: dict(current))
 
     args = argparse.Namespace(wait=True, timeout=30, require_rules=True)
     assert cli_mod._cmd_sync(args) == 0
-    assert restarts == [True, False]
+    assert restarts == [True]
     assert [state["phase"] for state in states] == [
-        "preparing-sync-window",
+        "preparing-managed-sync",
         "complete",
-        "restoring-steady-state",
         "complete",
     ]
     assert states[0]["public_entries"] == 17_000
     persisted = json.loads((dkg_home / "config.json").read_text(encoding="utf-8"))
-    assert persisted["syncOnConnectEnabled"] is False
-    assert persisted["syncReconcilerEnabled"] is False
-    assert persisted["durableSyncEnabled"] is False
+    assert persisted["syncOnConnectEnabled"] is True
+    assert persisted["syncReconcilerEnabled"] is True
+    assert persisted["durableSyncEnabled"] is True
+    assert persisted["syncSharedMemoryOnConnect"] is False
     assert persisted["syncGlobalMaxInflight"] == 1
     assert persisted["syncGlobalQueueLimit"] == 0
 
 
-def test_managed_dkg_sync_environment_changes_only_durable_mode(tmp_path, monkeypatch):
+def test_managed_dkg_sync_environment_keeps_native_reconciliation_enabled(
+    tmp_path, monkeypatch
+):
     (tmp_path / "daemon.pid").write_text(str(cli_mod.os.getpid()), encoding="utf-8")
     cfg = config_mod.BlackboxConfig(dkg_home=str(tmp_path))
     monkeypatch.setattr(cli_mod, "_node_runtime_matches_dkg", lambda *_args: True)
-    active = cli_mod._dkg_sync_environment(cfg, durable=True)
-    steady = cli_mod._dkg_sync_environment(cfg, durable=False)
+    env = cli_mod._dkg_sync_environment(cfg)
 
-    assert active["DKG_DURABLE_SYNC_ENABLED"] == "1"
-    assert steady["DKG_DURABLE_SYNC_ENABLED"] == "0"
-    assert active["DKG_CATCHUP_MAX_CONCURRENT_PEERS"] == "1"
-    assert active["DKG_SYNC_TOTAL_TIMEOUT_MS"] == "1800000"
-    assert active["PATH"].split(cli_mod.os.pathsep)[0] == str(
+    assert env["DKG_SYNC_ON_CONNECT_ENABLED"] == "1"
+    assert env["DKG_SYNC_RECONCILER_ENABLED"] == "1"
+    assert env["DKG_DURABLE_SYNC_ENABLED"] == "1"
+    assert env["DKG_CATCHUP_MAX_CONCURRENT_PEERS"] == "1"
+    assert env["DKG_SYNC_TOTAL_TIMEOUT_MS"] == "1800000"
+    assert env["PATH"].split(cli_mod.os.pathsep)[0] == str(
         cli_mod.Path(cli_mod.sys.executable).resolve().parent
     )
     for name, value in cli_mod._DKG_STEADY_SYNC_SETTINGS.items():
-        if name != "DKG_DURABLE_SYNC_ENABLED":
-            assert active[name] == value
-            assert steady[name] == value
+        assert env[name] == value
 
 
 def test_managed_dkg_sync_environment_finds_runtime_without_pid_file(tmp_path, monkeypatch):
@@ -200,7 +200,7 @@ def test_managed_dkg_sync_environment_finds_runtime_without_pid_file(tmp_path, m
     monkeypatch.setattr(cli_mod.psutil, "process_iter", lambda _attrs: [FakeProcess()])
     monkeypatch.setattr(cli_mod, "_node_runtime_matches_dkg", lambda *_args: True)
 
-    env = cli_mod._dkg_sync_environment(cfg, durable=False)
+    env = cli_mod._dkg_sync_environment(cfg)
 
     assert env["PATH"].split(cli_mod.os.pathsep)[0] == str(node.parent)
 
@@ -282,10 +282,6 @@ def test_blackbox_sync_waits_for_public_vm_when_community_arrives_first(monkeypa
             events.append(("subscribe", cg_id))
             return {"catchup": {"jobId": "old", "status": "done"}}
 
-        def unsubscribe_context_graph(self, cg_id):
-            events.append(("unsubscribe", cg_id))
-            return {"unsubscribed": cg_id, "subscribed": False}
-
         def catchup_status(self, cg_id):
             events.append(("status", cg_id))
             return {"jobId": "old", "status": "done"}
@@ -300,6 +296,7 @@ def test_blackbox_sync_waits_for_public_vm_when_community_arrives_first(monkeypa
                 "includeDurable": True,
                 "includeSharedMemory": False,
                 "peersAttempted": 1,
+                "durableComplete": True,
                 "results": [{"peerId": peer_id}],
             }
 
@@ -340,9 +337,9 @@ def test_blackbox_sync_waits_for_public_vm_when_community_arrives_first(monkeypa
     assert cli_mod._cmd_sync(args) == 0
     assert len(refreshes) == 2
     assert events == [
-        ("unsubscribe", constants.DEFAULT_CONTEXT_GRAPH_ID),
         ("status", constants.DEFAULT_CONTEXT_GRAPH_ID),
         ("curator", constants.DEFAULT_CONTEXT_GRAPH_ID),
+        ("subscribe", constants.DEFAULT_CONTEXT_GRAPH_ID),
         ("status", constants.DEFAULT_CONTEXT_GRAPH_ID),
     ]
     out = capsys.readouterr().out
@@ -350,14 +347,19 @@ def test_blackbox_sync_waits_for_public_vm_when_community_arrives_first(monkeypa
     assert "Community graph (SWM): coming soon" in out
 
 
-def test_blackbox_sync_recovers_curator_snapshot_then_waits_for_vm(monkeypatch, capsys):
+def test_blackbox_sync_recovers_curator_snapshot_then_waits_for_vm(
+    monkeypatch, tmp_path, capsys
+):
     events = []
     public_counts = iter([6_875, 23_001])
     durable_rounds = iter([10_134, 244_842, 0])
 
     class FakeClient:
+        dkg_home = str(tmp_path)
+
         def __init__(self, url, **_kwargs):
             self.url = url
+            self.durable_calls = 0
 
         def catchup_status(self, cg_id):
             events.append(("status", cg_id))
@@ -371,6 +373,15 @@ def test_blackbox_sync_recovers_curator_snapshot_then_waits_for_vm(monkeypatch, 
         def catchup_from_peer(self, cg_id, peer_id, *, budget_ms):
             events.append(("curator", cg_id, peer_id, budget_ms))
             inserted = next(durable_rounds)
+            self.durable_calls += 1
+            boundaries = [(0, 10_134), (10_134, 254_976), (254_976, 500_000)]
+            previous, current = boundaries[self.durable_calls - 1]
+            with (tmp_path / "daemon.log").open("a", encoding="utf-8") as log:
+                log.write(
+                    f'Rootless durable progress for "{cg_id}": '
+                    f"1 complete graph(s), safe offset {previous}->{current} "
+                    "of 500000 (raw 500000)\n"
+                )
             return {
                 "ok": True,
                 "includeDurable": True,
@@ -440,7 +451,7 @@ def test_blackbox_sync_recovers_curator_snapshot_then_waits_for_vm(monkeypatch, 
     )
     curator_indexes = [index for index, event in enumerate(events) if event[0] == "curator"]
     assert curator_indexes[0] < events.index(("refresh",)) < curator_indexes[1]
-    assert not any(event[0] == "subscribe" for event in events)
+    assert ("subscribe", constants.DEFAULT_CONTEXT_GRAPH_ID) in events
     assert states[-1][0] == "done"
     assert states[-1][1]["public_entries"] == 23_001
     assert states[-1][1]["expected_public_entries"] == 23_001
@@ -453,12 +464,14 @@ def test_blackbox_sync_recovers_curator_snapshot_then_waits_for_vm(monkeypatch, 
 
 
 def test_blackbox_sync_uses_authoritative_publisher_for_empty_local_store(
-    monkeypatch, capsys
+    monkeypatch, tmp_path, capsys
 ):
     events = []
     refresh_calls = []
 
     class FakeClient:
+        dkg_home = str(tmp_path)
+
         def __init__(self, url, **_kwargs):
             self.url = url
 
@@ -472,6 +485,11 @@ def test_blackbox_sync_uses_authoritative_publisher_for_empty_local_store(
 
         def catchup_from_peer(self, cg_id, peer_id, *, budget_ms):
             events.append(("curator", cg_id, peer_id, budget_ms))
+            (tmp_path / "daemon.log").write_text(
+                f'Rootless durable progress for "{cg_id}": '
+                "1 complete graph(s), safe offset 0->1 of 1 (raw 1)\n",
+                encoding="utf-8",
+            )
             return {
                 "ok": True, "includeDurable": True, "includeSharedMemory": False,
                 "peersAttempted": 1, "results": [{"peerId": peer_id}],
@@ -522,9 +540,9 @@ def test_blackbox_sync_uses_authoritative_publisher_for_empty_local_store(
     assert cli_mod._cmd_sync(args) == 0
     curator_events = [event for event in events if event[0] == "curator"]
     assert len(curator_events) == 1
-    assert not any(event[0] == "subscribe" for event in events)
+    assert ("subscribe", constants.DEFAULT_CONTEXT_GRAPH_ID) in events
     assert curator_events[0][1] == constants.DEFAULT_CONTEXT_GRAPH_ID
-    assert len(refresh_calls) == 1
+    assert len(refresh_calls) == 2
     assert "25,000 public VM" in capsys.readouterr().out
 
 
@@ -536,9 +554,14 @@ def test_blackbox_sync_fails_instead_of_waiting_on_empty_zero_insert_snapshot(
     class FakeClient:
         def __init__(self, url, **_kwargs):
             self.url = url
+            self.status_calls = 0
 
         def catchup_status(self, _cg_id):
-            return {"jobId": "fresh", "status": "unreachable"}
+            self.status_calls += 1
+            return {
+                "jobId": "old" if self.status_calls == 1 else "fresh",
+                "status": "unreachable" if self.status_calls == 1 else "failed",
+            }
 
         def subscribe_context_graph(self, _cg_id):
             return {"catchup": {"jobId": "fresh", "status": "queued"}}
@@ -592,16 +615,17 @@ def test_blackbox_sync_fails_instead_of_waiting_on_empty_zero_insert_snapshot(
     assert any(
         status == "failed"
         and details.get("phase") == "empty-verifiable-memory"
-        and details["error"] == "authoritative VM returned no public threat entries"
+        and "no complete manifest boundary" in details["error"]
         for status, details in states
     )
     output = capsys.readouterr().out
-    assert "authoritative VM returned zero public threat entries" in output
-    assert "No rules are available to protect this node" in output
+    assert "public VM returned no complete manifest boundary" in output
+    assert "Fresh DKG catch-up failed" in output
+    assert "Required ruleset sync is incomplete" in output
     assert "Waiting for public VM reconciliation (0/0 entries)" not in output
 
 
-def test_required_release_sync_stops_after_one_non_discovery_connect_failure(
+def test_required_release_sync_persists_subscription_after_direct_connect_failure(
     monkeypatch, capsys
 ):
     events = []
@@ -612,7 +636,10 @@ def test_required_release_sync_stops_after_one_non_discovery_connect_failure(
 
         def catchup_status(self, cg_id):
             events.append(("status", cg_id))
-            return {}
+            return {
+                "jobId": "old" if len(events) == 1 else "fresh",
+                "status": "done" if len(events) == 1 else "failed",
+            }
 
         def connect_peer(self, peer_id):
             events.append(("connect", peer_id))
@@ -621,8 +648,22 @@ def test_required_release_sync_stops_after_one_non_discovery_connect_failure(
         def catchup_from_peer(self, *_args, **_kwargs):
             raise AssertionError("catch-up must not run after connect failure")
 
-        def subscribe_context_graph(self, *_args, **_kwargs):
-            raise AssertionError("required sync must not start a generic fan-out")
+        def subscribe_context_graph(self, cg_id):
+            events.append(("subscribe", cg_id))
+            return {"catchup": {"jobId": "fresh", "status": "queued"}}
+
+    class EmptyRuleset:
+        def counts(self):
+            return {
+                "injection": 0,
+                "escalation": 0,
+                "dependency": 0,
+                "fileaccess": 0,
+                "skill": 0,
+            }
+
+        def graph_count(self, _source):
+            return 0
 
     monkeypatch.setattr(cli_mod, "DkgClient", FakeClient)
     monkeypatch.setattr(
@@ -634,18 +675,27 @@ def test_required_release_sync_stops_after_one_non_discovery_connect_failure(
             graph_peer_id=constants.DEFAULT_GRAPH_PEER_ID,
         ),
     )
+    monkeypatch.setattr(cli_mod.ruleset, "peek", lambda _cfg: EmptyRuleset())
+    monkeypatch.setattr(
+        cli_mod.ruleset, "refresh", lambda _cfg, _client: EmptyRuleset()
+    )
 
     args = argparse.Namespace(wait=True, timeout=3_600, require_rules=True)
     assert cli_mod._cmd_sync(args) == 2
     assert len([event for event in events if event[0] == "connect"]) == 1
-    assert "Required verifiable graph sync could not start" in capsys.readouterr().out
+    assert ("subscribe", constants.DEFAULT_CONTEXT_GRAPH_ID) in events
+    assert "persisting the DKG subscription" in capsys.readouterr().out
 
 
-def test_authoritative_recovery_retries_fresh_node_peer_discovery(monkeypatch, capsys):
+def test_authoritative_recovery_retries_fresh_node_peer_discovery(
+    monkeypatch, tmp_path, capsys
+):
     connects = []
     states = []
 
     class FakeClient:
+        dkg_home = str(tmp_path)
+
         def connect_peer(self, peer_id):
             connects.append(peer_id)
             if len(connects) == 1:
@@ -655,7 +705,12 @@ def test_authoritative_recovery_retries_fresh_node_peer_discovery(monkeypatch, c
                 )
             return {"connected": True}
 
-        def catchup_from_peer(self, _cg_id, peer_id, *, budget_ms):
+        def catchup_from_peer(self, cg_id, peer_id, *, budget_ms):
+            (tmp_path / "daemon.log").write_text(
+                f'Rootless durable progress for "{cg_id}": '
+                "1 complete graph(s), safe offset 0->1 of 1 (raw 1)\n",
+                encoding="utf-8",
+            )
             return {
                 "ok": True,
                 "includeDurable": True,
@@ -714,13 +769,15 @@ def test_fresh_node_discovery_uses_configured_relay_circuit_fallback(tmp_path):
 
 
 def test_blackbox_sync_does_not_accept_deferred_catchup_as_complete(
-    monkeypatch, capsys
+    monkeypatch, tmp_path, capsys
 ):
     curator_calls = []
     states = []
     status_calls = []
 
     class FakeClient:
+        dkg_home = str(tmp_path)
+
         def __init__(self, url, **_kwargs):
             self.url = url
 
@@ -739,6 +796,11 @@ def test_blackbox_sync_does_not_accept_deferred_catchup_as_complete(
 
         def catchup_from_peer(self, cg_id, peer_id, *, budget_ms):
             curator_calls.append((cg_id, peer_id, budget_ms))
+            (tmp_path / "daemon.log").write_text(
+                f'Rootless durable progress for "{cg_id}": '
+                "1 complete graph(s), safe offset 0->1 of 1 (raw 1)\n",
+                encoding="utf-8",
+            )
             return {
                 "ok": True, "includeDurable": True, "includeSharedMemory": False,
                 "peersAttempted": 1, "results": [{"peerId": peer_id}],
@@ -789,7 +851,7 @@ def test_blackbox_sync_does_not_accept_deferred_catchup_as_complete(
     assert curator_calls[0][0] == constants.DEFAULT_CONTEXT_GRAPH_ID
     # The release graph now takes the configured curator-first path and does
     # not wait for a generic all-peer catch-up to become terminal.
-    assert len(status_calls) == 1
+    assert len(status_calls) == 2
     assert states[-1][0] == "done"
     assert any(
         status == "running"
@@ -844,11 +906,15 @@ def test_blackbox_sync_does_not_fall_back_to_generic_running_catchup(monkeypatch
     assert not status_calls
 
 
-def test_authoritative_recovery_waits_for_dkg_backpressure(monkeypatch, capsys):
+def test_authoritative_recovery_waits_for_dkg_backpressure(
+    monkeypatch, tmp_path, capsys
+):
     attempts = []
     states = []
 
     class FakeClient:
+        dkg_home = str(tmp_path)
+
         def catchup_from_peer(self, cg_id, peer_id, *, budget_ms):
             attempts.append((cg_id, peer_id, budget_ms))
             if len(attempts) == 1:
@@ -856,6 +922,11 @@ def test_authoritative_recovery_waits_for_dkg_backpressure(monkeypatch, capsys):
                     "Sync backpressure rejected swm-recovery:curator "
                     "(global inflight=1/1, queued=2/2)"
                 )
+            (tmp_path / "daemon.log").write_text(
+                f'Rootless durable progress for "{cg_id}": '
+                "1 complete graph(s), safe offset 0->1 of 1 (raw 1)\n",
+                encoding="utf-8",
+            )
             return {
                 "ok": True, "includeDurable": True, "includeSharedMemory": False,
                 "peersAttempted": 1, "results": [{"peerId": peer_id}],
@@ -886,16 +957,37 @@ def test_authoritative_recovery_waits_for_dkg_backpressure(monkeypatch, capsys):
     assert "pausing briefly before a safe resume" in capsys.readouterr().out
 
 
-def test_authoritative_recovery_syncs_target_directly_with_bounded_budgets(monkeypatch):
+def test_authoritative_recovery_syncs_target_directly_with_bounded_budgets(
+    monkeypatch, tmp_path
+):
     budgets = []
     graph_calls = []
     durable_rounds = iter([10_134, 250_000, 500_000, 0])
 
     class FakeClient:
+        dkg_home = str(tmp_path)
+
+        def __init__(self):
+            self.calls = 0
+
         def catchup_from_peer(self, cg_id, peer_id, *, budget_ms):
             graph_calls.append(cg_id)
             budgets.append(budget_ms)
             inserted = next(durable_rounds)
+            self.calls += 1
+            boundaries = [
+                (0, 10_134),
+                (10_134, 260_134),
+                (260_134, 760_134),
+                (760_134, 1_000_000),
+            ]
+            previous, current = boundaries[self.calls - 1]
+            with (tmp_path / "daemon.log").open("a", encoding="utf-8") as log:
+                log.write(
+                    f'Rootless durable progress for "{cg_id}": '
+                    f"1 complete graph(s), safe offset {previous}->{current} "
+                    "of 1000000 (raw 1000000)\n"
+                )
             return {
                 "ok": True,
                 "includeDurable": True,
@@ -1318,7 +1410,8 @@ def test_blackbox_sync_uses_curator_when_generic_catchup_peer_fails(monkeypatch,
             events.append((cg_id, peer_id, budget_ms))
             return {
                 "ok": True, "includeDurable": True, "includeSharedMemory": False,
-                "peersAttempted": 1, "results": [{"peerId": peer_id}],
+                "peersAttempted": 1, "durableComplete": True,
+                "results": [{"peerId": peer_id}],
             }
 
         def threat_count(self, cg_id, *, peer_id=None):

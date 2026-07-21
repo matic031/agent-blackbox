@@ -67,8 +67,7 @@ BLACKBOX_DKG_STORE_QUEUE_LIMIT="${BLACKBOX_DKG_STORE_QUEUE_LIMIT:-512}"
 BLACKBOX_DKG_LIST_CONTEXT_GRAPHS_PROJECTION="${BLACKBOX_DKG_LIST_CONTEXT_GRAPHS_PROJECTION:-1}"
 BLACKBOX_DKG_SYNC_GLOBAL_MAX_INFLIGHT="1"
 BLACKBOX_DKG_SYNC_GLOBAL_QUEUE_LIMIT="0"
-BLACKBOX_DKG_DURABLE_SYNC_ENABLED="${BLACKBOX_DKG_DURABLE_SYNC_ENABLED:-0}"
-BLACKBOX_DKG_STEADY_DURABLE_SYNC_ENABLED="$BLACKBOX_DKG_DURABLE_SYNC_ENABLED"
+BLACKBOX_DKG_DURABLE_SYNC_ENABLED="${BLACKBOX_DKG_DURABLE_SYNC_ENABLED:-1}"
 BLACKBOX_DKG_CATCHUP_MAX_CONCURRENT_PEERS="1"
 BLACKBOX_DKG_STORE_QUEUE_WAIT_TIMEOUT_MS="300000"
 BLACKBOX_DKG_NODE_OPTIONS=""
@@ -192,8 +191,8 @@ blackbox_dkg() {
     DKG_ACCEPT_STORE_RESET="$accept_store_reset" \
     DKG_STORE_QUEUE_LIMIT="$BLACKBOX_DKG_STORE_QUEUE_LIMIT" \
     DKG_LIST_CONTEXT_GRAPHS_PROJECTION="$BLACKBOX_DKG_LIST_CONTEXT_GRAPHS_PROJECTION" \
-    DKG_SYNC_ON_CONNECT_ENABLED="0" \
-    DKG_SYNC_RECONCILER_ENABLED="0" \
+    DKG_SYNC_ON_CONNECT_ENABLED="1" \
+    DKG_SYNC_RECONCILER_ENABLED="1" \
     DKG_DURABLE_SYNC_ENABLED="$BLACKBOX_DKG_DURABLE_SYNC_ENABLED" \
     DKG_SYNC_GLOBAL_MAX_INFLIGHT="$BLACKBOX_DKG_SYNC_GLOBAL_MAX_INFLIGHT" \
     DKG_SYNC_GLOBAL_QUEUE_LIMIT="$BLACKBOX_DKG_SYNC_GLOBAL_QUEUE_LIMIT" \
@@ -713,14 +712,12 @@ existing_relays = data.get("relayPeers") if isinstance(data.get("relayPeers"), l
 merged_relays = list(dict.fromkeys([*existing_relays, *MAINNET_BASE_RELAYS]))
 data["relayPeers"] = merged_relays
 data["relayReservationCount"] = int(data.get("relayReservationCount") or 4)
-# Blackbox starts explicit subscription catch-up jobs. Starting another durable
-# sync every time any peer connects only competes with that job for the single
-# large-sync slot and can starve the Blazegraph store queue on fresh installs.
-data["syncOnConnectEnabled"] = False
-# Disable automatic retry/fan-out. Blackbox initiates one explicit durable
-# graph catch-up, so durable sync itself must remain available.
-data["syncReconcilerEnabled"] = False
-data["durableSyncEnabled"] = False
+# DKG owns restart-safe continuation of the persisted Blackbox subscription.
+# The one-inflight/zero-queue limits below prevent sync fan-out from starving
+# Blazegraph while still allowing the reconciler to resume bounded manifests.
+data["syncOnConnectEnabled"] = True
+data["syncReconcilerEnabled"] = True
+data["durableSyncEnabled"] = True
 data.pop("syncAgentsMeta", None)
 data["syncGlobalMaxInflight"] = 1
 data["syncGlobalQueueLimit"] = 0
@@ -1498,9 +1495,7 @@ sync_ruleset() {
         step "A partial verified ruleset may already be active, but setup is incomplete until the curator snapshot settles."
         step "Retry the full sync with: blackbox sync --wait --require-rules"
     fi
-    if [ "$BLACKBOX_DKG_STEADY_DURABLE_SYNC_ENABLED" = "0" ]; then
-        ok "DKG stabilized: controlled Blackbox auto-sync enabled; one in-flight slot; zero queue"
-    fi
+    ok "DKG native reconciliation enabled; one in-flight slot; zero queue"
     return 0
 }
 
