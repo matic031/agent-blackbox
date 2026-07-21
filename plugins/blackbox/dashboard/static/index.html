@@ -3323,6 +3323,24 @@
     return graphCache[tier] ? asList(graphCache[tier]).length : 0;
   }
 
+  function resetEmptyGraphOnFirstVerifiedThreats(tier, previousTotal) {
+    var cached = graphCache[tier];
+    var currentTotal = graphTotalForTier(tier);
+    if (!cached || graphLoaded(tier) > 0) return false;
+    if (Number(previousTotal) > 0 || !(currentTotal > 0)) return false;
+
+    // The dashboard may cache an empty graph page while the first verified VM
+    // pass is still running. Once graph status exposes real threats, discard
+    // only that empty generation so the poll below fetches the first usable
+    // page. Non-empty graph scenes remain stable throughout later sync passes.
+    graphCache[tier] = null;
+    graphSearchCache[tier] = null;
+    graphRevision[tier] += 1;
+    graphSearchRevision[tier] += 1;
+    invalidateGraphTier(tier);
+    return true;
+  }
+
   function graphHasMore(tier) {
     var data = graphCache[tier];
     if (!data) return true;
@@ -6100,7 +6118,9 @@
   // ---------- Graph status (stats only) ----------
   function renderGraphStatus(data) {
     data = data || {};
+    var previousPublicTotal = graphTotalForTier("public");
     lastStatus = data;
+    resetEmptyGraphOnFirstVerifiedThreats("public", previousPublicTotal);
     updateTierNote();
     var curated = data.curated_threats != null ? data.curated_threats
                 : data.curated != null ? data.curated

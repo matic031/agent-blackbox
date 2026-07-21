@@ -341,6 +341,31 @@ def test_dashboard_graph_expands_explicitly_and_keeps_scene_state():
     assert 'magnitude.toLocaleString() + " THREAT"' in html
 
 
+def test_dashboard_refetches_empty_graph_when_first_verified_threats_arrive():
+    html = (
+        Path(__file__).resolve().parents[1]
+        / "plugins"
+        / "blackbox"
+        / "dashboard"
+        / "static"
+        / "index.html"
+    ).read_text(encoding="utf-8")
+
+    helper = html[html.index("function resetEmptyGraphOnFirstVerifiedThreats"):]
+    helper = helper[:helper.index("\n  function graphHasMore")]
+    render_status = html[html.index("function renderGraphStatus(data)"):]
+    render_status = render_status[:render_status.index("\n  // ---------- Poll loop")]
+
+    assert "if (!cached || graphLoaded(tier) > 0) return false;" in helper
+    assert "if (Number(previousTotal) > 0 || !(currentTotal > 0)) return false;" in helper
+    assert "graphCache[tier] = null;" in helper
+    assert "invalidateGraphTier(tier);" in helper
+    assert render_status.index('var previousPublicTotal = graphTotalForTier("public");') < (
+        render_status.index("lastStatus = data;")
+    )
+    assert 'resetEmptyGraphOnFirstVerifiedThreats("public", previousPublicTotal);' in render_status
+
+
 @pytest.mark.skip(reason="dashboard never joins private graphs")
 def test_ruleset_sync_once_uses_official_join_then_subscribe():
     class Cfg:
