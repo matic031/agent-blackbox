@@ -650,8 +650,8 @@ def test_authoritative_recovery_retries_fresh_node_peer_discovery(monkeypatch, c
             connects.append(peer_id)
             if len(connects) == 1:
                 raise cli_mod.DkgError(
-                    'POST /api/connect -> 404: {"code":"PEER_NOT_FOUND",'
-                    '"error":"PeerResolver returned no addresses"}'
+                    'POST /api/connect -> 502: {"code":"DIAL_FAILED",'
+                    '"error":"All multiaddr dials failed"}'
                 )
             return {"connected": True}
 
@@ -1014,6 +1014,54 @@ def test_authoritative_recovery_retries_empty_fresh_public_pass(
     )
     assert client.calls == 2
     assert "retrying the pinned source" in capsys.readouterr().out
+
+
+def test_authoritative_recovery_retries_zero_insert_with_incomplete_manifest(
+    monkeypatch, tmp_path, capsys
+):
+    graph = "owner/public-vm"
+
+    class FakeClient:
+        dkg_home = str(tmp_path)
+
+        def __init__(self):
+            self.calls = 0
+
+        def catchup_from_peer(self, cg_id, peer_id, *, budget_ms):
+            self.calls += 1
+            previous, current, inserted = (
+                (0, 500, 0) if self.calls == 1 else (500, 1_000, 250)
+            )
+            with (tmp_path / "daemon.log").open("a", encoding="utf-8") as handle:
+                handle.write(
+                    f'Rootless durable progress for "{graph}": '
+                    f'5 complete graph(s), safe offset {previous}->{current} '
+                    'of 1000 (raw 1000)\n'
+                )
+            return {
+                "ok": True,
+                "includeDurable": True,
+                "includeSharedMemory": False,
+                "peersAttempted": 1,
+                "totalDurableInsertedTriples": inserted,
+                "results": [{"peerId": peer_id}],
+            }
+
+        def threat_count(self, _cg_id):
+            return 100
+
+    client = FakeClient()
+    monkeypatch.setattr(cli_mod.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(cli_mod.sync_state, "write", lambda *_args, **_kwargs: {})
+
+    assert cli_mod._catchup_authoritative_vm(
+        client,
+        graph,
+        "publisher",
+        cli_mod.time.monotonic() + 60,
+    )
+    assert client.calls == 2
+    assert "snapshot remains incomplete (500/1,000)" in capsys.readouterr().out
 
 
 def test_authoritative_recovery_bounds_empty_fresh_public_passes(

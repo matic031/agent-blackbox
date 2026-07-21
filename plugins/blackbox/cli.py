@@ -1365,9 +1365,18 @@ def _catchup_authoritative_vm(
                 daemon=True,
             )
             worker.start()
+            request_started = time.monotonic()
             request_deadline = min(
                 deadline,
-                time.monotonic() + (budget_ms / 1_000) + 60.0,
+                request_started
+                + max(
+                    (budget_ms / 1_000) + 60.0,
+                    constants.GRAPH_SYNC_SETTLEMENT_TIMEOUT_S,
+                ),
+            )
+            request_timeout_seconds = max(
+                1,
+                int(request_deadline - request_started),
             )
             heartbeat = 0
             while True:
@@ -1377,8 +1386,8 @@ def _catchup_authoritative_vm(
                 )
                 if wait_for <= 0:
                     raise DkgError(
-                        f"verifiable VM sync exceeded its "
-                        f"{budget_ms / 1_000:.0f}s request budget"
+                        "verifiable VM sync exceeded its "
+                        f"{request_timeout_seconds}s settlement deadline"
                     )
                 try:
                     outcome_kind, outcome_value = outcome.get(timeout=wait_for)
@@ -1494,7 +1503,30 @@ def _catchup_authoritative_vm(
             ),
             inserted_durable_triples=inserted,
         )
+        durable_progress = read_durable_progress(
+            str(getattr(client, "dkg_home", "") or ""),
+            context_graph_id,
+        )
         if inserted <= 0:
+            expected = int(durable_progress.get("expected_triples") or 0)
+            safe_current = int(durable_progress.get("safe_current_triples") or 0)
+            if expected > 0 and safe_current < expected:
+                public_progress_seen = public_progress_seen or safe_current > 0
+                sync_state.write(
+                    "running",
+                    context_graph_id=context_graph_id,
+                    graph_peer_id=graph_peer_id,
+                    phase="recovering-verifiable-memory",
+                    inserted_durable_triples=0,
+                    **durable_progress,
+                )
+                print(
+                    "  verifiable VM pass settled without committed triples; "
+                    f"snapshot remains incomplete ({safe_current:,}/{expected:,}); "
+                    "retrying the pinned source"
+                )
+                time.sleep(min(2.0, max(0.2, deadline - time.monotonic())))
+                continue
             count_threats = getattr(client, "threat_count", None)
             local_threats: Optional[int] = None
             if callable(count_threats):
@@ -1541,10 +1573,6 @@ def _catchup_authoritative_vm(
         # only after verification and store materialization settle, so combine
         # that successful response with the managed daemon's safe graph boundary
         # to recognize completion without downloading the snapshot again.
-        durable_progress = read_durable_progress(
-            str(getattr(client, "dkg_home", "") or ""),
-            context_graph_id,
-        )
         if durable_progress.get("snapshot_complete") is True:
             expected = int(durable_progress.get("expected_triples") or 0)
             sync_state.write(
@@ -1576,6 +1604,9 @@ def _peer_discovery_pending(exc: DkgError) -> bool:
             "peerresolver returned no addresses",
             "no addresses for",
             "failed to find peer",
+            "dial_failed",
+            "all multiaddr dials failed",
+            "transport error: timed out",
         )
     )
 
