@@ -85,6 +85,7 @@ BLACKBOX_AUTO_DASHBOARD="${BLACKBOX_AUTO_DASHBOARD:-1}"
 BLACKBOX_SYNC_MODE="${BLACKBOX_SYNC_MODE:-wait}" # retained for compatibility; sync is controlled
 BLACKBOX_INSTALL_INCOMPLETE=false
 BLACKBOX_THREAT_GRAPH_INCOMPLETE=false
+BLACKBOX_PARTIAL_RULESET_READY=false
 BLACKBOX_SYNC_PENDING=false
 BLACKBOX_SYNC_LOG=""
 BLACKBOX_DETACHED_PID=""
@@ -118,16 +119,35 @@ heading() { echo ""; echo "${MINT}${BOLD}$1${NC}"; }
 run_detached() {
     local log_file="$1"
     shift
-    if command -v setsid >/dev/null 2>&1; then
+    local python_bin="${VENV_DIR:-}/bin/python"
+    if [ -x "$python_bin" ]; then
+        # macOS has no setsid(1). Python's start_new_session creates a real
+        # session boundary, so an installer exiting non-zero cannot propagate a
+        # terminal hangup to the dashboard it already reported as running.
+        BLACKBOX_DETACHED_PID="$("$python_bin" -c '
+import subprocess, sys
+log = open(sys.argv[1], "ab", buffering=0)
+proc = subprocess.Popen(
+    sys.argv[2:],
+    stdin=subprocess.DEVNULL,
+    stdout=log,
+    stderr=subprocess.STDOUT,
+    start_new_session=True,
+    close_fds=True,
+)
+print(proc.pid)
+' "$log_file" "$@")"
+    elif command -v setsid >/dev/null 2>&1; then
         nohup setsid "$@" </dev/null >"$log_file" 2>&1 &
+        BLACKBOX_DETACHED_PID=$!
     else
         # macOS has no `setsid`.  Detach stdin as well as stdout/stderr and
         # remove the job from Bash's table; otherwise the installer shell can
         # propagate a hangup when it exits, killing a dashboard/sync child it
         # just reported as running.
         nohup "$@" </dev/null >"$log_file" 2>&1 &
+        BLACKBOX_DETACHED_PID=$!
     fi
-    BLACKBOX_DETACHED_PID=$!
     disown "$BLACKBOX_DETACHED_PID" 2>/dev/null || true
 }
 
@@ -1479,6 +1499,9 @@ sync_ruleset() {
     if [ "$sync_code" -eq 0 ]; then
         ok "Ruleset synced — Blackbox is watching with the latest threats"
     else
+        if grep -Eq '  [1-9][0-9,]* verified threats ready' "$BLACKBOX_SYNC_LOG"; then
+            BLACKBOX_PARTIAL_RULESET_READY=true
+        fi
         BLACKBOX_INSTALL_INCOMPLETE=true
         BLACKBOX_THREAT_GRAPH_INCOMPLETE=true
         err "Initial verified threat-graph sync did not complete."
@@ -1817,13 +1840,23 @@ EOF
 ${path_note}
 EOF
         if [ "$BLACKBOX_THREAT_GRAPH_INCOMPLETE" = true ]; then
-            cat <<EOF
+            if [ "$BLACKBOX_PARTIAL_RULESET_READY" = true ]; then
+                cat <<EOF
+  A partial verified ruleset is active, but the authoritative snapshot did not
+  finish. Keep the dashboard open to inspect the active protection, then retry:
+
+      blackbox sync --wait --require-rules
+
+EOF
+            else
+                cat <<EOF
   The local DKG node did not provide a non-empty ruleset yet. Do not treat this
   install as protected until this command succeeds:
 
       blackbox sync --wait --require-rules
 
 EOF
+            fi
         fi
         cat <<EOF
   Dashboard:  http://127.0.0.1:${BLACKBOX_DASHBOARD_PORT:-9700}

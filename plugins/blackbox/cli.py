@@ -24,6 +24,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional
 from . import attach, audit, constants, llm, quads, ruleset, settings, sync_state
 from .config import BlackboxConfig, load_blackbox_config
 from .dkg_client import DkgClient, DkgError
+from .dkg_progress import read_durable_progress
 
 logger = logging.getLogger(__name__)
 
@@ -1578,9 +1579,36 @@ def _catchup_authoritative_vm(
         if on_progress is not None:
             on_progress(inserted)
         public_progress_seen = True
+        # DKG's bounded rootless recovery deletes its transient page checkpoint
+        # after the safe offset reaches the manifest total. Reissuing the full
+        # snapshot request then starts a new scan at offset zero; it is not a
+        # required idempotent EOF round. The HTTP response above is delivered
+        # only after verification and store materialization settle, so combine
+        # that successful response with the managed daemon's safe graph boundary
+        # to recognize completion without downloading the snapshot again.
+        durable_progress = read_durable_progress(
+            str(getattr(client, "dkg_home", "") or ""),
+            context_graph_id,
+        )
+        if durable_progress.get("snapshot_complete") is True:
+            expected = int(durable_progress.get("expected_triples") or 0)
+            sync_state.write(
+                "running",
+                context_graph_id=context_graph_id,
+                graph_peer_id=graph_peer_id,
+                phase="refreshing-verifiable-memory",
+                inserted_durable_triples=inserted,
+                **durable_progress,
+            )
+            print(
+                f"  verifiable VM snapshot complete "
+                f"({expected:,} triples verified and stored)"
+            )
+            return True
         # A transport interruption can yield a verified prefix and a successful
-        # HTTP response. Repeat the pinned pass until the publisher reports a
-        # clean idempotent zero-insert round; only then is recovery settled.
+        # HTTP response. Repeat the pinned pass until the safe manifest boundary
+        # is complete. The zero-insert path remains a compatibility fallback for
+        # DKG builds that do not emit rootless durable progress.
         time.sleep(min(2.0, max(0.2, deadline - time.monotonic())))
 
 

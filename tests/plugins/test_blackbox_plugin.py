@@ -944,6 +944,47 @@ def test_authoritative_recovery_uses_short_first_pass_then_normal_dkg_budget(
     ]
 
 
+def test_authoritative_recovery_stops_after_safe_manifest_completion(
+    monkeypatch, tmp_path, capsys
+):
+    graph = "owner/public-vm"
+
+    class FakeClient:
+        dkg_home = str(tmp_path)
+
+        def __init__(self):
+            self.calls = 0
+
+        def catchup_from_peer(self, cg_id, peer_id, *, budget_ms):
+            self.calls += 1
+            assert cg_id == graph
+            (tmp_path / "daemon.log").write_text(
+                f'Rootless durable progress for "{graph}": '
+                "10 complete graph(s), safe offset 750->1000 of 1000 (raw 1000)\n",
+                encoding="utf-8",
+            )
+            return {
+                "ok": True,
+                "includeDurable": True,
+                "includeSharedMemory": False,
+                "peersAttempted": 1,
+                "totalDurableInsertedTriples": 250,
+                "results": [{"peerId": peer_id}],
+            }
+
+    client = FakeClient()
+    monkeypatch.setattr(cli_mod.sync_state, "write", lambda *_args, **_kwargs: {})
+
+    assert cli_mod._catchup_authoritative_vm(
+        client,
+        graph,
+        "publisher",
+        cli_mod.time.monotonic() + 60,
+    )
+    assert client.calls == 1
+    assert "1,000 triples verified and stored" in capsys.readouterr().out
+
+
 def test_context_graph_binding_falls_back_to_verified_ontology_query():
     calls = []
 

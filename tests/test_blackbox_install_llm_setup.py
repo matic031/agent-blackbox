@@ -254,6 +254,8 @@ def test_next_steps_only_blocks_on_threat_graph_sync() -> None:
     assert "BLACKBOX_THREAT_GRAPH_INCOMPLETE" in body
     assert "BLACKBOX_LLM_INCOMPLETE" not in body
     assert "The LLM reviewer is not configured yet." not in body
+    assert "A partial verified ruleset is active" in body
+    assert "BLACKBOX_PARTIAL_RULESET_READY" in body
 
 
 def test_unix_installer_is_directly_executable_and_detaches_background_processes(
@@ -264,6 +266,9 @@ def test_unix_installer_is_directly_executable_and_detaches_background_processes
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     (fake_bin / "nohup").symlink_to(shutil.which("nohup") or "/usr/bin/nohup")
+    venv_bin = tmp_path / "venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    (venv_bin / "python").symlink_to(Path(sys.executable))
     pid_file = tmp_path / "child.pid"
     log_file = tmp_path / "child.log"
     body = _extract_function_body("run_detached")
@@ -277,9 +282,12 @@ run_detached() {{
 {body}
 }}
 PATH={shlex.quote(str(fake_bin))}
+VENV_DIR={shlex.quote(str(tmp_path / "venv"))}
 run_detached {shlex.quote(str(log_file))} {shlex.quote(sys.executable)} -c {shlex.quote(child_code)}
+exit 1
 """
-    subprocess.run(["bash", "-c", command], check=True, timeout=5)
+    installer = subprocess.run(["bash", "-c", command], check=False, timeout=5)
+    assert installer.returncode == 1
 
     deadline = time.monotonic() + 3
     while not pid_file.exists() and time.monotonic() < deadline:
@@ -292,6 +300,14 @@ run_detached {shlex.quote(str(log_file))} {shlex.quote(sys.executable)} -c {shle
         # The detached process is intentionally reparented, so the suite's
         # Python-level process-tree guard no longer considers it a child.
         subprocess.run(["/bin/kill", "-TERM", str(child_pid)], check=False)
+
+
+def test_unix_installer_uses_a_real_session_boundary_for_dashboard() -> None:
+    body = _extract_function_body("run_detached")
+
+    assert "start_new_session=True" in body
+    assert "stdin=subprocess.DEVNULL" in body
+    assert "close_fds=True" in body
 
 
 def test_unix_installer_starts_dashboard_before_one_controlled_sync() -> None:

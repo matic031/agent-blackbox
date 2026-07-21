@@ -2788,7 +2788,7 @@
             <span class="sync-progress-meta" id="sync-progress-percent"></span>
           </div>
           <div class="sync-progress-detail" id="sync-progress-detail"></div>
-          <div class="sync-progress-expectation" id="sync-progress-expectation">It’s expected for initial sync to take up to 2 hours.</div>
+          <div class="sync-progress-expectation" id="sync-progress-expectation">Initial sync can take several minutes. Verification continues after the download completes.</div>
           <div class="sync-progress-track" aria-hidden="true"><div class="sync-progress-bar" id="sync-progress-bar"></div></div>
           <div class="sync-progress-meta"><span id="sync-progress-elapsed"></span><span id="sync-progress-updated"></span></div>
         </div>
@@ -6190,7 +6190,8 @@
         modePill.hidden = true;
       }
     }
-    if (lastSync != null) {
+    var lastSyncMs = timestampMs(lastSync);
+    if (lastSyncMs != null && lastSyncMs > 0) {
       $("stat-sync").textContent = fmtAgo(lastSync);
       $("stat-sync-meta").textContent = "auto every " + (fmtInterval(interval) === "-" ? "cycle" : fmtInterval(interval));
     } else {

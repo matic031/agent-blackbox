@@ -302,8 +302,10 @@ def test_dkg_durable_progress_reports_latest_monotonic_snapshot_offset(tmp_path)
 
     assert server._dkg_durable_progress(str(tmp_path), graph) == {
         "current_triples": 720,
+        "safe_current_triples": 700,
         "expected_triples": 1000,
         "progress_percent": 72.0,
+        "snapshot_complete": False,
     }
 
 
@@ -322,9 +324,45 @@ def test_dkg_durable_progress_discards_completed_previous_sync_window(tmp_path):
 
     assert server._dkg_durable_progress(str(tmp_path), graph) == {
         "current_triples": 350,
+        "safe_current_triples": 300,
         "expected_triples": 1200,
         "progress_percent": 29.2,
+        "snapshot_complete": False,
     }
+
+
+def test_dkg_durable_progress_resets_on_positive_new_window(tmp_path):
+    graph = "0x37b1/agent-blackbox-vm"
+    (tmp_path / "daemon.log").write_text(
+        "\n".join(
+            [
+                f'Rootless durable progress for "{graph}": safe offset 900->1000 of 1000 (raw 1000)',
+                f'Rootless durable progress for "{graph}": safe offset 0->200 of 1000 (raw 220)',
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    assert server._dkg_durable_progress(str(tmp_path), graph) == {
+        "current_triples": 220,
+        "safe_current_triples": 200,
+        "expected_triples": 1000,
+        "progress_percent": 22.0,
+        "snapshot_complete": False,
+    }
+
+
+def test_dkg_durable_progress_marks_safe_manifest_complete(tmp_path):
+    graph = "0x37b1/agent-blackbox-vm"
+    (tmp_path / "daemon.log").write_text(
+        f'Rootless durable progress for "{graph}": '
+        "safe offset 700->1000 of 1000 (raw 1000)\n",
+        encoding="utf-8",
+    )
+
+    assert server._dkg_durable_progress(str(tmp_path), graph)[
+        "snapshot_complete"
+    ] is True
 
 
 def test_sync_activity_reports_durable_download_percentage():
@@ -368,8 +406,41 @@ def test_sync_activity_marks_download_complete_during_ruleset_refresh():
     )
 
     assert activity["current"] == 5_337_721
-    assert activity["percent"] == 100.0
-    assert activity["indeterminate"] is False
+    assert activity["percent"] is None
+    assert activity["indeterminate"] is True
+    assert activity["label"] == "Indexing verified threats"
+    assert "verified and stored" in activity["detail"]
+
+
+def test_sync_activity_does_not_show_ready_percentage_during_final_verification():
+    activity = server._sync_activity(
+        public=460_000,
+        community=0,
+        node_reachable=True,
+        catchup={"status": "running"},
+        connection={},
+        transfer={
+            "status": "running",
+            "phase": "recovering-verifiable-memory",
+            "current_triples": 5_337_721,
+            "expected_triples": 5_337_721,
+        },
+    )
+
+    assert activity["percent"] is None
+    assert activity["indeterminate"] is True
+    assert activity["label"] == "Finalizing verified snapshot"
+    assert "verifying and storing" in activity["detail"]
+
+
+def test_dashboard_sync_copy_and_last_sync_guard_match_runtime_contract():
+    html = (Path(server.__file__).with_name("static") / "index.html").read_text(
+        encoding="utf-8"
+    )
+
+    assert "take up to 2 hours" not in html
+    assert "Verification continues after the download completes." in html
+    assert "lastSyncMs != null && lastSyncMs > 0" in html
 
 
 def test_sync_activity_keeps_atomic_catchup_indeterminate():

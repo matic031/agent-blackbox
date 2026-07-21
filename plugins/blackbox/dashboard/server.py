@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import logging
 import os
-import re
 import shutil
 import socket
 import subprocess
@@ -29,6 +28,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Set, Tuple
 
 from .. import sync_state
+from ..dkg_progress import read_durable_progress
 
 logger = logging.getLogger(__name__)
 
@@ -51,48 +51,9 @@ _connection_states: Dict[str, Dict[str, Any]] = {}
 _STATIC_DIR = Path(__file__).resolve().parent / "static"
 _ASSETS_DIR = Path(__file__).resolve().parent / "assets"
 _FONTS_DIR = _ASSETS_DIR / "fonts"
-_DURABLE_PROGRESS_RE = re.compile(
-    r'Rootless durable progress for "(?P<graph>[^"]+)".*?'
-    r'safe offset (?P<previous>\d+)->(?P<current>\d+) of (?P<expected>\d+)'
-    r' \(raw (?P<raw>\d+)\)'
-)
-
-
 def _dkg_durable_progress(dkg_home: str, context_graph_id: str) -> Dict[str, Any]:
     """Read the latest resumable VM offset reported by the managed DKG."""
-    path = Path(dkg_home) / "daemon.log"
-    try:
-        with path.open("rb") as handle:
-            size = path.stat().st_size
-            handle.seek(max(0, size - 4_000_000))
-            text = handle.read().decode("utf-8", errors="replace")
-    except OSError:
-        return {}
-    matches = []
-    for match in _DURABLE_PROGRESS_RE.finditer(text):
-        if match.group("graph") != context_graph_id:
-            continue
-        # Each controlled catch-up starts a new safe-offset window. Do not
-        # report a previous run's 100% while the current transfer is at 0%.
-        if int(match.group("previous")) == 0 and int(match.group("current")) == 0:
-            matches = []
-        matches.append(match)
-    if not matches:
-        return {}
-    expected = int(matches[-1].group("expected"))
-    current = max(
-        max(int(match.group("current")), int(match.group("raw")))
-        for match in matches
-        if int(match.group("expected")) == expected
-    )
-    if expected <= 0:
-        return {}
-    current = max(0, min(current, expected))
-    return {
-        "current_triples": current,
-        "expected_triples": expected,
-        "progress_percent": round((current / expected) * 100, 1),
-    }
+    return read_durable_progress(dkg_home, context_graph_id)
 
 
 def _blackbox_runtime_argv(port: int = _BLACKBOX_RUNTIME_PORT) -> List[str]:
@@ -462,14 +423,35 @@ def _sync_activity(
         )
         if expected_triples > 0:
             bounded_triples = max(0, min(current_triples, expected_triples))
-            if (
-                phase == "refreshing-verifiable-memory"
-                and "inserted_durable_triples" in transfer
-                and int(transfer.get("inserted_durable_triples") or 0) == 0
-            ):
-                # A clean zero-insert pass is the publisher's idempotent EOF.
-                # The remaining work is rebuilding the queryable threat count.
-                bounded_triples = expected_triples
+            if phase == "refreshing-verifiable-memory":
+                progress.update(
+                    label="Indexing verified threats",
+                    detail=(
+                        "The snapshot is verified and stored. Blackbox is "
+                        "rebuilding the local enforcement ruleset."
+                    ),
+                    current=expected_triples,
+                    expected=expected_triples,
+                    percent=None,
+                    indeterminate=True,
+                )
+                return progress
+            if bounded_triples >= expected_triples:
+                # The durable log reaches the manifest boundary before the
+                # request's verification/store tail returns. A plain 100% bar
+                # falsely communicates product readiness during that tail.
+                progress.update(
+                    label="Finalizing verified snapshot",
+                    detail=(
+                        f"All {expected_triples:,} graph triples were received. "
+                        "DKG is verifying and storing the final snapshot."
+                    ),
+                    current=expected_triples,
+                    expected=expected_triples,
+                    percent=None,
+                    indeterminate=True,
+                )
+                return progress
             progress.update(
                 detail=(
                     f"{bounded_triples:,} of {expected_triples:,} graph triples "
@@ -1334,7 +1316,7 @@ def create_app(*, manage_blackbox: bool = False):
             "dkg_bin": cfg.dkg_bin,
             "node_reachable": g["node_reachable"],
             "sync_interval": cfg.sync_interval,
-            "last_sync": rs.synced_at,
+            "last_sync": rs.synced_at or None,
             "ruleset": counts,
             "curated": public,
             "community": community,
