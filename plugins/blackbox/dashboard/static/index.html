@@ -2971,6 +2971,10 @@
             </tbody>
           </table>
         </div>
+        <div class="audit-foot" id="findings-foot">
+          <span class="audit-count" id="findings-shown">-</span>
+          <button type="button" class="load-more" id="findings-more" hidden>Load more threats</button>
+        </div>
       </div>
     </section>
 
@@ -3079,8 +3083,10 @@
   // reachability when deciding "still syncing" vs a settled 0. See countSyncing.
   var lastStatus = null;
 
-  // Findings: keep the latest fetched list so the sort toggle can re-render
-  // without a network round-trip. Backend returns newest-first already.
+  // Findings: keep the latest fetched list so sorting stays local. Expanded
+  // pages remain expanded across background polls instead of snapping to 10.
+  var FINDINGS_PAGE = 10, FINDINGS_MAX = 500, findingsLoaded = FINDINGS_PAGE;
+  var findingsRequestGeneration = 0;
   var findingsCache = null;
   var findingsSort = "newest";   // "newest" | "severity"
 
@@ -6209,10 +6215,12 @@
     var onboarding = $("findings-onboarding");
     var findingsPanel = $("findings-panel");
     var findingsSortControl = $("findings-sort-control");
+    var findingsFoot = $("findings-foot");
     var showOnboarding = openCount === 0;
     if (onboarding) onboarding.hidden = !showOnboarding;
     if (findingsPanel) findingsPanel.hidden = showOnboarding;
     if (findingsSortControl) findingsSortControl.hidden = showOnboarding;
+    if (findingsFoot) findingsFoot.hidden = showOnboarding;
     if (showOnboarding) checkFirstDetectionReadiness();
 
     if (!list.length) {
@@ -6223,6 +6231,20 @@
 
     findingsRendered = sortedFindings(list);
     body.innerHTML = findingsRendered.map(findingRowHTML).join("");
+    var shown = $("findings-shown");
+    if (shown) shown.textContent = "Showing " + list.length + " of " + openCount;
+    var more = $("findings-more");
+    if (more) more.hidden = !(list.length < openCount && findingsLoaded < FINDINGS_MAX);
+  }
+
+  function loadFindings() {
+    var requestGeneration = ++findingsRequestGeneration;
+    return getJSON("/api/findings?limit=" + findingsLoaded + "&offset=0").then(function (data) {
+      if (requestGeneration !== findingsRequestGeneration) return null;
+      processThreatNotifications(data);
+      renderFindings(data);
+      return data;
+    });
   }
 
   function renderFirstDetectionReadiness() {
@@ -6333,7 +6355,7 @@
   function poll() {
     loadAudit();   // full history refresh (independent of the fixed-index batch below)
     return Promise.allSettled([
-      getJSON("/api/findings?limit=10"),
+      loadFindings(),
       getJSON("/api/graph-status"),
       getJSON("/api/agents"),
       getJSON("/api/local-activity")
@@ -6341,10 +6363,6 @@
       var anyOk = res.some(function (r) { return r.status === "fulfilled"; });
       var allFail = res.every(function (r) { return r.status === "rejected"; });
 
-      if (res[0].status === "fulfilled") {
-        processThreatNotifications(res[0].value);
-        renderFindings(res[0].value);
-      }
       if (res[1].status === "fulfilled") renderGraphStatus(res[1].value);
       if (res[2].status === "fulfilled") renderAgents(res[2].value);
       var anyGraph = false;
@@ -6435,6 +6453,17 @@
   }
   $("sort-newest").addEventListener("click", function () { setFindingsSort("newest"); });
   $("sort-severity").addEventListener("click", function () { setFindingsSort("severity"); });
+
+  var findingsMoreBtn = $("findings-more");
+  if (findingsMoreBtn) findingsMoreBtn.addEventListener("click", function () {
+    findingsLoaded = Math.min(FINDINGS_MAX, findingsLoaded + FINDINGS_PAGE);
+    findingsMoreBtn.disabled = true;
+    findingsMoreBtn.textContent = "Loading\u2026";
+    loadFindings().catch(function () {}).then(function () {
+      findingsMoreBtn.disabled = false;
+      findingsMoreBtn.textContent = "Load more threats";
+    });
+  });
 
   var threatNotifyBtn = $("threat-notify");
   if (threatNotifyBtn) threatNotifyBtn.addEventListener("click", function () {

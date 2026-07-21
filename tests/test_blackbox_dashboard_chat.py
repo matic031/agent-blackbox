@@ -368,6 +368,25 @@ def test_dashboard_explore_mode_adapts_rendered_nodes_to_frame_rate():
     assert 'id="graph-performance"' in html
 
 
+def test_dashboard_findings_can_load_more_without_poll_resetting_the_page():
+    html = (
+        Path(__file__).resolve().parents[1]
+        / "plugins"
+        / "blackbox"
+        / "dashboard"
+        / "static"
+        / "index.html"
+    ).read_text(encoding="utf-8")
+
+    assert 'id="findings-more"' in html
+    assert 'id="findings-shown"' in html
+    assert "var FINDINGS_PAGE = 10, FINDINGS_MAX = 500" in html
+    assert 'getJSON("/api/findings?limit=" + findingsLoaded + "&offset=0")' in html
+    assert "findingsLoaded + FINDINGS_PAGE" in html
+    assert "requestGeneration !== findingsRequestGeneration" in html
+    assert 'findingsMoreBtn.textContent = "Load more threats"' in html
+
+
 def test_dashboard_more_node_is_a_display_only_marker():
     html = (
         Path(__file__).resolve().parents[1]
