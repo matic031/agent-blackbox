@@ -3034,12 +3034,6 @@
     explore: { cap: 1200, focusCap: 12000 }
   };
   var GRAPH_CATEGORY_MIN_LEAVES = 12;
-  var GRAPH_ZOOM_CAPS = [
-    { scale: 1.6, cap: 900 },
-    { scale: 2.5, cap: 3000 },
-    { scale: 3.8, cap: 7000 },
-    { scale: 5.2, cap: 12000 }
-  ];
   var GRAPH_MAX_VISIBLE_LEAVES = 12000;
   var graphDetailMode = { public: "compact", community: "compact" };
   var graphLeafLimit = {
@@ -3047,8 +3041,6 @@
     community: GRAPH_DETAIL_PRESETS.compact.cap
   };
   var graphFocus = { public: null, community: null };
-  var graphZoomBand = { public: {}, community: {} };
-  var graphZoomTimer = null;
   var graphFocusLoadInFlight = { public: false, community: false };
   var graphRenderMeta = { public: null, community: null, local: null };
 
@@ -3365,25 +3357,30 @@
     return getJSON(graphFocusPageUrl(tier, focus, offset)).then(function (page) {
       var existing = graphCache[tier] || { tier: tier, threats: [], total: graphTotalForTier(tier) || 0 };
       var seen = {};
+      var added = 0;
       asList(existing).forEach(function (t) { if (t && t.identifier) seen[t.identifier] = true; });
       asList(page).forEach(function (t) {
         if (!t || !t.identifier || seen[t.identifier]) return;
         existing.threats.push(t);
         seen[t.identifier] = true;
+        added += 1;
       });
       graphCache[tier] = existing;
-      graphRevision[tier] += 1;
       graphFocusLoadInFlight[tier] = false;
-      if (tier === activeTier) renderGraphTab();
-      return true;
+      // An empty/duplicate page must not reheat the graph or disturb its layout.
+      if (added > 0) {
+        graphRevision[tier] += 1;
+        if (tier === activeTier) renderGraphTab();
+      }
+      return added > 0;
     }, function (err) {
       graphFocusLoadInFlight[tier] = false;
       throw err;
     });
   }
 
-  // Polling seeds one balanced page only. Deeper category pages are fetched as
-  // the user zooms or explicitly expands a branch.
+  // Polling seeds one balanced page only. Deeper category pages are fetched
+  // when the user explicitly explores or expands a branch.
   function loadGraphTier(tier) {
     if (graphCache[tier]) return Promise.resolve(false);
     return loadGraphPage(tier);
@@ -4424,7 +4421,11 @@
 
     // label
     var big = isCenter || isSession || isHub;
-      var fontPx = (isCenter ? 6.5 : (isSession || isHub) ? 5.5 : 4.6);
+      // Keep key labels at a stable screen size. Graph-unit fonts disappear
+      // when a 10k-node scene zooms to fit, hiding the totals users care about.
+      var screenFontPx = (isCenter ? 12 : isHub ? 10.5 : isSession ? 7 : 5.5);
+      var labelScale = Math.max(Number(scale) || 1, 0.45);
+      var fontPx = screenFontPx / labelScale;
       // Declutter: tool-call / "+more" labels are secondary — show only when
       // zoomed in. Threat leaves appear a touch earlier; sessions/hubs/center always.
       if ((isCall || isMore) && scale < 1.35) { ctx.restore(); return; }
@@ -4433,7 +4434,7 @@
       ctx.textAlign = "center";
       ctx.textBaseline = "top";
     var txt = node.label || "";
-    var ty = node.y + r + 2.4;
+    var ty = node.y + r + 3.2 / labelScale;
     // subtle shadow for legibility over the dark field
     ctx.fillStyle = GRAPH_LABEL_SHADOW;
     ctx.fillText(txt, node.x + 0.4 / scale, ty + 0.4 / scale);
@@ -4442,8 +4443,8 @@
 
     // Magnitude labels always use corpus totals, never the rendered leaf sample.
     if ((isHub || isCenter) && (isHub ? node.count : node.threatTotal) != null) {
-      var cy = ty + fontPx + 1.4;
-      ctx.font = "700 " + (fontPx + 0.8) + "px 'IBM Plex Mono', ui-monospace, monospace";
+      var cy = ty + fontPx + 2 / labelScale;
+      ctx.font = "700 " + ((screenFontPx + 1.2) / labelScale) + "px 'IBM Plex Mono', ui-monospace, monospace";
       var magnitude = isHub ? node.count : node.threatTotal;
       var cstr = magnitude.toLocaleString() + " THREAT" + (magnitude === 1 ? "" : "S");
       ctx.fillStyle = GRAPH_LABEL_SHADOW;
@@ -4979,59 +4980,20 @@
       var current = graphCap(activeTier);
       var preset = graphPreset(activeTier);
       var baseStep = graphFocus[activeTier] ? preset.focusCap : preset.cap;
-      var next = Math.max(current + baseStep, Math.ceil(current * 1.8));
+      var requested = Math.max(current + baseStep, Math.ceil(current * 1.8));
+      var needsPage = requested > threats.length && graphHasMore(activeTier);
+      var next = requested;
       if (threats.length > 0) next = Math.min(next, threats.length);
       graphLeafLimit[activeTier] = Math.max(current + 1, next);
       invalidateGraphTier(activeTier);
       renderGraphTab();
-      if (!graphSearchQuery[activeTier] && graphHasMore(activeTier)) {
-        loadGraphPage(activeTier).catch(function () {});
-      }
-    }
-    function graphFocusAtViewportCenter() {
-      var hubs = graphNodesShown.filter(function (node) {
-        return node && node.kind === "hub" && node.focus && !node.focus.eco &&
-          typeof node.x === "number" && typeof node.y === "number";
-      });
-      if (!hubs.length) return graphFocus[activeTier] || null;
-      var point = { x: 0, y: 0 };
-      var canvas = $("graph-canvas");
-      try {
-        if (fg && canvas && typeof fg.screen2GraphCoords === "function") {
-          point = fg.screen2GraphCoords(canvas.clientWidth / 2, canvas.clientHeight / 2);
+      if (needsPage && !graphSearchQuery[activeTier]) {
+        if (graphFocus[activeTier]) {
+          loadGraphFocusPage(activeTier, graphFocus[activeTier]).catch(function () {});
+        } else if (graphHasMore(activeTier)) {
+          loadGraphPage(activeTier).catch(function () {});
         }
-      } catch (_) {}
-      hubs.sort(function (a, b) {
-        var ad = Math.pow(a.x - point.x, 2) + Math.pow(a.y - point.y, 2);
-        var bd = Math.pow(b.x - point.x, 2) + Math.pow(b.y - point.y, 2);
-        return ad - bd;
-      });
-      return hubs[0].focus;
-    }
-    function expandGraphForZoom(transform) {
-      if (activeTier === "local" || graphSearchQuery[activeTier]) return;
-      var scale = Number(transform && transform.k || 1);
-      var band = 0;
-      GRAPH_ZOOM_CAPS.forEach(function (step, index) {
-        if (scale >= step.scale) band = index + 1;
-      });
-      if (!band) return;
-      if (graphZoomTimer) window.clearTimeout(graphZoomTimer);
-      graphZoomTimer = window.setTimeout(function () {
-        graphZoomTimer = null;
-        var focus = graphFocusAtViewportCenter();
-        if (!focus) return;
-        var focusKey = graphFocusKey(focus);
-        if (band <= (graphZoomBand[activeTier][focusKey] || 0)) return;
-        graphZoomBand[activeTier][focusKey] = band;
-        graphFocus[activeTier] = focus;
-        graphLeafLimit[activeTier] = Math.max(
-          graphCap(activeTier), GRAPH_ZOOM_CAPS[band - 1].cap
-        );
-        invalidateGraphTier(activeTier);
-        renderGraphTab();
-        loadGraphFocusPage(activeTier, focus).catch(function () {});
-      }, 180);
+      }
     }
     function setGraphDetailMode(mode) {
       if (!GRAPH_DETAIL_PRESETS[mode] || activeTier === "local") return;
@@ -5039,7 +5001,6 @@
       graphLeafLimit[activeTier] = graphPreset(activeTier).cap;
       if (mode === "compact") {
         graphFocus[activeTier] = null;
-        graphZoomBand[activeTier] = {};
       }
       else ensureExploreFocus(activeTier);
       if (mode === "explore" && graphFocus[activeTier]) {
@@ -5206,7 +5167,6 @@
       .d3VelocityDecay(0.3)
       .enableNodeDrag(true)
       .onNodeClick(onNodeClick)
-      .onZoom(expandGraphForZoom)
         .onNodeHover(function (node) {
           var c = $("graph-canvas");
           if (c) c.style.cursor = (node && (node.kind === "leaf" || node.kind === "lthreat" || node.kind === "hub" || node.kind === "gmore")) ? "pointer" : "default";
@@ -5215,30 +5175,33 @@
         // frame the whole network once it first settles
           if (!didInitialZoom && fg) {
             didInitialZoom = true;
-            try { fg.zoomToFit(450, 72); } catch (e) {}
+            try { fg.zoomToFit(450, 42); } catch (e) {}
           }
       });
       tuneForces(fg, false, 0);
       return fg;
     }
 
-    // Spread the layout by tier density: the ~100-node local graph needs stronger
-    // repulsion + longer links to read as an open web; small tiers stay tight.
+    // Dense catalogs should read as a constellation, not explode off-canvas.
+    // Repulsion deliberately weakens as node count rises; links pull 10k+ leaves
+    // into legible category galaxies while compact/local views remain airy.
     function tuneForces(g, dense, nodeCount) {
-      var veryDense = Number(nodeCount || 0) > 800;
-      var moderatelyDense = dense || Number(nodeCount || 0) > 180;
-      try { g.cooldownTicks(veryDense ? 260 : (moderatelyDense ? 190 : 120)); } catch (e) {}
-      try { g.d3VelocityDecay(veryDense ? 0.22 : (moderatelyDense ? 0.25 : 0.3)); } catch (e) {}
-      try { g.d3Force("charge").strength(veryDense ? -620 : (moderatelyDense ? -360 : -140)); } catch (e) {}
+      var count = Number(nodeCount || 0);
+      var ultraDense = count > 5000;
+      var veryDense = count > 1200;
+      var moderatelyDense = dense || count > 350;
+      try { g.cooldownTicks(ultraDense ? 320 : (veryDense ? 260 : (moderatelyDense ? 190 : 130))); } catch (e) {}
+      try { g.d3VelocityDecay(ultraDense ? 0.18 : (veryDense ? 0.2 : (moderatelyDense ? 0.24 : 0.3))); } catch (e) {}
+      try {
+        g.d3Force("charge").strength(ultraDense ? -12 : (veryDense ? -24 : (moderatelyDense ? -55 : -105)));
+      } catch (e) {}
       try {
         var lf = g.d3Force("link");
-        if (lf) lf.distance(moderatelyDense
-          ? function (l) {
-              if (l.kind === "hub") return veryDense ? 88 : 68;
-              if (l.kind === "leaf") return veryDense ? 72 : 56;
-              return veryDense ? 38 : 30;
-            }
-          : 30);
+        if (lf) lf.distance(function (l) {
+          if (l.kind === "hub") return ultraDense ? 32 : (veryDense ? 40 : (moderatelyDense ? 52 : 58));
+          if (l.kind === "leaf") return ultraDense ? 10 : (veryDense ? 14 : (moderatelyDense ? 23 : 31));
+          return ultraDense ? 8 : (veryDense ? 12 : (moderatelyDense ? 20 : 28));
+        });
       } catch (e) {}
       try { if (typeof g.d3ReheatSimulation === "function") g.d3ReheatSimulation(); } catch (e) {}
     }

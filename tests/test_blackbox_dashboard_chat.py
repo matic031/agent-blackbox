@@ -83,6 +83,8 @@ def test_dashboard_public_graph_uses_vm_verified_ruleset_rows(monkeypatch):
             "name": "Verified two",
         }],
         "total": 2,
+        "category_totals": {"dependency": 2},
+        "ecosystem_totals": {"npm": 2},
         "offset": 1,
         "limit": 1,
         "partial": False,
@@ -206,7 +208,7 @@ def test_dashboard_automatic_sync_runs_canonical_verified_cli(monkeypatch):
     assert calls[0][1]["timeout"] == 153
 
 
-def test_dashboard_lists_one_thousand_vm_threats_not_one_collection(monkeypatch):
+def test_dashboard_lists_more_than_five_thousand_vm_threats_with_exact_totals(monkeypatch):
     from plugins.blackbox import config, ruleset
 
     cfg = SimpleNamespace(
@@ -218,11 +220,11 @@ def test_dashboard_lists_one_thousand_vm_threats_not_one_collection(monkeypatch)
         sync_interval=60,
     )
 
-    class ThousandThreats:
+    class LargeThreatGraph:
         synced_at = 123.0
 
         def iter_rules(self):
-            for i in range(1000):
+            for i in range(6001):
                 yield "dependency", {
                     "identifier": f"dep:npm:threat-{i}@1.0.0",
                     "severity": "critical",
@@ -231,13 +233,15 @@ def test_dashboard_lists_one_thousand_vm_threats_not_one_collection(monkeypatch)
                 }
 
     monkeypatch.setattr(config, "load_blackbox_config", lambda: cfg)
-    monkeypatch.setattr(ruleset, "peek", lambda _cfg=None: ThousandThreats())
+    monkeypatch.setattr(ruleset, "peek", lambda _cfg=None: LargeThreatGraph())
 
-    result = TestClient(server.create_app()).get("/api/graph?tier=public&limit=1000").json()
+    result = TestClient(server.create_app()).get("/api/graph?tier=public&limit=6001").json()
 
-    assert result["total"] == 1000
-    assert len(result["threats"]) == 1000
-    assert len({row["identifier"] for row in result["threats"]}) == 1000
+    assert result["total"] == 6001
+    assert result["category_totals"] == {"dependency": 6001}
+    assert result["ecosystem_totals"] == {"npm": 6001}
+    assert len(result["threats"]) == 6001
+    assert len({row["identifier"] for row in result["threats"]}) == 6001
 
 
 def test_dashboard_graph_search_filters_the_full_verified_cache(monkeypatch):
@@ -307,7 +311,7 @@ def test_dashboard_graph_front_loads_every_populated_category():
     }
 
 
-def test_dashboard_graph_expands_on_zoom_and_keeps_scene_state():
+def test_dashboard_graph_expands_explicitly_and_keeps_scene_state():
     html = (
         Path(__file__).resolve().parents[1]
         / "plugins"
@@ -322,13 +326,19 @@ def test_dashboard_graph_expands_on_zoom_and_keeps_scene_state():
     assert 'id="graph-count"' not in html
     assert "if (graphCache[tier]) return Promise.resolve(false);" in html
     assert "return next(nowLoaded);" not in html
-    assert ".onZoom(expandGraphForZoom)" in html
+    assert ".onZoom(expandGraphForZoom)" not in html
+    assert "GRAPH_ZOOM_CAPS" not in html
     assert "GRAPH_CATEGORY_MIN_LEAVES = 12" in html
-    assert "loadGraphFocusPage(activeTier, focus)" in html
+    assert "loadGraphFocusPage(activeTier, graphFocus[activeTier])" in html
     assert '"&category=" + encodeURIComponent(focus.cat || "")' in html
     assert "priorPositions[node.id]" in html
     assert "graphCanvasSize.width === w && graphCanvasSize.height === h" in html
-    assert "compact: { cap: 96, focusCap: 320 }" in html
+    assert "var GRAPH_PAGE_SIZE = 20000" in html
+    assert "var GRAPH_MAX_VISIBLE_LEAVES = 12000" in html
+    assert "compact: { cap: 180, focusCap: 900 }" in html
+    assert "explore: { cap: 1200, focusCap: 12000 }" in html
+    assert "view.category_totals || {}" in html
+    assert 'magnitude.toLocaleString() + " THREAT"' in html
 
 
 @pytest.mark.skip(reason="dashboard never joins private graphs")
