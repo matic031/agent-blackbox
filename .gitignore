@@ -15,6 +15,9 @@ __pycache__/
 .env.production.local
 .env.development
 .env.test
+.env.*
+!.env.example
+!.env.*.example
 .hermes-docker/
 .notebooklm-home/
 .notebooklm-cli-venv/
@@ -48,6 +51,16 @@ agent-browser/
 # Private keys
 *.ppk
 *.pem
+*.key
+*.pfx
+id_rsa
+id_rsa.*
+id_dsa
+id_dsa.*
+id_ecdsa
+id_ecdsa.*
+id_ed25519
+id_ed25519.*
 privvy*
 images/
 __pycache__/

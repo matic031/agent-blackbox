@@ -1697,7 +1697,7 @@ def create_app(*, manage_blackbox: bool = False):
     @app.get("/api/graph")
     def graph(
         tier: str = Query("public"),
-        limit: int = Query(1000, ge=1, le=10000),
+        limit: int = Query(5000, ge=1, le=50000),
         offset: int = Query(0, ge=0),
         q: str = Query("", max_length=200),
         category: str = Query("", max_length=40),
@@ -1709,6 +1709,7 @@ def create_app(*, manage_blackbox: bool = False):
             return {
                 "tier": "community", "threats": [], "total": 0,
                 "offset": offset, "limit": limit, "partial": False,
+                "category_totals": {}, "ecosystem_totals": {},
                 "coming_soon": True,
             }
         cfg = load_blackbox_config()
@@ -1762,10 +1763,24 @@ def create_app(*, manage_blackbox: bool = False):
                 ]
             elif not wanted_category and not wanted_ecosystem:
                 all_threats = _balanced_graph_entries(all_threats)
+            # Counts describe the complete filtered result, never the rendered
+            # page.  The dashboard can therefore show the real threat magnitude
+            # on category/ecosystem hubs while progressively loading leaves.
+            category_totals: Dict[str, int] = {}
+            ecosystem_totals: Dict[str, int] = {}
+            for item in all_threats:
+                item_category = str(item.get("category") or "other").lower()
+                category_totals[item_category] = category_totals.get(item_category, 0) + 1
+                if item_category == "dependency":
+                    parts = str(item.get("identifier") or "").split(":")
+                    ecosystem_name = (parts[1] if len(parts) > 1 else "other").lower()
+                    ecosystem_totals[ecosystem_name] = ecosystem_totals.get(ecosystem_name, 0) + 1
             return {
                 "tier": tier,
                 "threats": all_threats[offset:offset + limit],
                 "total": len(all_threats),
+                "category_totals": category_totals,
+                "ecosystem_totals": ecosystem_totals,
                 "offset": offset,
                 "limit": limit,
                 "partial": offset + limit < len(all_threats),

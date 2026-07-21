@@ -993,14 +993,17 @@
   .graph-stage {
     position: relative;
     width: 100%;
-    height: 460px;
+    height: clamp(520px, 58vh, 680px);
     overflow: hidden;
     border-radius: 0 0 var(--radius) var(--radius);
     /* Keep the earlier network-field treatment: category hues remain vivid
        without fighting a flat panel background. */
     background:
+      linear-gradient(color-mix(in srgb, var(--text) 3.5%, transparent) 1px, transparent 1px),
+      linear-gradient(90deg, color-mix(in srgb, var(--text) 3.5%, transparent) 1px, transparent 1px),
       radial-gradient(120% 90% at 50% 42%, var(--graph-radial), transparent 62%),
       var(--panel);
+    background-size: 36px 36px, 36px 36px, auto, auto;
   }
   .graph-canvas { position: absolute; inset: 0; }
   .graph-canvas canvas { display: block; }
@@ -3011,7 +3014,9 @@
   "use strict";
 
   var POLL_MS = 4000;
-  var GRAPH_PAGE_SIZE = 5000;
+  // Large pages make the first view feel like a real threat universe instead
+  // of a 5k demo. Additional pages still stream progressively when needed.
+  var GRAPH_PAGE_SIZE = 20000;
   var GRAPH_SEARCH_LIMIT = 500;
   var connOk = true;
   var TIERS = ["public", "community", "local"];
@@ -3025,16 +3030,17 @@
   var graphSearchInFlight = { public: false, community: false };
   var graphSearchTimer = null;
   var GRAPH_DETAIL_PRESETS = {
-    compact: { cap: 96, focusCap: 320 },
-    explore: { cap: 180, focusCap: 1000 }
+    compact: { cap: 180, focusCap: 900 },
+    explore: { cap: 1200, focusCap: 12000 }
   };
   var GRAPH_CATEGORY_MIN_LEAVES = 12;
   var GRAPH_ZOOM_CAPS = [
-    { scale: 1.8, cap: 320 },
-    { scale: 3.2, cap: 700 },
-    { scale: 5.2, cap: 1400 }
+    { scale: 1.6, cap: 900 },
+    { scale: 2.5, cap: 3000 },
+    { scale: 3.8, cap: 7000 },
+    { scale: 5.2, cap: 12000 }
   ];
-  var GRAPH_MAX_VISIBLE_LEAVES = 4000;
+  var GRAPH_MAX_VISIBLE_LEAVES = 12000;
   var graphDetailMode = { public: "compact", community: "compact" };
   var graphLeafLimit = {
     public: GRAPH_DETAIL_PRESETS.compact.cap,
@@ -3302,6 +3308,8 @@
       });
       graphCache[tier].threats = current;
       graphCache[tier].total = page.total;
+      graphCache[tier].category_totals = page.category_totals || graphCache[tier].category_totals || {};
+      graphCache[tier].ecosystem_totals = page.ecosystem_totals || graphCache[tier].ecosystem_totals || {};
       graphCache[tier].partial = current.length < (Number(page.total) || current.length);
     }
     graphRevision[tier] += 1;
@@ -3847,10 +3855,12 @@
 	    }
 	    function graphTopCategoryFocus(tier, list) {
 	      list = list || graphViewList(tier);
-	      var counts = {};
+	      var view = graphViewData(tier) || {};
+	      var counts = Object.assign({}, view.category_totals || {});
 	      list.forEach(function (t) {
 	        var ck = catKey(t.category);
-	        counts[ck] = (counts[ck] || 0) + 1;
+	        if (counts[ck] == null) counts[ck] = 0;
+	        if (!(view.category_totals && view.category_totals[ck] != null)) counts[ck] += 1;
 	      });
 	      var best = "";
 	      Object.keys(counts).forEach(function (ck) {
@@ -3886,9 +3896,16 @@
       var baseLimit = graphCap(tier);
       var leafLimit = focus ? Math.max(baseLimit, preset.focusCap) : baseLimit;
       var focusLabel = graphFocusLabel(focus);
-      var activeTotal = focus
-        ? list.filter(function (t) { return graphMatchesFocus(t, focus); }).length
-        : list.length;
+      var view = graphViewData(tier) || {};
+      var categoryTotals = view.category_totals || {};
+      var ecosystemTotals = view.ecosystem_totals || {};
+      var graphTotal = view.total != null ? Number(view.total) || 0 : list.length;
+      var activeTotal = graphTotal;
+      if (focus) {
+        activeTotal = focus.eco
+          ? (Number(ecosystemTotals[focus.eco]) || list.filter(function (t) { return graphMatchesFocus(t, focus); }).length)
+          : (Number(categoryTotals[focus.cat]) || list.filter(function (t) { return graphMatchesFocus(t, focus); }).length);
+      }
       // Keep a representative ring around every populated category even while
       // one field is focused. The focused field receives the remaining budget.
       var leafBudget = GRAPH_MAX_VISIBLE_LEAVES;
@@ -3896,7 +3913,7 @@
       nodes.push({
         id: centerId, kind: "center",
         label: focusLabel || TIER_LABEL[tier] || "Threat graph",
-        color: MINT, val: 22, threatTotal: list.length, focusTotal: activeTotal
+        color: MINT, val: 26, threatTotal: graphTotal, focusTotal: activeTotal
       });
 
       function addMoreNode(parentId, ck, hiddenCount, focusTarget) {
@@ -3912,7 +3929,7 @@
         links.push({ source: moreId, target: parentId, kind: "leaf" });
       }
 
-      function addLeaves(parentId, ck, items, limit, focusTarget) {
+      function addLeaves(parentId, ck, items, limit, focusTarget, exactTotal) {
         var remaining = Math.max(0, leafBudget - shownLeaves);
         var sample = graphSampleLeaves(items, Math.min(limit, remaining));
         sample.forEach(function (t) {
@@ -3927,7 +3944,7 @@
           links.push({ source: nodes[nodes.length - 1].id, target: parentId, kind: "leaf" });
         });
         shownLeaves += sample.length;
-        addMoreNode(parentId, ck, Math.max(0, items.length - sample.length), focusTarget);
+        addMoreNode(parentId, ck, Math.max(0, Number(exactTotal == null ? items.length : exactTotal) - sample.length), focusTarget);
       }
 
       // Bucket by category; biggest first so the force layout settles cleanly.
@@ -3937,53 +3954,68 @@
       if (!byCat[ck]) byCat[ck] = [];
       byCat[ck].push(t);
     });
-      Object.keys(byCat).sort(function (a, b) { return byCat[b].length - byCat[a].length; }).forEach(function (ck) {
-        var items = byCat[ck];
+      var categoryKeys = Object.keys(categoryTotals);
+      Object.keys(byCat).forEach(function (ck) { if (categoryKeys.indexOf(ck) < 0) categoryKeys.push(ck); });
+      categoryKeys.sort(function (a, b) {
+        return (Number(categoryTotals[b]) || (byCat[b] || []).length) -
+          (Number(categoryTotals[a]) || (byCat[a] || []).length);
+      }).forEach(function (ck) {
+        var items = byCat[ck] || [];
+        var categoryTotal = Number(categoryTotals[ck]);
+        if (!isFinite(categoryTotal)) categoryTotal = items.length;
         var meta = CATS[ck] || { name: ck, color: "#858289" };
         var hubId = "__cat__:" + ck;
         var catFocus = { cat: ck };
         var categoryActive = !focus || focus.cat === ck;
         var categoryLimit = categoryActive ? leafLimit : GRAPH_CATEGORY_MIN_LEAVES;
         nodes.push({
-          id: hubId, kind: "hub", cat: ck, label: meta.name, count: items.length,
-          color: meta.color, val: graphHubVal(items.length), focus: catFocus,
+          id: hubId, kind: "hub", cat: ck, label: meta.name, count: categoryTotal,
+          color: meta.color, val: graphHubVal(categoryTotal), focus: catFocus,
           dimmed: !!focus && focus.cat !== ck
         });
         links.push({ source: hubId, target: centerId, kind: "hub" });
 
         // Dependencies span ecosystems — split the big bucket into npm / pypi /
         // cargo / … sub-hubs so thousands of deps read as structure, not a pile.
-        if (ck === "dependency" && items.length > baseLimit) {
+        if (ck === "dependency" && categoryTotal > baseLimit) {
           var byEco = {};
           items.forEach(function (t) {
             var eco = (String(t.identifier || "").split(":")[1] || "other").toLowerCase();
             if (!byEco[eco]) byEco[eco] = [];
             byEco[eco].push(t);
           });
-          var ecos = Object.keys(byEco).sort(function (a, b) { return byEco[b].length - byEco[a].length; });
+          var ecos = Object.keys(ecosystemTotals);
+          Object.keys(byEco).forEach(function (eco) { if (ecos.indexOf(eco) < 0) ecos.push(eco); });
+          ecos.sort(function (a, b) {
+            return (Number(ecosystemTotals[b]) || (byEco[b] || []).length) -
+              (Number(ecosystemTotals[a]) || (byEco[a] || []).length);
+          });
           var perEcoLimit = Math.max(1, Math.ceil(categoryLimit / Math.max(1, ecos.length)));
           ecos.forEach(function (eco) {
             var subId = hubId + ":" + eco;
+            var ecoItems = byEco[eco] || [];
+            var ecoTotal = Number(ecosystemTotals[eco]);
+            if (!isFinite(ecoTotal)) ecoTotal = ecoItems.length;
             var ecoFocus = { cat: ck, eco: eco };
             var ecoActive = categoryActive && (!focus || !focus.eco || focus.eco === eco);
             nodes.push({
-              id: subId, kind: "hub", cat: ck, label: eco, count: byEco[eco].length,
-              color: meta.color, val: graphHubVal(byEco[eco].length),
+              id: subId, kind: "hub", cat: ck, label: eco, count: ecoTotal,
+              color: meta.color, val: graphHubVal(ecoTotal),
               focus: ecoFocus, dimmed: !!focus && !ecoActive
             });
             links.push({ source: subId, target: hubId, kind: "hub" });
             var ecoLimit = focus && focus.cat === ck && focus.eco === eco
               ? leafLimit
               : perEcoLimit;
-            addLeaves(subId, ck, byEco[eco], ecoLimit, ecoFocus);
+            addLeaves(subId, ck, ecoItems, ecoLimit, ecoFocus, ecoTotal);
           });
         } else {
-          addLeaves(hubId, ck, items, categoryLimit, catFocus);
+          addLeaves(hubId, ck, items, categoryLimit, catFocus, categoryTotal);
         }
       });
       graphRenderMeta[tier] = {
         shownLeaves: shownLeaves,
-        totalThreats: list.length,
+        totalThreats: graphTotal,
         activeTotal: activeTotal,
         hiddenLeaves: Math.max(0, activeTotal - shownLeaves),
         focusLabel: focusLabel,
@@ -4315,6 +4347,20 @@
       ctx.save();
       if (node.dimmed) ctx.globalAlpha = 0.38;
 
+      // Category hubs are the visual anchors of the threat universe. A soft
+      // bloom and magnitude orbit keep them readable inside 10k+ leaf fields.
+      if (isHub) {
+        ctx.save();
+        ctx.globalAlpha *= 0.22;
+        ctx.shadowColor = node.color;
+        ctx.shadowBlur = 22 / Math.max(scale, 0.7);
+        ctx.fillStyle = node.color;
+        ctx.beginPath();
+        ctx.arc(node.x, node.y, r * 1.22, 0, 2 * Math.PI, false);
+        ctx.fill();
+        ctx.restore();
+      }
+
       // filled circle — center is pure black (flag), sessions a steel panel, calls
       // a neutral dark dot, hubs + threat leaves their solid category color.
     ctx.beginPath();
@@ -4356,6 +4402,17 @@
       ctx.beginPath();
       ctx.arc(node.x, node.y, r, 0, 2 * Math.PI, false);
       ctx.stroke();
+      if (isHub) {
+        ctx.save();
+        ctx.globalAlpha *= 0.48;
+        ctx.lineWidth = 0.9 / scale;
+        ctx.strokeStyle = node.color;
+        ctx.setLineDash([2.2 / scale, 3.2 / scale]);
+        ctx.beginPath();
+        ctx.arc(node.x, node.y, r + 4.3 / scale, 0, 2 * Math.PI, false);
+        ctx.stroke();
+        ctx.restore();
+      }
     } else if (isCall || isMore) {
       // faint outline so the dark dot reads against the dark field
       ctx.lineWidth = 1.0 / scale;
@@ -4383,17 +4440,17 @@
     ctx.fillStyle = isCenter ? MINT : (big ? LABEL : LABEL_MUTED);
     ctx.fillText(txt, node.x, ty);
 
-    // Hub magnitude — the real total (leaves are only a sample), drawn bold in
-    // the category colour under the name so the count is legible without a hover.
-    if (isHub && node.count != null) {
+    // Magnitude labels always use corpus totals, never the rendered leaf sample.
+    if ((isHub || isCenter) && (isHub ? node.count : node.threatTotal) != null) {
       var cy = ty + fontPx + 1.4;
-      ctx.font = "700 " + (fontPx + 0.6) + "px -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
-      var cstr = node.count.toLocaleString();
+      ctx.font = "700 " + (fontPx + 0.8) + "px 'IBM Plex Mono', ui-monospace, monospace";
+      var magnitude = isHub ? node.count : node.threatTotal;
+      var cstr = magnitude.toLocaleString() + " THREAT" + (magnitude === 1 ? "" : "S");
       ctx.fillStyle = GRAPH_LABEL_SHADOW;
       ctx.fillText(cstr, node.x + 0.4 / scale, cy + 0.4 / scale);
-        ctx.fillStyle = node.color;
-        ctx.fillText(cstr, node.x, cy);
-      }
+      ctx.fillStyle = isCenter ? MINT : node.color;
+      ctx.fillText(cstr, node.x, cy);
+    }
       ctx.restore();
     }
 
@@ -4670,8 +4727,9 @@
 	    var rows = [
 	      ["Graph", TIER_LABEL[activeTier] || "Threat graph"],
 	      ["Scope", label],
-	      ["Threats", num(items.length)],
-	      ["Severity mix", severityMixText(items)]
+	      ["Threats", num(node.count != null ? node.count : items.length)],
+	      ["Loaded sample", num(items.length)],
+	      ["Sample severity mix", severityMixText(items)]
 	    ];
 	    if (focus.eco) rows.splice(2, 0, ["Ecosystem", focus.eco, true]);
 	    if (focusedNow && renderMeta.shownLeaves != null) {
