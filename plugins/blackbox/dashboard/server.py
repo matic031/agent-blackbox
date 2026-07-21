@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -39,10 +40,10 @@ _RULESET_MIN_RETRY_SEC = 5.0
 # can take several minutes and saturate Blazegraph, so never repeat it on the
 # dashboard's short status-poll interval. Manual sync remains available.
 _RULESET_HEAVY_REFRESH_MIN_SEC = 15 * 60.0
-_GUARDIAN_PROFILE = "guardian"
-_GUARDIAN_RUNTIME_HOST = "127.0.0.1"
-_GUARDIAN_RUNTIME_PORT = 9121
-_GUARDIAN_RESTART_DELAY_SEC = 2.0
+_BLACKBOX_PROFILE = "agent-blackbox"
+_BLACKBOX_RUNTIME_HOST = "127.0.0.1"
+_BLACKBOX_RUNTIME_PORT = 9121
+_BLACKBOX_RESTART_DELAY_SEC = 2.0
 _join_lock = threading.Lock()
 _network_sync_lock = threading.Lock()
 _connection_states: Dict[str, Dict[str, Any]] = {}
@@ -51,26 +52,68 @@ _subscription_attempts: Set[str] = set()
 _STATIC_DIR = Path(__file__).resolve().parent / "static"
 _ASSETS_DIR = Path(__file__).resolve().parent / "assets"
 _FONTS_DIR = _ASSETS_DIR / "fonts"
+_DURABLE_PROGRESS_RE = re.compile(
+    r'Rootless durable progress for "(?P<graph>[^"]+)".*?'
+    r'safe offset (?P<previous>\d+)->(?P<current>\d+) of (?P<expected>\d+)'
+    r' \(raw (?P<raw>\d+)\)'
+)
 
 
-def _guardian_runtime_argv(port: int = _GUARDIAN_RUNTIME_PORT) -> List[str]:
-    """Command for the dashboard-owned, profile-isolated Guardian backend."""
+def _dkg_durable_progress(dkg_home: str, context_graph_id: str) -> Dict[str, Any]:
+    """Read the latest resumable VM offset reported by the managed DKG."""
+    path = Path(dkg_home) / "daemon.log"
+    try:
+        with path.open("rb") as handle:
+            size = path.stat().st_size
+            handle.seek(max(0, size - 4_000_000))
+            text = handle.read().decode("utf-8", errors="replace")
+    except OSError:
+        return {}
+    matches = []
+    for match in _DURABLE_PROGRESS_RE.finditer(text):
+        if match.group("graph") != context_graph_id:
+            continue
+        # Each controlled catch-up starts a new safe-offset window. Do not
+        # report a previous run's 100% while the current transfer is at 0%.
+        if int(match.group("previous")) == 0 and int(match.group("current")) == 0:
+            matches = []
+        matches.append(match)
+    if not matches:
+        return {}
+    expected = int(matches[-1].group("expected"))
+    current = max(
+        max(int(match.group("current")), int(match.group("raw")))
+        for match in matches
+        if int(match.group("expected")) == expected
+    )
+    if expected <= 0:
+        return {}
+    current = max(0, min(current, expected))
+    return {
+        "current_triples": current,
+        "expected_triples": expected,
+        "progress_percent": round((current / expected) * 100, 1),
+    }
+
+
+def _blackbox_runtime_argv(port: int = _BLACKBOX_RUNTIME_PORT) -> List[str]:
+    """Command for the dashboard-owned, profile-isolated Agent Blackbox backend."""
     return [
         sys.executable,
         "-m",
         "hermes_cli.main",
         "--profile",
-        _GUARDIAN_PROFILE,
+        _BLACKBOX_PROFILE,
         "serve",
         "--host",
-        _GUARDIAN_RUNTIME_HOST,
+        _BLACKBOX_RUNTIME_HOST,
         "--port",
         str(int(port)),
         "--isolated",
     ]
 
 
-def _guardian_runtime_env() -> Dict[str, str]:
+def _blackbox_runtime_env() -> Dict[str, str]:
     """Build a clean named-profile environment without changing the parent."""
     env = dict(os.environ)
     # The explicit --profile selector must win even when Blackbox itself was
@@ -420,6 +463,8 @@ def _sync_activity(
     phase = str(transfer.get("phase") or "").lower()
     current = int(transfer.get("public_entries") or public or 0)
     expected = int(transfer.get("expected_public_entries") or 0)
+    current_triples = int(transfer.get("current_triples") or 0)
+    expected_triples = int(transfer.get("expected_triples") or 0)
     progress: Dict[str, Any] = {
         "status": "idle",
         "phase": "idle",
@@ -447,7 +492,27 @@ def _sync_activity(
             started_at=transfer.get("started_at"),
             updated_at=transfer.get("updated_at"),
         )
-        if phase in {"reconciling-public-memory", "refreshing-verifiable-memory", "waiting-for-verifiable-memory"} and expected > 0:
+        if expected_triples > 0:
+            bounded_triples = max(0, min(current_triples, expected_triples))
+            if (
+                phase == "refreshing-verifiable-memory"
+                and "inserted_durable_triples" in transfer
+                and int(transfer.get("inserted_durable_triples") or 0) == 0
+            ):
+                # A clean zero-insert pass is the publisher's idempotent EOF.
+                # The remaining work is rebuilding the queryable threat count.
+                bounded_triples = expected_triples
+            progress.update(
+                detail=(
+                    f"{bounded_triples:,} of {expected_triples:,} graph triples "
+                    "received for verification."
+                ),
+                current=bounded_triples,
+                expected=expected_triples,
+                percent=round((bounded_triples / expected_triples) * 100, 1),
+                indeterminate=False,
+            )
+        elif phase in {"reconciling-public-memory", "refreshing-verifiable-memory", "waiting-for-verifiable-memory"} and expected > 0:
             bounded = max(0, min(current, expected))
             progress.update(
                 detail=f"{bounded:,} of {expected:,} verified public threats are queryable.",
@@ -648,7 +713,7 @@ def _profile_activity_state(
     return states
 
 
-def create_app(*, manage_guardian: bool = False):
+def create_app(*, manage_blackbox: bool = False):
     """Build and return the FastAPI application."""
     from fastapi import Body, FastAPI, Query
     from fastapi.responses import FileResponse, JSONResponse, HTMLResponse
@@ -665,8 +730,8 @@ def create_app(*, manage_guardian: bool = False):
         "last_reconcile": 0.0,
         "lock": threading.Lock(),
     }
-    _guardian_stop = threading.Event()
-    _guardian_state: Dict[str, Any] = {
+    _blackbox_stop = threading.Event()
+    _blackbox_state: Dict[str, Any] = {
         "process": None,
         "thread": None,
         "ready": False,
@@ -674,97 +739,97 @@ def create_app(*, manage_guardian: bool = False):
         "lock": threading.Lock(),
     }
 
-    def _guardian_profile_dir() -> Path:
+    def _blackbox_profile_dir() -> Path:
         from hermes_cli.profiles import get_profile_dir
 
-        return get_profile_dir(_GUARDIAN_PROFILE)
+        return get_profile_dir(_BLACKBOX_PROFILE)
 
-    def _set_guardian_state(**updates: Any) -> None:
-        with _guardian_state["lock"]:
-            _guardian_state.update(updates)
+    def _set_blackbox_state(**updates: Any) -> None:
+        with _blackbox_state["lock"]:
+            _blackbox_state.update(updates)
 
-    def _guardian_snapshot() -> Dict[str, Any]:
-        with _guardian_state["lock"]:
-            process = _guardian_state.get("process")
+    def _blackbox_snapshot() -> Dict[str, Any]:
+        with _blackbox_state["lock"]:
+            process = _blackbox_state.get("process")
             return {
-                "managed": bool(manage_guardian),
-                "ready": bool(_guardian_state.get("ready")),
-                "error": str(_guardian_state.get("error") or ""),
+                "managed": bool(manage_blackbox),
+                "ready": bool(_blackbox_state.get("ready")),
+                "error": str(_blackbox_state.get("error") or ""),
                 "pid": process.pid if process is not None and process.poll() is None else None,
-                "profile": _GUARDIAN_PROFILE,
-                "host": _GUARDIAN_RUNTIME_HOST,
-                "port": _GUARDIAN_RUNTIME_PORT,
+                "profile": _BLACKBOX_PROFILE,
+                "host": _BLACKBOX_RUNTIME_HOST,
+                "port": _BLACKBOX_RUNTIME_PORT,
             }
 
-    def _guardian_runtime_loop() -> None:
-        """Keep one dashboard-owned Guardian backend alive, fail-open.
+    def _blackbox_runtime_loop() -> None:
+        """Keep one dashboard-owned Agent Blackbox backend alive, fail-open.
 
         This supervisor only terminates the exact ``Popen`` child it created.
         An occupied port is treated as a conflict; it never searches for or
         stops an unrelated process.
         """
-        profile_dir = _guardian_profile_dir()
+        profile_dir = _blackbox_profile_dir()
         if not profile_dir.is_dir():
-            _set_guardian_state(error="Guardian profile is not installed")
-            logger.warning("blackbox guardian runtime: profile not found at %s", profile_dir)
+            _set_blackbox_state(error="Agent Blackbox profile is not installed")
+            logger.warning("agent blackbox runtime: profile not found at %s", profile_dir)
             return
         log_dir = profile_dir / "logs"
         log_dir.mkdir(parents=True, exist_ok=True)
         log_path = log_dir / "blackbox-dashboard-runtime.log"
 
-        while not _guardian_stop.is_set():
-            if _port_is_listening(_GUARDIAN_RUNTIME_HOST, _GUARDIAN_RUNTIME_PORT):
-                _set_guardian_state(
+        while not _blackbox_stop.is_set():
+            if _port_is_listening(_BLACKBOX_RUNTIME_HOST, _BLACKBOX_RUNTIME_PORT):
+                _set_blackbox_state(
                     ready=False,
-                    error=f"Port {_GUARDIAN_RUNTIME_PORT} is already in use",
+                    error=f"Port {_BLACKBOX_RUNTIME_PORT} is already in use",
                 )
                 logger.warning(
-                    "blackbox guardian runtime: port %d is occupied; leaving its process untouched",
-                    _GUARDIAN_RUNTIME_PORT,
+                    "agent blackbox runtime: port %d is occupied; leaving its process untouched",
+                    _BLACKBOX_RUNTIME_PORT,
                 )
-                _guardian_stop.wait(_GUARDIAN_RESTART_DELAY_SEC)
+                _blackbox_stop.wait(_BLACKBOX_RESTART_DELAY_SEC)
                 continue
 
             process = None
             try:
                 with log_path.open("a", encoding="utf-8") as log_handle:
                     process = subprocess.Popen(
-                        _guardian_runtime_argv(),
+                        _blackbox_runtime_argv(),
                         cwd=str(attach._repo_root()),
-                        env=_guardian_runtime_env(),
+                        env=_blackbox_runtime_env(),
                         stdin=subprocess.DEVNULL,
                         stdout=log_handle,
                         stderr=subprocess.STDOUT,
                     )
-                    _set_guardian_state(process=process, ready=False, error="")
+                    _set_blackbox_state(process=process, ready=False, error="")
                     logger.info(
-                        "blackbox guardian runtime: started pid %d on %s:%d",
+                        "agent blackbox runtime: started pid %d on %s:%d",
                         process.pid,
-                        _GUARDIAN_RUNTIME_HOST,
-                        _GUARDIAN_RUNTIME_PORT,
+                        _BLACKBOX_RUNTIME_HOST,
+                        _BLACKBOX_RUNTIME_PORT,
                     )
 
                     deadline = time.monotonic() + 30.0
                     while (
-                        not _guardian_stop.is_set()
+                        not _blackbox_stop.is_set()
                         and process.poll() is None
                         and time.monotonic() < deadline
                     ):
-                        if _port_is_listening(_GUARDIAN_RUNTIME_HOST, _GUARDIAN_RUNTIME_PORT):
-                            _set_guardian_state(ready=True, error="")
+                        if _port_is_listening(_BLACKBOX_RUNTIME_HOST, _BLACKBOX_RUNTIME_PORT):
+                            _set_blackbox_state(ready=True, error="")
                             break
-                        _guardian_stop.wait(0.2)
+                        _blackbox_stop.wait(0.2)
                     else:
-                        if process.poll() is None and not _guardian_stop.is_set():
-                            _set_guardian_state(error="Guardian runtime did not become ready")
+                        if process.poll() is None and not _blackbox_stop.is_set():
+                            _set_blackbox_state(error="Agent Blackbox runtime did not become ready")
 
-                    while not _guardian_stop.is_set() and process.poll() is None:
-                        _guardian_stop.wait(0.5)
+                    while not _blackbox_stop.is_set() and process.poll() is None:
+                        _blackbox_stop.wait(0.5)
             except Exception as exc:  # pragma: no cover - fail open
-                _set_guardian_state(ready=False, error=str(exc))
-                logger.warning("blackbox guardian runtime: failed to start: %s", exc)
+                _set_blackbox_state(ready=False, error=str(exc))
+                logger.warning("agent blackbox runtime: failed to start: %s", exc)
             finally:
-                if process is not None and process.poll() is None and _guardian_stop.is_set():
+                if process is not None and process.poll() is None and _blackbox_stop.is_set():
                     # Only the child created above is in scope for shutdown.
                     process.terminate()
                     try:
@@ -773,16 +838,16 @@ def create_app(*, manage_guardian: bool = False):
                         process.kill()
                         process.wait(timeout=2)
                 exit_code = process.poll() if process is not None else None
-                _set_guardian_state(process=None, ready=False)
-                if process is not None and not _guardian_stop.is_set():
-                    _set_guardian_state(error=f"Guardian runtime exited with code {exit_code}")
+                _set_blackbox_state(process=None, ready=False)
+                if process is not None and not _blackbox_stop.is_set():
+                    _set_blackbox_state(error=f"Agent Blackbox runtime exited with code {exit_code}")
                     logger.warning(
-                        "blackbox guardian runtime: pid %d exited with code %s; restarting",
+                        "agent blackbox runtime: pid %d exited with code %s; restarting",
                         process.pid,
                         exit_code,
                     )
-            if not _guardian_stop.is_set():
-                _guardian_stop.wait(_GUARDIAN_RESTART_DELAY_SEC)
+            if not _blackbox_stop.is_set():
+                _blackbox_stop.wait(_BLACKBOX_RESTART_DELAY_SEC)
 
     def _rescan_once(*, force: bool = False) -> List[Dict[str, Any]]:
         """Discover local Hermes/OpenClaw workspaces and hook Blackbox into them.
@@ -909,28 +974,28 @@ def create_app(*, manage_guardian: bool = False):
         logger.info("blackbox rescan: background thread started (interval %.1fs)", _RESCAN_INTERVAL_SEC)
         threading.Thread(target=_ruleset_sync_loop, name="blackbox-ruleset-sync", daemon=True).start()
         logger.info("blackbox automatic graph sync: background thread started")
-        if manage_guardian:
-            guardian_thread = threading.Thread(
-                target=_guardian_runtime_loop,
-                name="blackbox-guardian-runtime",
+        if manage_blackbox:
+            blackbox_thread = threading.Thread(
+                target=_blackbox_runtime_loop,
+                name="agent-blackbox-runtime",
                 daemon=True,
             )
-            _set_guardian_state(thread=guardian_thread)
-            guardian_thread.start()
-            logger.info("blackbox guardian runtime: supervisor started")
+            _set_blackbox_state(thread=blackbox_thread)
+            blackbox_thread.start()
+            logger.info("agent blackbox runtime: supervisor started")
 
     @app.on_event("shutdown")
     def _stop_rescanner() -> None:
         _rescan_state["stop"] = True
-        _guardian_stop.set()
-        with _guardian_state["lock"]:
-            guardian_process = _guardian_state.get("process")
-            guardian_thread = _guardian_state.get("thread")
-        if guardian_process is not None and guardian_process.poll() is None:
+        _blackbox_stop.set()
+        with _blackbox_state["lock"]:
+            blackbox_process = _blackbox_state.get("process")
+            blackbox_thread = _blackbox_state.get("thread")
+        if blackbox_process is not None and blackbox_process.poll() is None:
             # Wake the supervisor immediately; it still owns final reap/kill.
-            guardian_process.terminate()
-        if guardian_thread is not None:
-            guardian_thread.join(timeout=6)
+            blackbox_process.terminate()
+        if blackbox_thread is not None:
+            blackbox_thread.join(timeout=6)
 
     _PREFIX = "PREFIX g: <http://umanitek.ai/ontology/guardian/> "
 
@@ -1224,6 +1289,11 @@ def create_app(*, manage_guardian: bool = False):
         authoritative_sync = sync_state.read()
         authoritative_running = authoritative_sync.get("status") == "running"
         authoritative_done = authoritative_sync.get("status") == "done"
+        if authoritative_running:
+            authoritative_sync = {
+                **authoritative_sync,
+                **_dkg_durable_progress(cfg.dkg_home, cfg.context_graph_id),
+            }
         # This count is measured from locally committed rows and can advance
         # ahead of the materialized ruleset cache during a large snapshot.
         if authoritative_running:
@@ -1394,14 +1464,14 @@ def create_app(*, manage_guardian: bool = False):
         except Exception:  # pragma: no cover - fail open
             finding_rows = []
         profile_state = _profile_activity_state(attach_rows, audit_rows, finding_rows)
-        guardian_runtime = _guardian_snapshot()
-        guardian_workspace = _workspace_key(_guardian_profile_dir())
-        if guardian_runtime["ready"]:
-            guardian_key = ("hermes", guardian_workspace)
-            if guardian_key in profile_state:
+        blackbox_runtime = _blackbox_snapshot()
+        blackbox_workspace = _workspace_key(_blackbox_profile_dir())
+        if blackbox_runtime["ready"]:
+            blackbox_key = ("hermes", blackbox_workspace)
+            if blackbox_key in profile_state:
                 # The supervised backend is direct liveness evidence for this
                 # exact profile even before its next audited chat turn.
-                profile_state[guardian_key]["is_active"] = True
+                profile_state[blackbox_key]["is_active"] = True
         for fw in local_fw:
             if fw in known_local_fw and fw not in protected_local_fw:
                 continue
@@ -1502,7 +1572,7 @@ def create_app(*, manage_guardian: bool = False):
                     "is_active": bool(state["is_active"]),
                     "workspace": ws,
                     "workspace_label": ws_name,
-                    "dashboard_managed": fw == "hermes" and _workspace_key(ws) == guardian_workspace,
+                    "dashboard_managed": fw == "hermes" and _workspace_key(ws) == blackbox_workspace,
                 }
         except Exception as exc:  # pragma: no cover - fail open
             logger.debug("blackbox dashboard: attached-workspace enumeration failed: %s", exc)
@@ -1518,7 +1588,7 @@ def create_app(*, manage_guardian: bool = False):
             "agents": agents_out,
             "connected_count": connected_count,
             "protected_profile_count": protected_profile_count,
-            "guardian_runtime": guardian_runtime,
+            "blackbox_runtime": blackbox_runtime,
         }
 
     @app.get("/api/attach-targets")
@@ -1984,7 +2054,7 @@ def start_dashboard(port: int = 9700) -> None:
     import uvicorn
 
     uvicorn.run(
-        create_app(manage_guardian=True),
+        create_app(manage_blackbox=True),
         host="127.0.0.1",
         port=int(port),
         log_level="warning",

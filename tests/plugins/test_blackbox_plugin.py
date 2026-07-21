@@ -176,6 +176,28 @@ def test_managed_dkg_sync_environment_changes_only_durable_mode(tmp_path):
             assert steady[name] == value
 
 
+def test_managed_dkg_sync_environment_finds_runtime_without_pid_file(tmp_path, monkeypatch):
+    dkg_cli = tmp_path / "dkg" / "cli.js"
+    dkg_cli.parent.mkdir()
+    dkg_cli.write_text("", encoding="utf-8")
+    node = tmp_path / "node-v22" / "node"
+    node.parent.mkdir()
+    node.write_text("", encoding="utf-8")
+    cfg = config_mod.BlackboxConfig(dkg_home=str(tmp_path), dkg_bin=str(dkg_cli))
+
+    class FakeProcess:
+        info = {
+            "exe": str(node),
+            "cmdline": [str(node), str(dkg_cli), "daemon-supervisor"],
+        }
+
+    monkeypatch.setattr(cli_mod.psutil, "process_iter", lambda _attrs: [FakeProcess()])
+
+    env = cli_mod._dkg_sync_environment(cfg, durable=False)
+
+    assert env["PATH"].split(cli_mod.os.pathsep)[0] == str(node.parent)
+
+
 def test_blackbox_sync_require_rules_fails_empty_ruleset(monkeypatch, capsys):
     class FakeClient:
         def __init__(self, url, **_kwargs):
@@ -484,7 +506,7 @@ def test_blackbox_sync_uses_authoritative_publisher_for_empty_local_store(
     assert "25,000 public VM" in capsys.readouterr().out
 
 
-def test_required_release_sync_stops_after_one_failed_publisher_connect(
+def test_required_release_sync_stops_after_one_non_discovery_connect_failure(
     monkeypatch, capsys
 ):
     events = []
@@ -522,6 +544,78 @@ def test_required_release_sync_stops_after_one_failed_publisher_connect(
     assert cli_mod._cmd_sync(args) == 2
     assert len([event for event in events if event[0] == "connect"]) == 1
     assert "Required verifiable graph sync could not start" in capsys.readouterr().out
+
+
+def test_authoritative_recovery_retries_fresh_node_peer_discovery(monkeypatch, capsys):
+    connects = []
+    states = []
+
+    class FakeClient:
+        def connect_peer(self, peer_id):
+            connects.append(peer_id)
+            if len(connects) == 1:
+                raise cli_mod.DkgError(
+                    'POST /api/connect -> 404: {"code":"PEER_NOT_FOUND",'
+                    '"error":"PeerResolver returned no addresses"}'
+                )
+            return {"connected": True}
+
+        def catchup_from_peer(self, _cg_id, peer_id, *, budget_ms):
+            return {
+                "ok": True,
+                "includeDurable": True,
+                "includeSharedMemory": False,
+                "peersAttempted": 1,
+                "results": [{"peerId": peer_id}],
+            }
+
+    monkeypatch.setattr(cli_mod.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        cli_mod.sync_state,
+        "write",
+        lambda status, **details: states.append((status, details)) or details,
+    )
+
+    assert cli_mod._catchup_authoritative_vm(
+        FakeClient(), "owner/public", "publisher", cli_mod.time.monotonic() + 30
+    )
+    assert connects == ["publisher", "publisher"]
+    assert any(details.get("phase") == "discovering-verifiable-source" for _, details in states)
+    assert "fresh-node warm-up" in capsys.readouterr().out
+
+
+def test_fresh_node_discovery_uses_configured_relay_circuit_fallback(tmp_path):
+    relays = [
+        "/ip4/192.0.2.10/tcp/9090/p2p/relay-one",
+        "/ip4/192.0.2.20/tcp/9090/p2p/relay-two",
+    ]
+    (tmp_path / "config.json").write_text(
+        json.dumps({"relayPeers": relays}), encoding="utf-8"
+    )
+    attempted = []
+
+    class FakeClient:
+        dkg_home = str(tmp_path)
+
+        def connect_peer(self, _peer_id):
+            raise cli_mod.DkgError(
+                'POST /api/connect -> 404: {"code":"PEER_NOT_FOUND"}'
+            )
+
+        def connect_multiaddr(self, multiaddr):
+            attempted.append(multiaddr)
+            if "relay-one" in multiaddr:
+                raise cli_mod.DkgError("relay has no publisher reservation")
+            return {"connected": True}
+
+    cli_mod._connect_verifiable_source(
+        FakeClient(), "publisher", cli_mod.time.monotonic() + 30
+    )
+
+    assert attempted == [
+        f"{relays[0]}/p2p-circuit/p2p/publisher",
+        f"{relays[1]}/p2p-circuit/p2p/publisher",
+    ]
 
 
 def test_blackbox_sync_does_not_accept_deferred_catchup_as_complete(
@@ -1296,7 +1390,7 @@ def test_blackbox_chat_wraps_bare_prompt(monkeypatch):
     assert cli_mod._blackbox_chat_argv(["who", "are", "you?"]) == [
         "hermes",
         "--profile",
-        "guardian",
+        "agent-blackbox",
         "chat",
         "--query",
         "who are you?",
@@ -1304,14 +1398,14 @@ def test_blackbox_chat_wraps_bare_prompt(monkeypatch):
     assert cli_mod._blackbox_chat_argv(["--tui"]) == [
         "hermes",
         "--profile",
-        "guardian",
+        "agent-blackbox",
         "chat",
         "--tui",
     ]
 
 
 def test_blackbox_chat_profile_writes_identity_and_attaches(tmp_path, monkeypatch):
-    profile_dir = tmp_path / "guardian"
+    profile_dir = tmp_path / "agent-blackbox"
     calls = []
 
     monkeypatch.setattr(cli_mod.attach, "attach_hermes", lambda path: calls.append(path))
@@ -1328,9 +1422,9 @@ def test_blackbox_chat_profile_writes_identity_and_attaches(tmp_path, monkeypatc
     monkeypatch.setattr(profiles, "create_profile", fake_create_profile)
     monkeypatch.setattr(profiles, "get_profile_dir", lambda name: profile_dir)
 
-    assert cli_mod._ensure_blackbox_chat_profile() == "guardian"
+    assert cli_mod._ensure_blackbox_chat_profile() == "agent-blackbox"
     soul = (profile_dir / "SOUL.md").read_text(encoding="utf-8")
-    assert "You are Blackbox" in soul
+    assert "You are Agent Blackbox" in soul
     assert "connected agents" in soul
     assert "http://127.0.0.1:9700" in soul  # dashboard API base
     assert "/api/agents" in soul            # connected-agents endpoint
@@ -1339,6 +1433,20 @@ def test_blackbox_chat_profile_writes_identity_and_attaches(tmp_path, monkeypatc
     )
     assert cli_mod.attach._load_yaml(profile_dir / "config.yaml")["context_file_max_chars"] == 100_000
     assert calls == [profile_dir]
+
+
+def test_blackbox_chat_replaces_legacy_managed_identity(tmp_path):
+    soul = tmp_path / "SOUL.md"
+    soul.write_text(
+        cli_mod._LEGACY_GUARDIAN_SOUL_MARKER + "\n# Legacy profile\nYou are Guardian.\n",
+        encoding="utf-8",
+    )
+
+    cli_mod._write_blackbox_soul(tmp_path)
+
+    updated = soul.read_text(encoding="utf-8")
+    assert "You are Agent Blackbox" in updated
+    assert "You are Guardian" not in updated
 
 
 def test_blackbox_chat_cwd_prefers_recorded_source_root(tmp_path, monkeypatch):

@@ -54,7 +54,7 @@ def test_connected_agent_cards_render_before_protected_profiles():
     )
 
 
-def test_dashboard_managed_guardian_is_presented_as_agent_blackbox():
+def test_dashboard_managed_blackbox_is_presented_as_agent_blackbox():
     html = (Path(server.__file__).with_name("static") / "index.html").read_text(
         encoding="utf-8"
     )
@@ -75,17 +75,17 @@ def test_graph_tooltip_clears_force_graph_outer_chrome():
     assert "box-shadow: none !important" in html
 
 
-def test_guardian_runtime_is_profile_isolated_and_does_not_use_global_stop(monkeypatch):
+def test_blackbox_runtime_is_profile_isolated_and_does_not_use_global_stop(monkeypatch):
     monkeypatch.setattr(server.sys, "executable", "/venv/bin/python")
 
-    argv = server._guardian_runtime_argv()
+    argv = server._blackbox_runtime_argv()
 
     assert argv == [
         "/venv/bin/python",
         "-m",
         "hermes_cli.main",
         "--profile",
-        "guardian",
+        "agent-blackbox",
         "serve",
         "--host",
         "127.0.0.1",
@@ -283,6 +283,91 @@ def test_sync_activity_reports_exact_public_reconciliation_progress():
     assert activity["current"] == 10_000
     assert activity["expected"] == 25_000
     assert activity["percent"] == activity["current"] / activity["expected"] * 100
+    assert activity["indeterminate"] is False
+
+
+def test_dkg_durable_progress_reports_latest_monotonic_snapshot_offset(tmp_path):
+    graph = "0x37b1/agent-blackbox-vm"
+    (tmp_path / "daemon.log").write_text(
+        "\n".join(
+            [
+                f'Rootless durable progress for "{graph}": 12 complete graph(s), safe offset 0->250 of 1000 (raw 260)',
+                f'Rootless durable progress for "{graph}": 20 complete graph(s), safe offset 250->700 of 1000 (raw 720)',
+                'Rootless durable progress for "another-graph": 1 complete graph(s), safe offset 0->9 of 10 (raw 9)',
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    assert server._dkg_durable_progress(str(tmp_path), graph) == {
+        "current_triples": 720,
+        "expected_triples": 1000,
+        "progress_percent": 72.0,
+    }
+
+
+def test_dkg_durable_progress_discards_completed_previous_sync_window(tmp_path):
+    graph = "0x37b1/agent-blackbox-vm"
+    (tmp_path / "daemon.log").write_text(
+        "\n".join(
+            [
+                f'Rootless durable progress for "{graph}": safe offset 900->1000 of 1000 (raw 1000)',
+                f'Rootless durable progress for "{graph}": safe offset 0->0 of 1200 (raw 200)',
+                f'Rootless durable progress for "{graph}": safe offset 0->300 of 1200 (raw 350)',
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    assert server._dkg_durable_progress(str(tmp_path), graph) == {
+        "current_triples": 350,
+        "expected_triples": 1200,
+        "progress_percent": 29.2,
+    }
+
+
+def test_sync_activity_reports_durable_download_percentage():
+    activity = server._sync_activity(
+        public=66_000,
+        community=0,
+        node_reachable=True,
+        catchup={"status": "running"},
+        connection={},
+        transfer={
+            "status": "running",
+            "phase": "recovering-verifiable-memory",
+            "current_triples": 3_000_000,
+            "expected_triples": 5_000_000,
+        },
+    )
+
+    assert activity["current"] == 3_000_000
+    assert activity["expected"] == 5_000_000
+    assert activity["percent"] == 60.0
+    assert activity["indeterminate"] is False
+    assert activity["detail"] == (
+        "3,000,000 of 5,000,000 graph triples received for verification."
+    )
+
+
+def test_sync_activity_marks_download_complete_during_ruleset_refresh():
+    activity = server._sync_activity(
+        public=460_000,
+        community=0,
+        node_reachable=True,
+        catchup={"status": "running"},
+        connection={},
+        transfer={
+            "status": "running",
+            "phase": "refreshing-verifiable-memory",
+            "current_triples": 8_500,
+            "expected_triples": 5_337_721,
+            "inserted_durable_triples": 0,
+        },
+    )
+
+    assert activity["current"] == 5_337_721
+    assert activity["percent"] == 100.0
     assert activity["indeterminate"] is False
 
 

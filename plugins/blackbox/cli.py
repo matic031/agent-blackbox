@@ -11,6 +11,7 @@ from contextlib import contextmanager
 import json
 import logging
 import os
+import psutil
 import queue
 import subprocess
 import sys
@@ -33,7 +34,7 @@ _DKG_STEADY_SYNC_SETTINGS = {
     "DKG_SYNC_GLOBAL_QUEUE_LIMIT": "0",
 }
 
-_BLACKBOX_CHAT_PROFILE = "guardian"
+_BLACKBOX_CHAT_PROFILE = "agent-blackbox"
 _BLACKBOX_SOUL_MARKER = "<!-- managed-by: hermes-blackbox-chat -->"
 _LEGACY_GUARDIAN_SOUL_MARKER = "<!-- managed-by: hermes-guardian-chat -->"
 _BLACKBOX_SOURCE_ROOT_MARKER = ".blackbox-source-root"
@@ -41,8 +42,8 @@ _BLACKBOX_CONTEXT_FILE_MAX_CHARS = 100_000
 _BLACKBOX_SOUL = f"""{_BLACKBOX_SOUL_MARKER}
 # Agent Blackbox
 
-You are Blackbox, the Agent Blackbox assistant. When asked who you are,
-answer as Blackbox rather than Hermes.
+You are Agent Blackbox. When asked who you are, answer as Agent Blackbox
+rather than any inherited or legacy identity.
 
 Your job is to help users work with Agent Blackbox: setup, local agent
 attachment, audit/block mode, threat detection, dashboard behavior, and DKG
@@ -353,9 +354,10 @@ def _write_blackbox_soul(profile_dir: Path) -> None:
             existing = soul_path.read_text(encoding="utf-8")
         except OSError:
             existing = ""
-    if existing == _BLACKBOX_SOUL or _LEGACY_GUARDIAN_SOUL_MARKER in existing:
+    if existing == _BLACKBOX_SOUL:
         return
-    if existing and _BLACKBOX_SOUL_MARKER not in existing:
+    legacy_identity = _LEGACY_GUARDIAN_SOUL_MARKER in existing
+    if existing and _BLACKBOX_SOUL_MARKER not in existing and not legacy_identity:
         backup = profile_dir / "SOUL.md.before-blackbox-chat"
         if not backup.exists():
             try:
@@ -546,16 +548,41 @@ def _dkg_sync_environment(cfg: BlackboxConfig, *, durable: bool) -> Dict[str, st
     # Native DKG dependencies are tied to the Node ABI used at installation.
     # A dashboard launched from another runtime can have a different ``node``
     # first on PATH, so preserve the executable of the currently managed node.
-    try:
-        import psutil
+    node_executable = _managed_dkg_node_executable(cfg)
+    if node_executable is not None:
+        env["PATH"] = str(node_executable.parent) + os.pathsep + env.get("PATH", "")
+    return env
 
+
+def _managed_dkg_node_executable(cfg: BlackboxConfig) -> Optional[Path]:
+    """Find the Node executable whose ABI matches the installed DKG runtime."""
+    try:
         pid = int((Path(cfg.dkg_home) / "daemon.pid").read_text(encoding="utf-8").strip())
-        node_executable = Path(psutil.Process(pid).exe())
-        if node_executable.is_file():
-            env["PATH"] = str(node_executable.parent) + os.pathsep + env.get("PATH", "")
+        executable = Path(psutil.Process(pid).exe())
+        if executable.is_file():
+            return executable
     except (OSError, TypeError, ValueError, psutil.Error):
         pass
-    return env
+
+    # Recent DKG supervisors do not always retain daemon.pid. Locate only a
+    # process running this exact installation, never an unrelated DKG node.
+    try:
+        dkg_cli = str(Path(cfg.dkg_bin).resolve())
+        for process in psutil.process_iter(["exe", "cmdline"]):
+            try:
+                command = [str(item) for item in (process.info.get("cmdline") or [])]
+                if dkg_cli not in command:
+                    continue
+                if not any(item in {"daemon-supervisor", "daemon-worker"} for item in command):
+                    continue
+                executable = Path(str(process.info.get("exe") or process.exe()))
+                if executable.is_file():
+                    return executable
+            except (OSError, TypeError, ValueError, psutil.Error):
+                continue
+    except (OSError, psutil.Error):
+        pass
+    return None
 
 
 def _set_persisted_dkg_steady_state(cfg: BlackboxConfig) -> None:
@@ -1149,20 +1176,18 @@ def _catchup_authoritative_vm(
     backpressure_retries = 0
     heartbeat_seconds = 10.0
 
-    connect = getattr(client, "connect_peer", None)
-    if callable(connect):
-        try:
-            connect(graph_peer_id)
-        except DkgError as exc:
-            error = f"verifiable graph source is unreachable: {exc}"
-            sync_state.write(
-                "failed",
-                context_graph_id=context_graph_id,
-                graph_peer_id=graph_peer_id,
-                error=error,
-            )
-            print(f"  {error}")
-            return False
+    try:
+        _connect_verifiable_source(client, graph_peer_id, deadline)
+    except DkgError as exc:
+        error = f"verifiable graph source is unreachable: {exc}"
+        sync_state.write(
+            "failed",
+            context_graph_id=context_graph_id,
+            graph_peer_id=graph_peer_id,
+            error=error,
+        )
+        print(f"  {error}")
+        return False
 
     # A fresh DKG edge does not yet know the cleartext graph id's numeric
     # on-chain binding. The small system ontology graph carries that standard
@@ -1369,6 +1394,86 @@ def _catchup_authoritative_vm(
         # HTTP response. Repeat the pinned pass until the publisher reports a
         # clean idempotent zero-insert round; only then is recovery settled.
         time.sleep(min(2.0, max(0.2, deadline - time.monotonic())))
+
+
+def _peer_discovery_pending(exc: DkgError) -> bool:
+    detail = str(exc).lower()
+    return any(
+        marker in detail
+        for marker in (
+            "peer_not_found",
+            "peerresolver returned no addresses",
+            "no addresses for",
+            "failed to find peer",
+        )
+    )
+
+
+def _configured_publisher_circuits(client: DkgClient, peer_id: str) -> List[str]:
+    """Build deterministic relay routes for a publisher on a cold peerstore."""
+    try:
+        config = json.loads(
+            (Path(client.dkg_home) / "config.json").read_text(encoding="utf-8")
+        )
+    except (AttributeError, OSError, TypeError, ValueError, json.JSONDecodeError):
+        return []
+    circuits: List[str] = []
+    for relay in config.get("relayPeers") or []:
+        address = str(relay or "").rstrip("/")
+        if "/p2p/" not in address:
+            continue
+        circuits.append(f"{address}/p2p-circuit/p2p/{peer_id}")
+    return circuits
+
+
+def _connect_verifiable_source(
+    client: DkgClient,
+    graph_peer_id: str,
+    deadline: float,
+) -> None:
+    """Resolve a publisher reliably during a fresh node's DHT warm-up."""
+    connect = getattr(client, "connect_peer", None)
+    if not callable(connect):
+        return
+    discovery_deadline = min(deadline, time.monotonic() + 120.0)
+    notice_printed = False
+    last_error: Optional[DkgError] = None
+    while time.monotonic() < discovery_deadline:
+        try:
+            connect(graph_peer_id)
+            return
+        except DkgError as exc:
+            if not _peer_discovery_pending(exc):
+                raise
+            last_error = exc
+
+        # DHT routing tables are intentionally empty on a brand-new node.
+        # Try the configured core relays as circuit routes while discovery
+        # warms up; the publisher may hold a reservation on any one of them.
+        connect_multiaddr = getattr(client, "connect_multiaddr", None)
+        if callable(connect_multiaddr):
+            for circuit in _configured_publisher_circuits(client, graph_peer_id):
+                try:
+                    connect_multiaddr(circuit)
+                    return
+                except DkgError:
+                    continue
+
+        remaining = discovery_deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        sync_state.write(
+            "running",
+            graph_peer_id=graph_peer_id,
+            phase="discovering-verifiable-source",
+        )
+        if not notice_printed:
+            print("  discovering the verifiable graph publisher (fresh-node warm-up)...")
+            notice_printed = True
+        time.sleep(min(5.0, max(0.2, remaining)))
+    if last_error is not None:
+        raise last_error
+    raise DkgError("publisher discovery deadline reached")
 
 
 def _catchup_denied(catchup: Dict[str, Any]) -> bool:

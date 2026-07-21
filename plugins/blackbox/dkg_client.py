@@ -207,6 +207,12 @@ class DkgClient:
             "POST", "/api/connect", {"peerId": peer_id}, timeout=15.0
         )
 
+    def connect_multiaddr(self, multiaddr: str) -> Dict[str, Any]:
+        """Connect through one explicit address when cold DHT lookup is pending."""
+        return self._request(
+            "POST", "/api/connect", {"multiaddr": multiaddr}, timeout=15.0
+        )
+
     def subscribe_context_graph(self, cg_id: str, *, include_shared_memory: bool = False) -> Dict[str, Any]:
         """Subscribe the node to a context graph and catch up its durable VM.
 

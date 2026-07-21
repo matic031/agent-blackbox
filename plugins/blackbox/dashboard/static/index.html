@@ -961,6 +961,11 @@
     font-size: 10px;
   }
   .sync-progress-detail { line-height: 1.45; }
+  .sync-progress-expectation {
+    color: var(--muted);
+    font-size: 9px;
+    line-height: 1.4;
+  }
   .sync-progress-track {
     height: 2px;
     overflow: hidden;
@@ -2780,6 +2785,7 @@
             <span class="sync-progress-meta" id="sync-progress-percent"></span>
           </div>
           <div class="sync-progress-detail" id="sync-progress-detail"></div>
+          <div class="sync-progress-expectation" id="sync-progress-expectation">It’s expected for initial sync to take up to 2 hours.</div>
           <div class="sync-progress-track" aria-hidden="true"><div class="sync-progress-bar" id="sync-progress-bar"></div></div>
           <div class="sync-progress-meta"><span id="sync-progress-elapsed"></span><span id="sync-progress-updated"></span></div>
         </div>
@@ -3228,6 +3234,7 @@
     panel.className = "sync-progress " + esc(status) + (indeterminate ? " indeterminate" : "");
     $("sync-progress-title").textContent = activity.label || "Syncing threat graph";
     $("sync-progress-detail").textContent = activity.detail || "Graph sync is active.";
+    $("sync-progress-expectation").hidden = !(status === "running" || status === "waiting");
     var loader = $("sync-progress-loader");
     if (loader) loader.style.display = (status === "running" || status === "waiting") ? "" : "none";
 
