@@ -8,7 +8,7 @@
 # sensible config defaults — so onboarding is one command and dead simple.
 #
 # Usage:
-#   curl -fsSL https://blackbox.umanitek.ai | bash
+#   curl -fsSL blackbox.umanitek.ai | bash
 #   # or, from a clone:
 #   ./scripts/blackbox-install.sh [--help]
 #

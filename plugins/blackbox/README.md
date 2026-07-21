@@ -12,7 +12,7 @@ confirmed threats before they execute.
 Run the installer:
 
 ```bash
-curl -fsSL https://blackbox.umanitek.ai | bash
+curl -fsSL blackbox.umanitek.ai | bash
 ```
 
 The installer sets up an isolated node from the latest official

@@ -39,13 +39,13 @@ start Docker Engine first. To install without Docker, download the script and
 run it with `--store oxigraph`.
 
 ```bash
-curl -fsSL https://blackbox.umanitek.ai | bash
+curl -fsSL blackbox.umanitek.ai | bash
 ```
 
 Windows PowerShell:
 
 ```powershell
-iwr -useb https://blackbox-w.umanitek.ai | iex
+iwr -useb blackbox-w.umanitek.ai | iex
 ```
 
 <details>
@@ -94,7 +94,7 @@ blackbox sync --wait --require-rules
 Or download the script, read it, then run it:
 
 ```bash
-curl -fsSL https://blackbox.umanitek.ai -o blackbox-install.sh
+curl -fsSL blackbox.umanitek.ai -o blackbox-install.sh
 less blackbox-install.sh
 bash blackbox-install.sh
 ```
