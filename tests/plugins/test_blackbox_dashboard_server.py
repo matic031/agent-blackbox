@@ -54,14 +54,15 @@ def test_connected_agent_cards_render_before_protected_profiles():
     )
 
 
-def test_dashboard_managed_blackbox_is_presented_as_agent_blackbox():
+def test_blackbox_host_hermes_has_a_distinct_agent_name():
     html = (Path(server.__file__).with_name("static") / "index.html").read_text(
         encoding="utf-8"
     )
 
-    assert 'a.dashboard_managed ? "Agent Blackbox" : fwLabel(a.framework)' in html
+    assert 'isBlackboxHermes ? "Agent Blackbox Hermes Agent" : fwLabel(a.framework)' in html
+    assert "(a.blackbox_host || a.dashboard_managed)" in html
     assert 'a.dashboard_managed\n        ? "blackbox"' in html
-    assert 'a.dashboard_managed ? "Dashboard-managed Agent Blackbox"' in html
+    assert 'isBlackboxHermes ? "Hermes agent hosting Agent Blackbox"' in html
 
 
 def test_graph_tooltip_clears_force_graph_outer_chrome():

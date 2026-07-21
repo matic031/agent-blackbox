@@ -1442,6 +1442,12 @@ class GatewayStreamConsumer:
             return False
         if self._message_created_ts is None:
             return False
+        # ``0.0`` is the monotonic clock origin and therefore the oldest
+        # representable preview timestamp. Treat it as stale explicitly so the
+        # decision is independent of host uptime (fresh CI runners may have
+        # been alive for less than the configured threshold).
+        if self._message_created_ts == 0.0:
+            return True
         age = time.monotonic() - self._message_created_ts
         return age >= threshold
 

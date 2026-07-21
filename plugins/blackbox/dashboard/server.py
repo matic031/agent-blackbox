@@ -1434,6 +1434,7 @@ def create_app(*, manage_blackbox: bool = False):
         profile_state = _profile_activity_state(attach_rows, audit_rows, finding_rows)
         blackbox_runtime = _blackbox_snapshot()
         blackbox_workspace = _workspace_key(_blackbox_profile_dir())
+        blackbox_host_workspace = _workspace_key(constants.hermes_home())
         if blackbox_runtime["ready"]:
             blackbox_key = ("hermes", blackbox_workspace)
             if blackbox_key in profile_state:
@@ -1528,6 +1529,9 @@ def create_app(*, manage_blackbox: bool = False):
                     found[key]["workspace_label"] = ws_name
                     found[key]["is_active"] = bool(state["is_active"])
                     found[key]["findings"] = int(state["findings"])
+                    found[key]["blackbox_host"] = (
+                        fw == "hermes" and _workspace_key(ws) == blackbox_host_workspace
+                    )
                     continue
                 found[key] = {
                     "framework": fw,
@@ -1540,6 +1544,9 @@ def create_app(*, manage_blackbox: bool = False):
                     "is_active": bool(state["is_active"]),
                     "workspace": ws,
                     "workspace_label": ws_name,
+                    # The Hermes home that loaded Agent Blackbox gets a distinct
+                    # UI identity; other local Hermes profiles remain separate.
+                    "blackbox_host": fw == "hermes" and _workspace_key(ws) == blackbox_host_workspace,
                     "dashboard_managed": fw == "hermes" and _workspace_key(ws) == blackbox_workspace,
                 }
         except Exception as exc:  # pragma: no cover - fail open

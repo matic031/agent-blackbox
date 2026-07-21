@@ -3614,6 +3614,9 @@
 
     var cards = list.map(function (a) {
       var isActive = !!a.is_active;
+      var isBlackboxHermes = String(a.framework || "").toLowerCase() === "hermes" &&
+        (a.blackbox_host || a.dashboard_managed);
+      var agentName = isBlackboxHermes ? "Agent Blackbox Hermes Agent" : fwLabel(a.framework);
       var reports = Number(a.reports) || 0;
       var reportsHtml = SHOW_AGENT_REPORTS
         ? '<div class="agent-reports"><strong>' + num(reports) + '</strong> report' + (reports === 1 ? '' : 's') + '</div>'
@@ -3623,12 +3626,12 @@
             (isActive ? 'Connected' : 'Protected profile') +
           '</div>'
         : '';
-      var tip = [a.dashboard_managed ? "Dashboard-managed Agent Blackbox" : a.workspace, a.address]
+      var tip = [isBlackboxHermes ? "Hermes agent hosting Agent Blackbox" : a.workspace, a.address]
         .filter(Boolean).join("\n");
       return '<div class="agent-card' + (isActive ? ' active' : '') + '">' +
         '<span class="agent-avatar" style="--fw:' + fwColor(a.framework) + '">' + fwIcon(a.framework) + '</span>' +
         '<div class="agent-info">' +
-          '<div class="agent-fw">' + esc(a.dashboard_managed ? "Agent Blackbox" : fwLabel(a.framework)) + '</div>' +
+          '<div class="agent-fw">' + esc(agentName) + '</div>' +
           '<div class="agent-addr" title="' + esc(tip) + '">' + esc(a._slug) + '</div>' +
           reportsHtml +
           stateHtml +
@@ -4215,8 +4218,9 @@
       });
       if (acts.length > CAP) {
         var moreId = sid + ":more";
-        // Clicking "+N more" opens the parent session's full detail.
-        nodes.push({ id: moreId, kind: "more", label: "+" + (acts.length - CAP) + " more", color: LABEL_MUTED, val: 4, session: sessionNode });
+        // Display-only truncation marker. Session details remain available from
+        // the parent session node without making this synthetic node modal-like.
+        nodes.push({ id: moreId, kind: "more", label: "+" + (acts.length - CAP) + " more", color: LABEL_MUTED, val: 4 });
         links.push({ source: moreId, target: prev, kind: "step" });
       }
 
@@ -4565,7 +4569,7 @@
     }
       if (node.kind === "more") {
         return '<div class="graph-tip"><div class="t-name">' + esc(node.label) + '</div>' +
-          '<div class="t-cat">click to see the whole session</div></div>';
+          '<div class="t-cat">additional calls hidden</div></div>';
       }
       if (node.kind === "gmore") {
         return '<div class="graph-tip"><div class="t-name">' + esc(node.label) + '</div>' +
@@ -5083,6 +5087,7 @@
   function onNodeClick(node) {
     if (!node) return;
     graphLastNodeClickAt = Date.now();
+    if (node.kind === "more") return;
     // Every local node opens a real detail panel; catalog leaves use the threat
     // modal; the machine root just reframes the whole graph.
     if (node.kind === "lthreat") { if (node.finding) openFindingModal(node.finding); return; }
@@ -5103,7 +5108,6 @@
     }
     if (node.kind === "session") { openSessionModal(node); return; }
     if (node.kind === "call") { openCallModal(node); return; }
-    if (node.kind === "more" && node.session) { openSessionModal(node.session); return; }
     if (fg && typeof node.x === "number") {          // center/hub: frame it
       try { fg.centerAt(node.x, node.y, 500); fg.zoom(node.kind === "center" ? 1.4 : 2.4, 500); } catch (e) {}
     }
@@ -5112,14 +5116,13 @@
   function graphClickableNode(node) {
     return node && (
       node.kind === "hub" || node.kind === "gmore" || node.kind === "leaf" ||
-      node.kind === "lthreat" || node.kind === "session" || node.kind === "call" ||
-      node.kind === "more"
+      node.kind === "lthreat" || node.kind === "session" || node.kind === "call"
     );
   }
   function graphPriorityClickNode(node) {
     return node && (
       node.kind === "hub" || node.kind === "gmore" || node.kind === "session" ||
-      node.kind === "call" || node.kind === "more"
+      node.kind === "call"
     );
   }
 

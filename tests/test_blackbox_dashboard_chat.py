@@ -341,6 +341,27 @@ def test_dashboard_graph_expands_explicitly_and_keeps_scene_state():
     assert 'magnitude.toLocaleString() + " THREAT"' in html
 
 
+def test_dashboard_more_node_is_a_display_only_marker():
+    html = (
+        Path(__file__).resolve().parents[1]
+        / "plugins"
+        / "blackbox"
+        / "dashboard"
+        / "static"
+        / "index.html"
+    ).read_text(encoding="utf-8")
+
+    click_handler = html[html.index("function onNodeClick(node)"):]
+    click_handler = click_handler[:click_handler.index("\n  function graphClickableNode")]
+    clickable = html[html.index("function graphClickableNode(node)"):]
+    clickable = clickable[:clickable.index("\n  function graphPriorityClickNode")]
+
+    assert 'if (node.kind === "more") return;' in click_handler
+    assert "openSessionModal(node.session)" not in click_handler
+    assert 'node.kind === "more"' not in clickable
+    assert "click to see the whole session" not in html
+
+
 def test_dashboard_refetches_empty_graph_when_first_verified_threats_arrive():
     html = (
         Path(__file__).resolve().parents[1]
@@ -873,7 +894,7 @@ def test_attach_targets_do_not_duplicate_errored_supported_agents(monkeypatch):
 
 
 def test_agent_cards_distinguish_attached_from_active(monkeypatch):
-    from plugins.blackbox import audit, config, dkg_client
+    from plugins.blackbox import audit, config, constants, dkg_client
 
     cfg = SimpleNamespace(
         dkg_url="http://127.0.0.1:9320",
@@ -882,6 +903,7 @@ def test_agent_cards_distinguish_attached_from_active(monkeypatch):
         sync_interval=60,
     )
     monkeypatch.setattr(config, "load_blackbox_config", lambda: cfg)
+    monkeypatch.setattr(constants, "hermes_home", lambda: Path("/tmp/.hermes"))
     monkeypatch.setattr(dkg_client.DkgClient, "reachable", lambda self, timeout=None: False)
     monkeypatch.setattr(audit, "local_active_frameworks", lambda: ["hermes"])
     monkeypatch.setattr(
@@ -903,4 +925,6 @@ def test_agent_cards_distinguish_attached_from_active(monkeypatch):
     by_framework = {row["framework"]: row for row in agents}
 
     assert by_framework["hermes"]["is_active"] is True
+    assert by_framework["hermes"]["blackbox_host"] is True
     assert by_framework["openclaw"]["is_active"] is False
+    assert by_framework["openclaw"]["blackbox_host"] is False
