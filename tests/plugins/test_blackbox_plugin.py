@@ -1056,26 +1056,16 @@ def test_authoritative_recovery_fails_closed_on_direct_graph_verification_error(
 ):
     graph_calls = []
     states = []
+    error = (
+        "POST /api/shared-memory/catchup -> 503: "
+        '{"error":"DURABLE_CATCHUP_ALL_PEERS_FAILED",'
+        '"reason":"VM_CHAIN_CONTEXT_GRAPH_MISMATCH"}'
+    )
 
     class FakeClient:
-        def catchup_from_peer(self, cg_id, peer_id, *, budget_ms):
+        def catchup_from_peer(self, cg_id, _peer_id, *, budget_ms):
             graph_calls.append(cg_id)
-            return {
-                "ok": False,
-                "includeDurable": True,
-                "includeSharedMemory": False,
-                "peersAttempted": 1,
-                "totalDurableInsertedTriples": 0,
-                "results": [
-                    {
-                        "peerId": peer_id,
-                        "durableError": (
-                            "VM_CHAIN_CONTEXT_GRAPH_MISMATCH: "
-                            "context graph commitment did not match"
-                        ),
-                    }
-                ],
-            }
+            raise cli_mod.DkgError(error)
 
     monkeypatch.setattr(
         cli_mod.sync_state,
@@ -1087,11 +1077,11 @@ def test_authoritative_recovery_fails_closed_on_direct_graph_verification_error(
         FakeClient(),
         constants.DEFAULT_CONTEXT_GRAPH_ID,
         constants.DEFAULT_GRAPH_PEER_ID,
-        cli_mod.time.monotonic() + 60,
+        cli_mod.time.monotonic() + 3,
     )
     assert graph_calls == [constants.DEFAULT_CONTEXT_GRAPH_ID]
     assert states[-1][0] == "failed"
-    assert "VM_CHAIN_CONTEXT_GRAPH_MISMATCH" in states[-1][1]["error"]
+    assert states[-1][1]["error"] == error
 
 
 def test_authoritative_recovery_does_not_loop_when_dkg_attempts_no_peer(monkeypatch):
