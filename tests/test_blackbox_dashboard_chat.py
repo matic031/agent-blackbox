@@ -341,6 +341,33 @@ def test_dashboard_graph_expands_explicitly_and_keeps_scene_state():
     assert 'magnitude.toLocaleString() + " THREAT"' in html
 
 
+def test_dashboard_explore_mode_adapts_rendered_nodes_to_frame_rate():
+    html = (
+        Path(__file__).resolve().parents[1]
+        / "plugins"
+        / "blackbox"
+        / "dashboard"
+        / "static"
+        / "index.html"
+    ).read_text(encoding="utf-8")
+
+    assert "var GRAPH_PERFORMANCE_MIN_LEAVES = 600" in html
+    assert "var GRAPH_PERFORMANCE_LOW_FPS = 24" in html
+    assert "var GRAPH_PERFORMANCE_SUSTAINED_LOW_WINDOWS = 3" in html
+    assert "graphAdaptiveLeafCap = { public: null, community: null }" in html
+    assert "leafLimit = Math.min(leafLimit, performanceLeafBudget);" in html
+    assert "var leafBudget = performanceLeafBudget;" in html
+    assert (
+        "graphFrameMonitor.lowWindows >= GRAPH_PERFORMANCE_SUSTAINED_LOW_WINDOWS"
+        in html
+    )
+    assert "graphFrameMonitor.healthyWindows >= 3" in html
+    assert "Math.floor(current * 0.72)" in html
+    assert "Math.floor(cap * 1.3)" in html
+    assert '"|perf:" + (graphAdaptiveLeafCap[activeTier] || "auto")' in html
+    assert 'id="graph-performance"' in html
+
+
 def test_dashboard_more_node_is_a_display_only_marker():
     html = (
         Path(__file__).resolve().parents[1]
