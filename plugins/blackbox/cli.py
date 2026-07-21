@@ -41,7 +41,6 @@ _BLACKBOX_SOUL_MARKER = "<!-- managed-by: hermes-blackbox-chat -->"
 _LEGACY_MANAGED_SOUL_PREFIX = "<!-- managed-by: hermes-"
 _BLACKBOX_SOURCE_ROOT_MARKER = ".blackbox-source-root"
 _BLACKBOX_CONTEXT_FILE_MAX_CHARS = 100_000
-_MAX_GRAPH_METADATA_PASSES = 5
 _MAX_EMPTY_PUBLIC_PASSES = 3
 _BLACKBOX_SOUL = f"""{_BLACKBOX_SOUL_MARKER}
 # Agent Blackbox
@@ -1278,56 +1277,6 @@ def _ruleset_graph_count(rs: Any, source: str) -> int:
     return sum(int(value or 0) for value in rs.counts().values())
 
 
-def _context_graph_on_chain_binding(
-    client: DkgClient,
-    context_graph_id: str,
-) -> Optional[str]:
-    """Read a cleartext graph's numeric chain binding from DKG's registry."""
-    if not context_graph_id or any(
-        char.isspace() or char in '<>"{}|^`\\'
-        for char in context_graph_id
-    ):
-        return None
-    try:
-        rows = client.context_graphs()
-    except (AttributeError, DkgError):
-        rows = []
-    for row in rows:
-        if str(row.get("id") or "") != context_graph_id:
-            continue
-        value = str(row.get("onChainId") or "").strip()
-        try:
-            return value if value.isdigit() and int(value) > 0 else None
-        except ValueError:
-            return None
-
-    # Fresh DKG nodes can have the verified ontology triples locally before
-    # /api/context-graph/list has materialized its registry entry. Query that
-    # authoritative graph directly instead of treating the derived list as the
-    # only completion signal.
-    subject = f"did:dkg:context-graph:{context_graph_id}"
-    sparql = (
-        "SELECT ?onChainId WHERE { "
-        f"<{subject}> "
-        "<https://dkg.network/ontology#ContextGraphOnChainId> "
-        "?onChainId . } LIMIT 1"
-    )
-    try:
-        rows = client.query(
-            sparql,
-            constants.DEFAULT_GRAPH_METADATA_CONTEXT_GRAPH_ID,
-            view=constants.VIEW_VERIFIABLE_MEMORY,
-            on_error=[],
-        )
-    except AttributeError:
-        return None
-    for row in rows:
-        value = str(row.get("onChainId") or "").strip()
-        if value.isdigit() and int(value) > 0:
-            return value
-    return None
-
-
 def _catchup_authoritative_vm(
     client: DkgClient,
     context_graph_id: str,
@@ -1365,30 +1314,12 @@ def _catchup_authoritative_vm(
         print(f"  {error}")
         return False
 
-    # A fresh DKG edge does not yet know the cleartext graph id's numeric
-    # on-chain binding. The small system ontology graph carries that standard
-    # DKG metadata. Fetch it from the same source first so the VM verifier can
-    # authenticate each graph-scoped assertion as soon as it arrives.
-    pending_context_graphs = [context_graph_id]
-    existing_on_chain_id = _context_graph_on_chain_binding(client, context_graph_id)
-    if (
-        context_graph_id == constants.DEFAULT_CONTEXT_GRAPH_ID
-        and existing_on_chain_id is None
-    ):
-        pending_context_graphs.insert(
-            0,
-            constants.DEFAULT_GRAPH_METADATA_CONTEXT_GRAPH_ID,
-        )
-    elif existing_on_chain_id is not None:
-        print(
-            "  verified graph metadata ready "
-            f"(context graph {existing_on_chain_id})"
-        )
+    # DKG authenticates the configured graph id against its on-chain name-hash
+    # commitment. Request that graph directly instead of making VM availability
+    # depend on a separately materialized ontology graph.
     public_progress_seen = False
-    metadata_passes = 0
 
-    while pending_context_graphs:
-        active_context_graph_id = pending_context_graphs[0]
+    while True:
         remaining = deadline - time.monotonic()
         if remaining <= 1:
             sync_state.write(
@@ -1421,7 +1352,7 @@ def _catchup_authoritative_vm(
             def _recover() -> None:
                 try:
                     outcome.put(("ok", catchup(
-                        active_context_graph_id,
+                        context_graph_id,
                         graph_peer_id,
                         budget_ms=budget_ms,
                     )))
@@ -1552,51 +1483,6 @@ def _catchup_authoritative_vm(
             return False
         backpressure_retries = 0
         inserted = int(result.get("totalDurableInsertedTriples") or 0)
-        if active_context_graph_id != context_graph_id:
-            metadata_passes += 1
-            on_chain_id = _context_graph_on_chain_binding(
-                client,
-                context_graph_id,
-            )
-            if on_chain_id is not None:
-                print(f"  verified graph metadata ready (context graph {on_chain_id})")
-                pending_context_graphs.pop(0)
-                backpressure_retries = 0
-                continue
-            if inserted > 0:
-                if metadata_passes >= _MAX_GRAPH_METADATA_PASSES:
-                    error = (
-                        "verified graph metadata did not expose a numeric "
-                        f"context-graph binding after {metadata_passes} passes"
-                    )
-                    sync_state.write(
-                        "failed",
-                        context_graph_id=context_graph_id,
-                        graph_peer_id=graph_peer_id,
-                        phase="resolving-context-graph-binding",
-                        error=error,
-                    )
-                    print(f"  {error}; refusing the public VM transfer")
-                    return False
-                print(
-                    f"  verified graph metadata advanced "
-                    f"({inserted:,} triples received)"
-                )
-                time.sleep(min(1.0, max(0.2, deadline - time.monotonic())))
-                continue
-            error = (
-                "verified graph metadata settled without a numeric "
-                "context-graph binding"
-            )
-            sync_state.write(
-                "failed",
-                context_graph_id=context_graph_id,
-                graph_peer_id=graph_peer_id,
-                phase="resolving-context-graph-binding",
-                error=error,
-            )
-            print(f"  {error}; refusing the public VM transfer")
-            return False
         sync_state.write(
             "running",
             context_graph_id=context_graph_id,

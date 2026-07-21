@@ -110,14 +110,10 @@ DEFAULT_DKG_URL = f"http://127.0.0.1:{DEFAULT_DKG_PORT}"
 #: Source peer used for verified catch-up of the default threat graph.
 DEFAULT_GRAPH_PEER_ID = "12D3KooWBJskzr2unXQG9mR3LRZFUJoxWr1PN6hTbyWyKndHXjZM"
 
-#: DKG system graph that carries the cleartext graph id -> on-chain id binding.
-#: A fresh client fetches this small graph before the large VM so graph-scoped
-#: assertions can be verified immediately instead of being downloaded and then
-#: rejected as an unresolved context graph.
-DEFAULT_GRAPH_METADATA_CONTEXT_GRAPH_ID = "ontology"
-
-#: Keep the first pass short so a fresh install gets prompt feedback. Durable
-#: progress is resumable; later passes use the normal, longer DKG budget.
+#: Keep the first durable recovery request short so a fresh install gets a
+#: useful verified ruleset quickly. DKG checkpoints complete exact graphs and
+#: resumes the next request from the safe boundary, so this does not weaken
+#: verification.
 INITIAL_GRAPH_SYNC_PASS_BUDGET_MS = 30_000
 
 #: Once the first verified rules are locally usable, prefer DKG's normal
