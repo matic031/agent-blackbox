@@ -1021,7 +1021,7 @@ def _ruleset_refresh_lock(*, blocking: bool):
         try:
             home = constants.blackbox_home()
             home.mkdir(parents=True, exist_ok=True)
-            lock_fh = open(_lock_path(), "a+b")
+            lock_fh = open(_lock_path(), "a+b")  # windows-footgun: ok - binary byte lock
             if os.name == "nt":  # pragma: no cover - exercised via helper
                 if _lock_path().stat().st_size == 0:
                     lock_fh.write(b"0")
