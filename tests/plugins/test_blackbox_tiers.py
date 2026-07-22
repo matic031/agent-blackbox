@@ -150,6 +150,76 @@ def test_root_only_graph_schemas_are_queried_separately_and_merged():
     assert len(rows) == 2
     assert len(queries) == 7
     assert all("UNION" not in query for query in queries[1:])
+    assert all("GRAPH <did:dkg:context-graph:cg>" in query for query in queries[1:])
+
+
+def test_tentative_vm_partitions_fail_closed_without_broad_view():
+    calls = []
+
+    class _Client:
+        def query(self, sparql, cg_id, **kwargs):
+            calls.append((sparql, kwargs))
+            if "dkg:assertionGraph" not in sparql:
+                raise AssertionError("tentative partitions must not be queried")
+            return [{
+                "assertionGraph": {
+                    "value": (
+                        "did:dkg:context-graph:cg/"
+                        "_verifiable_memory/partition/0000"
+                    )
+                },
+                "status": {"value": "tentative"},
+            }]
+
+    assert ruleset_mod._fetch_tier(_Client(), "cg", "verifiable-memory") is None
+    assert len(calls) == 1
+    assert calls[0][1]["view"] is None
+
+
+def test_mixed_vm_store_merges_root_and_confirmed_partitions_without_duplicates():
+    data_graph = "did:dkg:context-graph:cg"
+    root_only = "urn:defender:signal:root"
+    partition_only = "urn:defender:signal:partition"
+    duplicate = "urn:defender:signal:duplicate"
+    calls = []
+
+    class _Client:
+        def query(self, sparql, cg_id, **kwargs):
+            calls.append((sparql, kwargs))
+            if "dkg:assertionGraph" in sparql:
+                return [{
+                    "assertionGraph": {
+                        "value": f"{data_graph}/_verifiable_memory/partition/0000"
+                    },
+                    "status": {"value": "confirmed"},
+                }]
+            if "VALUES ?sourceGraph" in sparql:
+                return [
+                    {"threat": {"value": partition_only}},
+                    {"threat": {"value": duplicate}},
+                ]
+            if "defender:DependencySignal" in sparql:
+                return [
+                    {"threat": {"value": root_only}},
+                    {"threat": {"value": duplicate}},
+                ]
+            return []
+
+    rows = ruleset_mod._fetch_tier(_Client(), "cg", "verifiable-memory")
+
+    assert [ruleset_mod.extract_binding(row.get("threat")) for row in rows] == [
+        partition_only,
+        duplicate,
+        root_only,
+    ]
+    assert all(kwargs["view"] is None for _query, kwargs in calls)
+    root_queries = [
+        query
+        for query, _kwargs in calls
+        if "dkg:assertionGraph" not in query and "VALUES ?sourceGraph" not in query
+    ]
+    assert root_queries
+    assert all(f"GRAPH <{data_graph}>" in query for query in root_queries)
 
 
 def test_vm_correction_suppresses_exact_subject_from_detection_and_graph():

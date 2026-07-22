@@ -94,7 +94,8 @@ class _Pager:
             return [{
                 "assertionGraph": {
                     "value": f"{data_graph}/_verifiable_memory/partition/{i:04d}"
-                }
+                },
+                "status": {"value": "confirmed"},
             } for i in range(partition_count)]
         if "VALUES ?sourceGraph" not in sparql:
             return []
