@@ -546,6 +546,94 @@ def test_blackbox_sync_uses_authoritative_publisher_for_empty_local_store(
     assert "25,000 public VM" in capsys.readouterr().out
 
 
+def test_required_release_sync_fails_when_subscription_cannot_be_persisted(
+    monkeypatch, tmp_path, capsys
+):
+    state = {}
+    subscribe_calls = []
+    clock = {"value": 0.0}
+
+    def monotonic():
+        clock["value"] += 1.0
+        return clock["value"]
+
+    class FakeClient:
+        dkg_home = str(tmp_path)
+
+        def __init__(self, url, **_kwargs):
+            self.url = url
+
+        def catchup_status(self, _cg_id):
+            return {"jobId": "old", "status": "done"}
+
+        def catchup_from_peer(self, _cg_id, peer_id, *, budget_ms):
+            return {
+                "ok": True,
+                "includeDurable": True,
+                "includeSharedMemory": False,
+                "peersAttempted": 1,
+                "totalDurableInsertedTriples": 1,
+                "durableComplete": True,
+                "results": [{"peerId": peer_id}],
+            }
+
+        def threat_count(self, _cg_id):
+            return 1
+
+        def subscribe_context_graph(self, cg_id):
+            subscribe_calls.append(cg_id)
+            raise cli_mod.DkgError("subscription store is unavailable")
+
+    class PublicRuleset:
+        def counts(self):
+            return {
+                "injection": 0,
+                "escalation": 0,
+                "dependency": 1,
+                "fileaccess": 0,
+                "skill": 0,
+            }
+
+        def graph_count(self, source):
+            return 1 if source == "public" else 0
+
+    def write_state(status, **details):
+        state.clear()
+        state.update(status=status, **details)
+        return dict(state)
+
+    monkeypatch.setattr(cli_mod, "DkgClient", FakeClient)
+    monkeypatch.setattr(
+        cli_mod,
+        "load_blackbox_config",
+        lambda: config_mod.BlackboxConfig(
+            context_graph_id=constants.DEFAULT_CONTEXT_GRAPH_ID,
+            dkg_url=constants.DEFAULT_DKG_URL,
+            dkg_home=str(tmp_path),
+            graph_peer_id=constants.DEFAULT_GRAPH_PEER_ID,
+        ),
+    )
+    monkeypatch.setattr(cli_mod.ruleset, "refresh", lambda *_args: PublicRuleset())
+    monkeypatch.setattr(cli_mod.ruleset, "peek", lambda *_args: PublicRuleset())
+    monkeypatch.setattr(cli_mod.sync_state, "read", lambda: dict(state))
+    monkeypatch.setattr(cli_mod.sync_state, "write", write_state)
+    monkeypatch.setattr(cli_mod.time, "monotonic", monotonic)
+    monkeypatch.setattr(cli_mod.time, "sleep", lambda _seconds: None)
+
+    result = cli_mod._cmd_sync_impl(
+        argparse.Namespace(wait=True, timeout=20, require_rules=True)
+    )
+
+    assert result == 2
+    assert len(subscribe_calls) > 1
+    assert state["status"] == "failed"
+    assert state["phase"] == "persisting-subscription"
+    assert "subscription store is unavailable" in state["error"]
+    output = capsys.readouterr().out
+    assert "Required public VM subscription could not be persisted" in output
+    assert "Required ruleset sync is incomplete" in output
+
+
 def test_blackbox_sync_fails_instead_of_waiting_on_empty_zero_insert_snapshot(
     monkeypatch, capsys
 ):
@@ -1060,6 +1148,108 @@ def test_authoritative_recovery_stops_after_safe_manifest_completion(
     )
     assert client.calls == 1
     assert "1,000 triples verified and stored" in capsys.readouterr().out
+
+
+def test_authoritative_recovery_accepts_committed_incomplete_dkg_progress(
+    monkeypatch, tmp_path
+):
+    progress = []
+
+    class FakeClient:
+        dkg_home = str(tmp_path)
+
+        def __init__(self):
+            self.calls = 0
+
+        def catchup_from_peer(self, _cg_id, peer_id, *, budget_ms):
+            self.calls += 1
+            if self.calls == 1:
+                return {
+                    "ok": False,
+                    "retryable": True,
+                    "errorCode": "DURABLE_CATCHUP_INCOMPLETE",
+                    "includeDurable": True,
+                    "includeSharedMemory": False,
+                    "peersAttempted": 1,
+                    "totalDurableInsertedTriples": 40_000,
+                    "durableComplete": False,
+                    "results": [
+                        {
+                            "peerId": peer_id,
+                            "durableInsertedTriples": 40_000,
+                            "durableComplete": False,
+                        }
+                    ],
+                }
+            return {
+                "ok": True,
+                "includeDurable": True,
+                "includeSharedMemory": False,
+                "peersAttempted": 1,
+                "totalDurableInsertedTriples": 10_000,
+                "durableComplete": True,
+                "results": [{"peerId": peer_id, "durableComplete": True}],
+            }
+
+    client = FakeClient()
+    monkeypatch.setattr(cli_mod.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(cli_mod.sync_state, "write", lambda *_args, **_kwargs: {})
+
+    assert cli_mod._catchup_authoritative_vm(
+        client,
+        "owner/public-vm",
+        "publisher",
+        cli_mod.time.monotonic() + 60,
+        on_progress=progress.append,
+    )
+    assert client.calls == 2
+    assert progress == [40_000, 10_000]
+
+
+def test_authoritative_recovery_ignores_completion_from_earlier_invocation(
+    monkeypatch, tmp_path, capsys
+):
+    graph = "owner/public-vm"
+    (tmp_path / "daemon.log").write_text(
+        f'Rootless durable progress for "{graph}": '
+        "1 complete graph(s), safe offset 0->100 of 100 (raw 100)\n",
+        encoding="utf-8",
+    )
+
+    class FakeClient:
+        dkg_home = str(tmp_path)
+
+        def __init__(self):
+            self.calls = 0
+
+        def catchup_from_peer(self, _cg_id, peer_id, *, budget_ms):
+            self.calls += 1
+            return {
+                "ok": True,
+                "includeDurable": True,
+                "includeSharedMemory": False,
+                "peersAttempted": 1,
+                "totalDurableInsertedTriples": 0,
+                "results": [{"peerId": peer_id}],
+            }
+
+        def threat_count(self, _cg_id):
+            return 1
+
+    client = FakeClient()
+    monkeypatch.setattr(cli_mod.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(cli_mod.sync_state, "write", lambda *_args, **_kwargs: {})
+
+    assert not cli_mod._catchup_authoritative_vm(
+        client,
+        graph,
+        "publisher",
+        cli_mod.time.monotonic() + 60,
+    )
+    assert client.calls == cli_mod._MAX_EMPTY_PUBLIC_PASSES
+    output = capsys.readouterr().out
+    assert "after 3 pinned passes" in output
+    assert "snapshot complete" not in output
 
 
 def test_authoritative_recovery_retries_empty_fresh_public_pass(

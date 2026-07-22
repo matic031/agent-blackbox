@@ -24,7 +24,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional
 from . import attach, audit, constants, llm, quads, ruleset, settings, sync_state
 from .config import BlackboxConfig, load_blackbox_config
 from .dkg_client import DkgClient, DkgError
-from .dkg_progress import read_durable_progress
+from .dkg_progress import capture_durable_progress_cursor, read_durable_progress
 
 logger = logging.getLogger(__name__)
 
@@ -1112,8 +1112,11 @@ def _cmd_sync_impl(args: argparse.Namespace) -> int:
                     "the required ruleset is unavailable."
                 )
                 break
-        sync_complete = base_sync_complete and (
-            not authoritative_attempted or authoritative_complete
+        subscription_ready = not managed_graph or subscribed
+        sync_complete = (
+            base_sync_complete
+            and (not authoritative_attempted or authoritative_complete)
+            and subscription_ready
         )
         if authoritative_recovered and not sync_complete:
             sync_state.write(
@@ -1121,9 +1124,13 @@ def _cmd_sync_impl(args: argparse.Namespace) -> int:
                 context_graph_id=cfg.context_graph_id,
                 graph_peer_id=cfg.graph_peer_id,
                 phase=(
-                    "refreshing-verifiable-memory"
-                    if not authoritative_complete
-                    else "network-catchup"
+                    "persisting-subscription"
+                    if not subscription_ready
+                    else (
+                        "refreshing-verifiable-memory"
+                        if not authoritative_complete
+                        else "network-catchup"
+                    )
                 ),
                 public_entries=public_count,
                 expected_public_entries=authoritative_target,
@@ -1142,7 +1149,21 @@ def _cmd_sync_impl(args: argparse.Namespace) -> int:
 
         now = time.monotonic()
         if not getattr(args, "wait", False) or now >= deadline:
-            if authoritative_recovered and not authoritative_complete:
+            if managed_graph and not subscribed:
+                error = "required DKG subscription could not be persisted"
+                if last_subscribe_error:
+                    error = f"{error}: {last_subscribe_error}"
+                sync_state.write(
+                    "failed",
+                    context_graph_id=cfg.context_graph_id,
+                    graph_peer_id=cfg.graph_peer_id,
+                    phase="persisting-subscription",
+                    public_entries=public_count,
+                    expected_public_entries=authoritative_target or public_count,
+                    community_entries=community_count,
+                    error=error,
+                )
+            elif authoritative_recovered and not authoritative_complete:
                 sync_state.write(
                     "failed",
                     context_graph_id=cfg.context_graph_id,
@@ -1206,6 +1227,11 @@ def _cmd_sync_impl(args: argparse.Namespace) -> int:
                 logger.debug("blackbox: subscribe pending: %s", last_subscribe_error)
             if _catchup_denied(last_catchup):
                 print("  DKG catch-up is denied until the curator confirms this node.")
+        elif release_graph and not subscribed:
+            print("  Required public VM subscription could not be persisted.")
+            if last_subscribe_error:
+                print(f"  DKG subscription error: {last_subscribe_error}")
+            print("  Retry with `hermes blackbox sync --wait`.")
         elif (catchup_restarted or fresh_catchup_seen) and str(
             last_catchup.get("status") or ""
         ).lower() in {
@@ -1272,6 +1298,13 @@ def _catchup_authoritative_vm(
         )
         print(f"  {error}")
         return False
+
+    # Legacy DKG builds report durable completion only in daemon.log. Bound
+    # that compatibility signal to this recovery invocation so a completed
+    # transfer from an earlier command cannot satisfy a new request.
+    progress_cursor = capture_durable_progress_cursor(
+        str(getattr(client, "dkg_home", "") or "")
+    )
 
     # DKG authenticates the configured graph id against its on-chain name-hash
     # commitment. Request that graph directly instead of making VM availability
@@ -1417,9 +1450,16 @@ def _catchup_authoritative_vm(
                 or peer_result.get("errors")
                 or ""
             )
+        explicit_incomplete = bool(
+            isinstance(result, dict)
+            and result.get("durableComplete") is False
+            and result.get("retryable") is True
+            and str(result.get("errorCode") or "")
+            == "DURABLE_CATCHUP_INCOMPLETE"
+        )
         attempted = bool(
             isinstance(result, dict)
-            and result.get("ok") is True
+            and (result.get("ok") is True or explicit_incomplete)
             and result.get("includeDurable") is True
             and result.get("includeSharedMemory") is False
             and int(result.get("peersAttempted") or 0) >= 1
@@ -1445,6 +1485,7 @@ def _catchup_authoritative_vm(
         durable_progress = read_durable_progress(
             str(getattr(client, "dkg_home", "") or ""),
             context_graph_id,
+            after=progress_cursor,
         )
         # Newer DKG releases report the request's completion contract directly.
         # Retain daemon-log parsing as a compatibility fallback for 10.0.9.

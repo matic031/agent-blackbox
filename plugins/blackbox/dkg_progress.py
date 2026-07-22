@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 
 _DURABLE_PROGRESS_RE = re.compile(
@@ -14,19 +15,57 @@ _DURABLE_PROGRESS_RE = re.compile(
 )
 
 
-def read_durable_progress(dkg_home: str, context_graph_id: str) -> Dict[str, Any]:
+@dataclass(frozen=True)
+class DurableProgressCursor:
+    """A stable boundary in the managed daemon log."""
+
+    device: int
+    inode: int
+    offset: int
+
+
+def capture_durable_progress_cursor(dkg_home: str) -> Optional[DurableProgressCursor]:
+    """Capture the current end of the daemon log, if it exists."""
+    path = Path(dkg_home) / "daemon.log"
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    return DurableProgressCursor(
+        device=stat.st_dev,
+        inode=stat.st_ino,
+        offset=stat.st_size,
+    )
+
+
+def read_durable_progress(
+    dkg_home: str,
+    context_graph_id: str,
+    *,
+    after: Optional[DurableProgressCursor] = None,
+) -> Dict[str, Any]:
     """Return the latest rootless durable-sync window for ``context_graph_id``.
 
     ``current_triples`` is transfer progress and may include the raw tail of an
     incomplete exact graph. ``safe_current_triples`` contains only complete,
     verified graph boundaries and is therefore the completion signal callers
-    should use after a successful catch-up response.
+    should use after a successful catch-up response. When ``after`` is given,
+    only progress emitted after that cursor is considered; a rotated log starts
+    a fresh window.
     """
     path = Path(dkg_home) / "daemon.log"
     try:
         with path.open("rb") as handle:
-            size = path.stat().st_size
-            handle.seek(max(0, size - 4_000_000))
+            stat = path.stat()
+            start = max(0, stat.st_size - 4_000_000)
+            if after is not None and (
+                stat.st_dev == after.device and stat.st_ino == after.inode
+            ):
+                # A smaller file was truncated in place and therefore starts a
+                # new log generation. Otherwise exclude all pre-request lines.
+                if stat.st_size >= after.offset:
+                    start = max(start, after.offset)
+            handle.seek(start)
             text = handle.read().decode("utf-8", errors="replace")
     except OSError:
         return {}
@@ -61,4 +100,3 @@ def read_durable_progress(dkg_home: str, context_graph_id: str) -> Dict[str, Any
         "progress_percent": round((current / expected) * 100, 1),
         "snapshot_complete": safe_current >= expected,
     }
-
