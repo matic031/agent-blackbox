@@ -118,6 +118,7 @@ def test_dashboard_keeps_partial_vm_count_loading_during_curator_transfer(monkey
         "passes": 2,
         "inserted_triples": 160_000,
         "public_entries": 460,
+        "context_graph_id": cfg.context_graph_id,
     }
     monkeypatch.setattr(config, "load_blackbox_config", lambda: cfg)
     monkeypatch.setattr(ruleset, "peek", lambda _cfg=None: PartialRuleset())

@@ -468,7 +468,7 @@ def _cmd_sync(args: argparse.Namespace) -> int:
             with _managed_sync_lock() as acquired:
                 if not acquired:
                     print("Blackbox sync is already running; no second transfer was queued.")
-                    return 0
+                    return 2 if getattr(args, "require_rules", False) else 0
                 return _cmd_sync_impl(args)
         return _cmd_sync_impl(args)
     except KeyboardInterrupt:
@@ -718,8 +718,12 @@ def _terminal_sync_details(state: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _last_sync_counts() -> tuple[int, int]:
-    previous = sync_state.read()
+def _last_sync_counts(context_graph_id: str = "") -> tuple[int, int]:
+    previous = (
+        sync_state.read_for_graph(context_graph_id)
+        if context_graph_id
+        else sync_state.read()
+    )
     try:
         public = max(0, int(previous.get("public_entries") or 0))
     except (TypeError, ValueError):
@@ -736,9 +740,9 @@ def _cmd_sync_with_managed_dkg(cfg: BlackboxConfig, args: argparse.Namespace) ->
     with _managed_sync_lock() as acquired:
         if not acquired:
             print("Blackbox sync is already running; no second transfer was queued.")
-            return 0
+            return 2 if getattr(args, "require_rules", False) else 0
 
-        known_public, known_community = _last_sync_counts()
+        known_public, known_community = _last_sync_counts(cfg.context_graph_id)
         sync_state.write(
             "running",
             context_graph_id=cfg.context_graph_id,
@@ -758,10 +762,10 @@ def _cmd_sync_with_managed_dkg(cfg: BlackboxConfig, args: argparse.Namespace) ->
             if _set_persisted_dkg_steady_state(cfg):
                 _restart_managed_dkg(cfg)
             result = _cmd_sync_impl(args)
-            terminal_state = sync_state.read()
+            terminal_state = sync_state.read_for_graph(cfg.context_graph_id)
         except BaseException as exc:
             failure = exc
-            terminal_state = sync_state.read()
+            terminal_state = sync_state.read_for_graph(cfg.context_graph_id)
 
         if failure is not None:
             raise failure
@@ -795,6 +799,8 @@ def _cmd_sync_impl(args: argparse.Namespace) -> int:
     baseline_catchup_job_id = ""
     fresh_catchup_seen = False
     fresh_catchup_job_id = ""
+    catchup_retry_attempts = 0
+    next_catchup_retry_at = 0.0
     authoritative_attempted = False
     authoritative_recovered = False
     authoritative_complete = False
@@ -802,7 +808,7 @@ def _cmd_sync_impl(args: argparse.Namespace) -> int:
     sync_complete = False
     last_join_attempt = float("-inf")
     deadline = time.monotonic() + max(1, int(getattr(args, "timeout", 180) or 180))
-    track_sync = bool(managed_graph and getattr(args, "wait", False))
+    track_sync = bool(getattr(args, "wait", False))
 
     if (
         release_graph
@@ -814,7 +820,7 @@ def _cmd_sync_impl(args: argparse.Namespace) -> int:
         return 2
 
     if track_sync:
-        known_public, known_community = _last_sync_counts()
+        known_public, known_community = _last_sync_counts(cfg.context_graph_id)
         sync_state.write(
             "running",
             context_graph_id=cfg.context_graph_id,
@@ -993,9 +999,14 @@ def _cmd_sync_impl(args: argparse.Namespace) -> int:
         catchup_state = ""
         catchup_includes_swm = False
         catchup_job_id = ""
+        exact_job_status = False
         if getattr(args, "wait", False) and subscribed:
             try:
-                catchup = client.catchup_status(cfg.context_graph_id)
+                catchup, exact_job_status = _catchup_status(
+                    client,
+                    cfg.context_graph_id,
+                    fresh_catchup_job_id,
+                )
                 last_catchup = catchup
                 catchup_state = str(catchup.get("status") or "").lower()
                 catchup_includes_swm = catchup.get("includeSharedMemory") is True
@@ -1005,15 +1016,43 @@ def _cmd_sync_impl(args: argparse.Namespace) -> int:
                     or catchup_job_id != baseline_catchup_job_id
                 ):
                     fresh_catchup_seen = True
-                    if not fresh_catchup_job_id:
+                    if not fresh_catchup_job_id or not exact_job_status:
                         fresh_catchup_job_id = catchup_job_id
                 if _catchup_denied(catchup):
                     pending_approval = True
                     admitted = False
             except DkgError:
                 pass
+        retryable_catchup = (
+            not authoritative_recovered
+            and getattr(args, "wait", False)
+            and subscribed
+            and (catchup_restarted or fresh_catchup_seen)
+            and catchup_state in {"deferred", "unreachable"}
+        )
+        if retryable_catchup and now >= next_catchup_retry_at and now < deadline:
+            catchup_retry_attempts += 1
+            next_catchup_retry_at = now + min(
+                10.0,
+                float(2 ** min(catchup_retry_attempts - 1, 3)),
+            )
+            try:
+                replacement = client.subscribe_context_graph(cfg.context_graph_id)
+                replacement_job_id = _catchup_job_id(replacement)
+                fresh_catchup_seen = True
+                fresh_catchup_job_id = replacement_job_id
+                last_catchup = replacement if isinstance(replacement, dict) else {}
+                print(
+                    "Retrying DKG catch-up after "
+                    f"{catchup_state} state (attempt {catchup_retry_attempts})."
+                )
+                continue
+            except DkgError as exc:
+                last_subscribe_error = str(exc)
         fresh_job_complete = catchup_state == "done" and (
-            not fresh_catchup_job_id or catchup_job_id == fresh_catchup_job_id
+            exact_job_status
+            or not fresh_catchup_job_id
+            or catchup_job_id == fresh_catchup_job_id
         )
         catchup_pending = not authoritative_recovered and (
             catchup_state in {"queued", "running"}
@@ -1217,7 +1256,7 @@ def _cmd_sync_impl(args: argparse.Namespace) -> int:
         time.sleep(min(3.0, max(0.2, deadline - now)))
 
     if track_sync:
-        current_transfer = sync_state.read()
+        current_transfer = sync_state.read_for_graph(cfg.context_graph_id)
         if sync_complete:
             sync_state.write(
                 "done",
@@ -1817,6 +1856,27 @@ def _catchup_job_id(catchup: Any) -> str:
     if isinstance(nested, dict):
         catchup = nested
     return str(catchup.get("jobId") or catchup.get("job_id") or catchup.get("id") or "")
+
+
+def _catchup_status(
+    client: DkgClient,
+    context_graph_id: str,
+    job_id: str = "",
+) -> tuple[Dict[str, Any], bool]:
+    """Read an exact catch-up job when supported, otherwise the graph latest."""
+    if job_id:
+        try:
+            return client.catchup_status(context_graph_id, job_id=job_id), True
+        except TypeError as exc:
+            # Compatibility for older plugin clients and test doubles that do
+            # not yet accept the keyword. Do not hide unrelated TypeErrors.
+            if "job_id" not in str(exc):
+                raise
+        except DkgError:
+            # The daemon bounds its job history. If the exact job was evicted,
+            # inspect the latest job and adopt it in the caller.
+            pass
+    return client.catchup_status(context_graph_id), False
 
 
 def _should_request_private_join(cfg: BlackboxConfig) -> bool:

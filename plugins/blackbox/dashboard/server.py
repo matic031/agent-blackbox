@@ -287,7 +287,7 @@ def _network_sync_once(
 def _sync_ruleset_once(load_config: Any, dkg_client_cls: Any, ruleset_mod: Any) -> Dict[str, int]:
     """Ensure one public-graph subscription and refresh curated VM rules."""
     cfg = load_config()
-    transfer = sync_state.read()
+    transfer = sync_state.read_for_graph(cfg.context_graph_id)
     if transfer.get("status") == "running":
         # A replacement snapshot is staged atomically. Keep serving the last
         # verified cache while it is received instead of replacing the UI and
@@ -1383,7 +1383,7 @@ def create_app(*, manage_blackbox: bool = False):
             "" if _is_hidden_swm_catchup_error(catchup_error) else node_catchup_state
         )
         catchup_state = node_catchup_state
-        authoritative_sync = sync_state.read()
+        authoritative_sync = sync_state.read_for_graph(cfg.context_graph_id)
         authoritative_running = authoritative_sync.get("status") == "running"
         authoritative_done = authoritative_sync.get("status") == "done"
         if authoritative_running:

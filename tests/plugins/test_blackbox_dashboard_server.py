@@ -218,6 +218,76 @@ def test_sync_state_rejects_abandoned_running_process(tmp_path, monkeypatch):
     assert state["error"] == "authoritative sync process exited"
 
 
+def test_sync_state_is_scoped_to_configured_context_graph(tmp_path, monkeypatch):
+    state_path = tmp_path / "authoritative-sync.json"
+    state_path.write_text(
+        '{"status":"done","context_graph_id":"owner/old"}',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(sync_state, "_path", lambda: state_path)
+
+    assert sync_state.read_for_graph("owner/old")["status"] == "done"
+    assert sync_state.read_for_graph("owner/new") == {}
+
+
+def test_ruleset_sync_ignores_running_state_from_another_graph(monkeypatch):
+    cfg = SimpleNamespace(
+        context_graph_id="owner/new",
+        dkg_url="http://node",
+        dkg_home="/tmp/dkg",
+        sync_interval=3600,
+    )
+    refreshed = []
+
+    class Client:
+        def __init__(self, **_kwargs):
+            pass
+
+        def catchup_status(self, _cg_id):
+            return {"jobId": "done", "status": "done"}
+
+    class Cached:
+        synced_at = 0.0
+
+        def counts(self):
+            return {
+                "injection": 0,
+                "escalation": 0,
+                "dependency": 0,
+                "fileaccess": 0,
+                "skill": 0,
+            }
+
+        def graph_count(self, _source):
+            return 0
+
+    class Ready(Cached):
+        def counts(self):
+            return {**super().counts(), "dependency": 2}
+
+        def graph_count(self, source):
+            return 2 if source == "public" else 0
+
+    rules = SimpleNamespace(
+        peek=lambda _cfg: Cached(),
+        refresh=lambda _cfg, _client: refreshed.append(True) or Ready(),
+    )
+    monkeypatch.setattr(
+        server.sync_state,
+        "read",
+        lambda: {
+            "status": "running",
+            "context_graph_id": "owner/old",
+            "public_entries": 999,
+        },
+    )
+
+    result = server._sync_ruleset_once(lambda: cfg, Client, rules)
+
+    assert refreshed == [True]
+    assert result["public"] == 2
+
+
 def test_graph_sync_state_treats_authoritatively_settled_zero_as_ready():
     assert server._graph_sync_state(0, True, "running", settled=True) == "ready"
 

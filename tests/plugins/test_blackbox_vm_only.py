@@ -226,7 +226,11 @@ def test_dashboard_keeps_old_rules_and_advances_verified_count_during_sync(monke
     monkeypatch.setattr(
         server.sync_state,
         "read",
-        lambda: {"status": "running", "public_entries": 10},
+        lambda: {
+            "status": "running",
+            "context_graph_id": Cfg.context_graph_id,
+            "public_entries": 10,
+        },
     )
 
     assert server._sync_ruleset_once(lambda: Cfg(), Client, Rules) == {

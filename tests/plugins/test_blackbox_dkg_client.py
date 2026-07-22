@@ -165,6 +165,19 @@ def test_catchup_status_encodes_context_graph_id(monkeypatch):
     )
 
 
+def test_catchup_status_can_pin_exact_job_id(monkeypatch):
+    cap = _capture(monkeypatch, '{"jobId":"fresh","status":"done"}')
+    client = dkg_client.DkgClient(url="http://node", token="tok")
+
+    result = client.catchup_status("owner/graph", job_id="fresh job/1")
+
+    assert result == {"jobId": "fresh", "status": "done"}
+    assert cap["method"] == "GET"
+    assert cap["url"] == (
+        "http://node/api/sync/catchup-status?jobId=fresh%20job%2F1"
+    )
+
+
 def test_connect_peer_uses_dkg_peer_resolution(monkeypatch):
     cap = _capture(monkeypatch)
     client = dkg_client.DkgClient(url="http://node", token="tok")

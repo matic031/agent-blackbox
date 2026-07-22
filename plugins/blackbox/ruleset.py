@@ -14,6 +14,7 @@ across processes. Every path fails open to the last-good (or empty) ruleset.
 from __future__ import annotations
 
 from contextlib import contextmanager
+import errno
 import json
 import logging
 import os
@@ -382,6 +383,7 @@ class Ruleset:
     ioc: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     graph_threats: List[Dict[str, Any]] = field(default_factory=list)
     synced_at: float = 0.0
+    context_graph_id: str = ""
     _graph_entries_cache: Dict[str, List[Dict[str, Any]]] = field(
         default_factory=dict,
         init=False,
@@ -734,6 +736,7 @@ def _lock_path() -> Path:
 def _serialize(rs: Ruleset) -> Dict[str, Any]:
     return {
         "synced_at": rs.synced_at,
+        "context_graph_id": rs.context_graph_id,
         "injection": [
             {k: v for k, v in rule.items() if k != "pattern"} for rule in rs.injection
         ],
@@ -747,7 +750,10 @@ def _serialize(rs: Ruleset) -> Dict[str, Any]:
 
 
 def _deserialize(data: Dict[str, Any]) -> Ruleset:
-    rs = Ruleset(synced_at=float(data.get("synced_at", 0.0)))
+    rs = Ruleset(
+        synced_at=float(data.get("synced_at", 0.0)),
+        context_graph_id=str(data.get("context_graph_id") or ""),
+    )
     for rule in data.get("injection", []):
         src = _normalize_injection_pattern(str(rule.get("pattern_src") or ""))
         if not src:
@@ -810,14 +816,31 @@ def _cache_file_stamp() -> Optional[int]:
         return None
 
 
-def _latest_cached_ruleset() -> Optional[Ruleset]:
-    """Return memory cache, reloading when another process replaced the file."""
+def _matches_context_graph(rs: Optional[Ruleset], context_graph_id: str) -> bool:
+    """Return whether a cache generation belongs to the requested graph.
+
+    Cache files written before graph identity was persisted are accepted only
+    for the built-in release graph. They cannot safely be attributed to an
+    explicitly configured custom graph.
+    """
+    if rs is None:
+        return False
+    cached_graph = str(rs.context_graph_id or "")
+    if cached_graph:
+        return cached_graph == context_graph_id
+    return context_graph_id == constants.DEFAULT_CONTEXT_GRAPH_ID
+
+
+def _latest_cached_ruleset(context_graph_id: str = "") -> Optional[Ruleset]:
+    """Return the matching memory/disk generation, reloading replacements."""
     global _memory_cache, _memory_cache_stamp
     stamp = _cache_file_stamp()
     with _memory_lock:
         cached = _memory_cache
         known_stamp = _memory_cache_stamp
     if cached is not None and stamp == known_stamp:
+        if context_graph_id and not _matches_context_graph(cached, context_graph_id):
+            return None
         return cached
     disk = _read_cache()
     with _memory_lock:
@@ -825,6 +848,8 @@ def _latest_cached_ruleset() -> Optional[Ruleset]:
             _memory_cache = disk
             cached = disk
         _memory_cache_stamp = stamp
+    if context_graph_id and not _matches_context_graph(cached, context_graph_id):
+        return None
     return cached
 
 
@@ -997,15 +1022,16 @@ def _ruleset_refresh_lock(*, blocking: bool):
             home = constants.blackbox_home()
             home.mkdir(parents=True, exist_ok=True)
             lock_fh = open(_lock_path(), "a+b")
-            if os.name == "nt":  # pragma: no cover - exercised on Windows
-                import msvcrt
-
+            if os.name == "nt":  # pragma: no cover - exercised via helper
                 if _lock_path().stat().st_size == 0:
                     lock_fh.write(b"0")
                     lock_fh.flush()
                 lock_fh.seek(0)
-                mode = msvcrt.LK_LOCK if blocking else msvcrt.LK_NBLCK
-                msvcrt.locking(lock_fh.fileno(), mode, 1)
+                if not _acquire_windows_file_lock(lock_fh, blocking=blocking):
+                    lock_fh.close()
+                    lock_fh = None
+                    yield False
+                    return
             else:
                 import fcntl
 
@@ -1021,7 +1047,7 @@ def _ruleset_refresh_lock(*, blocking: bool):
             yield False
             return
         except OSError:
-            if not blocking and os.name == "nt":  # Windows lock contention
+            if os.name == "nt":
                 if lock_fh is not None:
                     lock_fh.close()
                     lock_fh = None
@@ -1031,11 +1057,14 @@ def _ruleset_refresh_lock(*, blocking: bool):
                 lock_fh.close()
                 lock_fh = None
         except Exception:
-            # Retain the in-process guard on platforms without a usable file
-            # lock. Ruleset refreshes are fail-open by design.
             if lock_fh is not None:
                 lock_fh.close()
                 lock_fh = None
+            if os.name == "nt":
+                yield False
+                return
+            # Retain the in-process guard on platforms without a usable file
+            # lock. Ruleset refreshes are fail-open by design.
 
         yield True
     finally:
@@ -1056,6 +1085,34 @@ def _ruleset_refresh_lock(*, blocking: bool):
         _refresh_lock.release()
 
 
+def _acquire_windows_file_lock(
+    lock_fh: Any,
+    *,
+    blocking: bool,
+    msvcrt_module: Any = None,
+    sleep: Callable[[float], None] = time.sleep,
+) -> bool:
+    """Acquire one Windows byte lock without mistaking contention for success."""
+    if msvcrt_module is None:  # pragma: no cover - imported only on Windows
+        import msvcrt as msvcrt_module
+
+    while True:
+        lock_fh.seek(0)
+        try:
+            msvcrt_module.locking(
+                lock_fh.fileno(),
+                msvcrt_module.LK_NBLCK,
+                1,
+            )
+            return True
+        except OSError as exc:
+            if not blocking:
+                return False
+            if exc.errno not in {errno.EACCES, errno.EAGAIN, errno.EDEADLK}:
+                return False
+            sleep(0.05)
+
+
 def refresh(
     config: Optional[BlackboxConfig] = None,
     client: Optional[DkgClient] = None,
@@ -1068,15 +1125,19 @@ def refresh(
     query fails, the last-good public rules are preserved. On total
     failure, returns the last-good cache or an empty ruleset — never raises.
     """
+    config = config or load_blackbox_config()
+    context_graph_id = config.context_graph_id
     initial_stamp = _cache_file_stamp()
     with _ruleset_refresh_lock(blocking=wait_for_lock) as acquired:
         if not acquired:
-            return _latest_cached_ruleset() or Ruleset()
+            return _latest_cached_ruleset(context_graph_id) or Ruleset(
+                context_graph_id=context_graph_id
+            )
         # If another process completed while this caller waited, its atomic
         # replacement is the requested fresh generation. Reuse it instead of
         # immediately issuing the same large query sequence again.
         if _cache_file_stamp() != initial_stamp:
-            latest = _latest_cached_ruleset()
+            latest = _latest_cached_ruleset(context_graph_id)
             if latest is not None:
                 return latest
         return _refresh_unlocked(config, client)
@@ -1089,6 +1150,7 @@ def _refresh_unlocked(
     """Refresh while the caller holds :func:`_ruleset_refresh_lock`."""
     global _memory_cache, _memory_cache_stamp
     config = config or load_blackbox_config()
+    context_graph_id = config.context_graph_id
     client = client or DkgClient(url=config.dkg_url, dkg_home=config.dkg_home)
     tiers = ((constants.VIEW_VERIFIABLE_MEMORY, "public"),)
     fetched = {tier: _fetch_tier(client, config.context_graph_id, view) for view, tier in tiers}
@@ -1103,9 +1165,14 @@ def _refresh_unlocked(
         # transient empty query (or a concurrent refresh racing catch-up)
         # must never erase an already verified, enforceable ruleset.
         disk_prior = _read_cache()
-        candidates = [item for item in (_memory_cache, disk_prior) if item is not None]
+        candidates = [
+            item
+            for item in (_memory_cache, disk_prior)
+            if _matches_context_graph(item, context_graph_id)
+        ]
         prior = max(candidates, key=lambda item: item.source_count("public"), default=None)
         if prior is not None and prior.source_count("public") > 0:
+            prior.context_graph_id = context_graph_id
             prior.synced_at = time.time()
             _write_cache(prior)
             with _memory_lock:
@@ -1115,8 +1182,9 @@ def _refresh_unlocked(
 
     if all(rows is None for rows in fetched.values()):
         # Every tier failed — keep the last-good ruleset instead of emptying.
-        existing = _latest_cached_ruleset()
+        existing = _latest_cached_ruleset(context_graph_id)
         if existing is not None:
+            existing.context_graph_id = context_graph_id
             existing.synced_at = time.time()
             _write_cache(existing)
             with _memory_lock:
@@ -1130,6 +1198,7 @@ def _refresh_unlocked(
             continue
         rows.extend((row, tier) for row in view_rows)
     rs = build_from_rows(rows)
+    rs.context_graph_id = context_graph_id
     if empty_success:
         # A fresh node's subscribe/catch-up is async. Do not cache "0 rules" as
         # fresh for the full sync interval; retry soon so the dashboard updates
@@ -1140,7 +1209,7 @@ def _refresh_unlocked(
 
     errored = [tier for tier, view_rows in fetched.items() if view_rows is None]
     if errored:
-        prior = _latest_cached_ruleset()
+        prior = _latest_cached_ruleset(context_graph_id)
         if prior is not None:
             _restore_tiers(rs, prior, errored)
 
@@ -1199,9 +1268,14 @@ def get(config: Optional[BlackboxConfig] = None) -> Ruleset:
     """
     global _memory_cache, _memory_cache_stamp, _refreshing
     config = config or load_blackbox_config()
-    cached = _latest_cached_ruleset()
+    cached = _latest_cached_ruleset(config.context_graph_id)
     if cached is None:
-        cached = _read_cache() or Ruleset()
+        disk = _read_cache()
+        cached = (
+            disk
+            if _matches_context_graph(disk, config.context_graph_id)
+            else Ruleset(context_graph_id=config.context_graph_id)
+        )
         with _memory_lock:
             _memory_cache = cached
             _memory_cache_stamp = _cache_file_stamp()
@@ -1235,14 +1309,15 @@ def peek(config: Optional[BlackboxConfig] = None) -> Ruleset:
     """
     global _memory_cache, _memory_cache_stamp
     config = config or load_blackbox_config()
-    del config  # Kept for API symmetry and future profile-aware caches.
-    cached = _latest_cached_ruleset()
+    cached = _latest_cached_ruleset(config.context_graph_id)
     if cached is None:
-        cached = _read_cache() or Ruleset()
+        disk = _read_cache()
+        cached = (
+            disk
+            if _matches_context_graph(disk, config.context_graph_id)
+            else Ruleset(context_graph_id=config.context_graph_id)
+        )
         with _memory_lock:
-            if _memory_cache is None:
-                _memory_cache = cached
-                _memory_cache_stamp = _cache_file_stamp()
-            else:
-                cached = _memory_cache
+            _memory_cache = cached
+            _memory_cache_stamp = _cache_file_stamp()
     return cached

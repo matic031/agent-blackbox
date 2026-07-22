@@ -116,6 +116,7 @@ def test_managed_sync_migrates_to_native_reconciliation_without_final_restart(
     states = []
     current = {
         "status": "done",
+        "context_graph_id": cfg.context_graph_id,
         "public_entries": 17_000,
         "community_entries": 0,
     }
@@ -343,7 +344,7 @@ def test_blackbox_sync_waits_for_custom_public_graph_catchup(monkeypatch):
     assert len(refreshes) == 1
 
 
-def test_blackbox_sync_wait_does_not_start_a_second_process(monkeypatch, capsys):
+def test_blackbox_sync_wait_require_rules_fails_closed_when_busy(monkeypatch, capsys):
     class BusyLock:
         def __enter__(self):
             return False
@@ -365,8 +366,128 @@ def test_blackbox_sync_wait_does_not_start_a_second_process(monkeypatch, capsys)
     )
 
     args = argparse.Namespace(wait=True, timeout=30, require_rules=True)
-    assert cli_mod._cmd_sync(args) == 0
+    assert cli_mod._cmd_sync(args) == 2
     assert "already running" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("retryable_state", ["deferred", "unreachable"])
+def test_custom_public_sync_retries_terminal_job_and_adopts_replacement(
+    monkeypatch,
+    capsys,
+    retryable_state,
+):
+    subscriptions = []
+    status_jobs = []
+    clock = {"value": 0.0}
+
+    def monotonic():
+        clock["value"] += 0.5
+        return clock["value"]
+
+    class FakeClient:
+        def __init__(self, url, **_kwargs):
+            self.url = url
+
+        def subscribe_context_graph(self, cg_id):
+            job_id = "fresh-1" if not subscriptions else "fresh-2"
+            subscriptions.append((cg_id, job_id))
+            return {"catchup": {"jobId": job_id, "status": "queued"}}
+
+        def catchup_status(self, cg_id, *, job_id=None):
+            status_jobs.append((cg_id, job_id))
+            if job_id == "fresh-1":
+                return {"jobId": job_id, "status": retryable_state}
+            if job_id == "fresh-2" and len(status_jobs) == 3:
+                return {"jobId": job_id, "status": "running"}
+            if job_id == "fresh-2":
+                return {"jobId": job_id, "status": "done"}
+            return {"jobId": "old", "status": "done"}
+
+    class FakeRuleset:
+        def __init__(self, public):
+            self.public = public
+
+        def counts(self):
+            return {
+                "injection": self.public,
+                "escalation": 0,
+                "dependency": 0,
+                "fileaccess": 0,
+                "skill": 0,
+            }
+
+        def graph_count(self, source):
+            return self.public if source == "public" else 0
+
+    monkeypatch.setattr(cli_mod, "DkgClient", FakeClient)
+    monkeypatch.setattr(
+        cli_mod,
+        "load_blackbox_config",
+        lambda: config_mod.BlackboxConfig(context_graph_id="owner/custom"),
+    )
+    monkeypatch.setattr(cli_mod.ruleset, "peek", lambda _cfg: FakeRuleset(1))
+    monkeypatch.setattr(cli_mod.ruleset, "refresh", lambda *_args: FakeRuleset(2))
+    monkeypatch.setattr(cli_mod.time, "monotonic", monotonic)
+    monkeypatch.setattr(cli_mod.time, "sleep", lambda _seconds: None)
+
+    args = argparse.Namespace(wait=True, timeout=30, require_rules=True)
+    assert cli_mod._cmd_sync(args) == 0
+    assert [job_id for _cg_id, job_id in subscriptions] == ["fresh-1", "fresh-2"]
+    assert [job_id for _cg_id, job_id in status_jobs] == [
+        None,
+        "fresh-1",
+        "fresh-2",
+        "fresh-2",
+    ]
+    assert cli_mod.sync_state.read_for_graph("owner/custom")["status"] == "done"
+    assert (
+        f"Retrying DKG catch-up after {retryable_state} state"
+        in capsys.readouterr().out
+    )
+
+
+def test_custom_public_sync_polls_original_job_when_latest_changes(monkeypatch):
+    status_jobs = []
+
+    class FakeClient:
+        def __init__(self, url, **_kwargs):
+            self.url = url
+
+        def subscribe_context_graph(self, _cg_id):
+            return {"catchup": {"jobId": "fresh", "status": "queued"}}
+
+        def catchup_status(self, _cg_id, *, job_id=None):
+            status_jobs.append(job_id)
+            if job_id == "fresh":
+                return {"jobId": "fresh", "status": "done"}
+            if len(status_jobs) == 1:
+                return {"jobId": "old", "status": "done"}
+            return {"jobId": "newer-unrelated", "status": "running"}
+
+    class FakeRuleset:
+        def counts(self):
+            return {
+                "injection": 1,
+                "escalation": 0,
+                "dependency": 0,
+                "fileaccess": 0,
+                "skill": 0,
+            }
+
+        def graph_count(self, source):
+            return 1 if source == "public" else 0
+
+    monkeypatch.setattr(cli_mod, "DkgClient", FakeClient)
+    monkeypatch.setattr(
+        cli_mod,
+        "load_blackbox_config",
+        lambda: config_mod.BlackboxConfig(context_graph_id="owner/custom"),
+    )
+    monkeypatch.setattr(cli_mod.ruleset, "refresh", lambda *_args: FakeRuleset())
+
+    args = argparse.Namespace(wait=True, timeout=30, require_rules=True)
+    assert cli_mod._cmd_sync(args) == 0
+    assert status_jobs == [None, "fresh"]
 
 
 def test_blackbox_sync_waits_for_public_vm_when_community_arrives_first(monkeypatch, capsys):

@@ -250,17 +250,27 @@ class DkgClient:
             include_shared_memory=include_shared_memory,
         )
 
-    def catchup_status(self, cg_id: str) -> Dict[str, Any]:
-        """Return the latest asynchronous catch-up job for ``cg_id``.
+    def catchup_status(
+        self,
+        cg_id: str,
+        *,
+        job_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Return an asynchronous catch-up job for ``cg_id``.
 
         The daemon applies a recovered graph snapshot atomically, so consumers
         cannot count partial rows while it is running.  This status lets UI
         callers distinguish that active transfer from a genuinely empty graph.
+        Once subscribe returns a job id, pass it here so a concurrent newer job
+        cannot replace the status being awaited.
         """
-        encoded = urllib.parse.quote(cg_id, safe="")
+        if job_id:
+            query = f"jobId={urllib.parse.quote(job_id, safe='')}"
+        else:
+            query = f"contextGraphId={urllib.parse.quote(cg_id, safe='')}"
         return self._request(
             "GET",
-            f"/api/sync/catchup-status?contextGraphId={encoded}",
+            f"/api/sync/catchup-status?{query}",
         )
 
     def context_graphs(self) -> List[Dict[str, Any]]:

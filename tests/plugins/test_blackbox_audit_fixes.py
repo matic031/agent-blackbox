@@ -11,6 +11,9 @@ One test per confirmed finding so the fixes can't silently regress:
 ``HERMES_HOME``/``BLACKBOX_HOME`` are per-test tmpdirs (root conftest).
 """
 
+import errno
+import multiprocessing
+from pathlib import Path
 import re
 import threading
 import time
@@ -27,6 +30,16 @@ ruleset_mod = load_blackbox("ruleset")
 config_mod = load_blackbox("config")
 
 Ruleset = ruleset_mod.Ruleset
+
+
+def _hold_ruleset_file_lock(home, entered, release):
+    ruleset_mod.constants.blackbox_home = lambda: Path(home)
+    with ruleset_mod._ruleset_refresh_lock(blocking=True) as acquired:
+        if not acquired:
+            return
+        entered.set()
+        if release is not None:
+            release.wait(5)
 
 
 # ---------------------------------------------------------------------------
@@ -191,6 +204,115 @@ def test_concurrent_ruleset_refresh_reuses_completed_generation(monkeypatch, tmp
     assert len(calls) == 1
     assert len(results) == 2
     assert all(result.source_count("public") == 1 for result in results)
+
+
+def test_ruleset_cache_never_crosses_custom_context_graphs(monkeypatch, tmp_path):
+    row = {
+        "threat": "urn:defender:signal:graph-a",
+        "rdfType": "urn:defender:DependencySignal",
+        "packageEcosystem": "npm",
+        "packageName": "graph-a",
+        "packageVersion": "1.0.0",
+    }
+    monkeypatch.setattr(ruleset_mod.constants, "blackbox_home", lambda: tmp_path)
+    monkeypatch.setattr(ruleset_mod, "_memory_cache", None)
+    monkeypatch.setattr(ruleset_mod, "_memory_cache_stamp", None)
+    monkeypatch.setattr(ruleset_mod, "_fetch_tier", lambda *_args, **_kwargs: [row])
+
+    graph_a = config_mod.BlackboxConfig(context_graph_id="owner/graph-a")
+    graph_b = config_mod.BlackboxConfig(context_graph_id="owner/graph-b")
+    first = ruleset_mod.refresh(graph_a, object())
+    assert first.context_graph_id == "owner/graph-a"
+    assert first.source_count("public") == 1
+
+    monkeypatch.setattr(ruleset_mod, "_fetch_tier", lambda *_args, **_kwargs: [])
+    second = ruleset_mod.refresh(graph_b, object())
+
+    assert second.context_graph_id == "owner/graph-b"
+    assert second.source_count("public") == 0
+    assert ruleset_mod.peek(graph_b).source_count("public") == 0
+
+
+def test_legacy_unscoped_cache_is_not_valid_for_custom_graph(monkeypatch, tmp_path):
+    prior = Ruleset(
+        dependency={
+            "npm:legacy@1.0": {
+                "identifier": "dep:npm:legacy@1.0",
+                "source": "public",
+            }
+        }
+    )
+    monkeypatch.setattr(ruleset_mod.constants, "blackbox_home", lambda: tmp_path)
+    monkeypatch.setattr(ruleset_mod, "_memory_cache", None)
+    monkeypatch.setattr(ruleset_mod, "_memory_cache_stamp", None)
+    ruleset_mod._write_cache(prior)
+
+    custom = ruleset_mod.peek(
+        config_mod.BlackboxConfig(context_graph_id="owner/custom")
+    )
+    assert custom.context_graph_id == "owner/custom"
+    assert custom.source_count("public") == 0
+
+
+def test_ruleset_file_lock_serializes_processes(monkeypatch, tmp_path):
+    if "fork" not in multiprocessing.get_all_start_methods():
+        return
+    ctx = multiprocessing.get_context("fork")
+    first_entered = ctx.Event()
+    second_entered = ctx.Event()
+    release_first = ctx.Event()
+    first = ctx.Process(
+        target=_hold_ruleset_file_lock,
+        args=(str(tmp_path), first_entered, release_first),
+    )
+    second = ctx.Process(
+        target=_hold_ruleset_file_lock,
+        args=(str(tmp_path), second_entered, None),
+    )
+    first.start()
+    try:
+        assert first_entered.wait(5)
+        second.start()
+        assert not second_entered.wait(0.25)
+        release_first.set()
+        assert second_entered.wait(5)
+    finally:
+        release_first.set()
+        first.join(5)
+        if second.pid is not None:
+            second.join(5)
+        for process in (first, second):
+            if process.is_alive():
+                process.terminate()
+                process.join(5)
+    assert first.exitcode == 0
+    assert second.exitcode == 0
+
+
+def test_windows_blocking_lock_retries_until_acquired(tmp_path):
+    class FakeMsvcrt:
+        LK_NBLCK = 1
+
+        def __init__(self):
+            self.attempts = 0
+
+        def locking(self, _fd, _mode, _size):
+            self.attempts += 1
+            if self.attempts < 3:
+                raise OSError(errno.EACCES, "lock violation")
+
+    fake = FakeMsvcrt()
+    sleeps = []
+    with (tmp_path / "ruleset.lock").open("a+b") as handle:
+        assert ruleset_mod._acquire_windows_file_lock(
+            handle,
+            blocking=True,
+            msvcrt_module=fake,
+            sleep=sleeps.append,
+        )
+
+    assert fake.attempts == 3
+    assert sleeps == [0.05, 0.05]
 
 
 def test_empty_initial_sync_retries_cache_without_network_orchestration(monkeypatch):
