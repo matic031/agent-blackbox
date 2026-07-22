@@ -521,9 +521,10 @@ class DkgClient:
         self,
         sparql: str,
         cg_id: str,
-        view: str = constants.VIEW_VERIFIABLE_MEMORY,
+        view: Optional[str] = constants.VIEW_VERIFIABLE_MEMORY,
         on_error: Any = None,
         agent_address: Optional[str] = None,
+        timeout: Optional[float] = None,
     ) -> List[Dict[str, Any]]:
         """Run a SPARQL SELECT and return normalized bindings.
 
@@ -533,7 +534,9 @@ class DkgClient:
         read paths fail open. A caller that must tell a genuine *empty* result
         (``[]``) apart from a *failure* passes a unique sentinel.
         """
-        payload = {"sparql": sparql, "contextGraphId": cg_id, "view": view}
+        payload = {"sparql": sparql, "contextGraphId": cg_id}
+        if view:
+            payload["view"] = view
         if agent_address:
             payload["agentAddress"] = agent_address
         try:
@@ -541,7 +544,7 @@ class DkgClient:
                 "POST",
                 "/api/query",
                 payload,
-                timeout=_QUERY_TIMEOUT,
+                timeout=timeout or _QUERY_TIMEOUT,
             )
         except DkgError as exc:
             logger.debug("blackbox: query failed: %s", exc)

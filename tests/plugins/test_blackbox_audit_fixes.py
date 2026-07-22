@@ -84,21 +84,61 @@ class _Pager:
 
     def __init__(self, n):
         self.n = n
+        self.queries = []
 
-    def query(self, sparql, cg_id, view=None, on_error=None):
-        if view != constants.VIEW_VERIFIABLE_MEMORY:
+    def query(self, sparql, cg_id, view=None, on_error=None, **kwargs):
+        self.queries.append((sparql, {"view": view, **kwargs}))
+        data_graph = f"did:dkg:context-graph:{cg_id}"
+        if "dkg:assertionGraph" in sparql:
+            partition_count = (self.n + 999) // 1000
+            return [{
+                "assertionGraph": {
+                    "value": f"{data_graph}/_verifiable_memory/partition/{i:04d}"
+                },
+                "status": {"value": "confirmed"},
+            } for i in range(partition_count)]
+        if "VALUES ?sourceGraph" not in sparql:
             return []
         lim = int(re.search(r"LIMIT (\d+)", sparql).group(1))
         off = int(re.search(r"OFFSET (\d+)", sparql).group(1))
-        return [{"identifier": {"value": f"dep:npm:pkg{i}@1.0"}, "packageEcosystem": {"value": "npm"},
-                 "packageName": {"value": f"pkg{i}"}, "packageVersion": {"value": "1.0"},
-                 "severity": {"value": "critical"}} for i in range(off, min(off + lim, self.n))]
+        partitions = [
+            int(value)
+            for value in re.findall(r"/_verifiable_memory/partition/(\d{4})>", sparql)
+        ]
+        rows = []
+        for partition in partitions:
+            start = partition * 1000
+            end = min(start + 1000, self.n)
+            rows.extend({
+                "threat": {"value": f"urn:test:dependency:{i:08d}"},
+                "rdfType": {"value": "urn:defender:DependencySignal"},
+                "packageEcosystem": {"value": "npm"},
+                "packageName": {"value": f"pkg{i}"},
+                "packageVersion": {"value": "1.0"},
+                "severity": {"value": "critical"},
+            } for i in range(start, end))
+        return rows[off:off + lim]
 
 def test_ruleset_sync_is_uncapped(monkeypatch):
     monkeypatch.setattr(ruleset_mod, "_write_cache", lambda rs: None)
     monkeypatch.setattr(ruleset_mod, "_memory_cache", None)
-    rs = ruleset_mod.refresh(config_mod.BlackboxConfig(), _Pager(6500))
-    assert len(rs.dependency) == 6500  # far past the old LIMIT 2000
+    pager = _Pager(16_250)
+    rs = ruleset_mod.refresh(config_mod.BlackboxConfig(), pager)
+    assert len(rs.dependency) == 16_250
+    metadata_queries = [query for query, _kwargs in pager.queries if "dkg:assertionGraph" in query]
+    partition_queries = [
+        (query, kwargs)
+        for query, kwargs in pager.queries
+        if "VALUES ?sourceGraph" in query
+    ]
+    assert len(metadata_queries) == 1
+    assert len(partition_queries) == 4
+    assert all("OFFSET 0" in query for query, _kwargs in partition_queries)
+    assert all(kwargs["view"] is None for _query, kwargs in partition_queries)
+    assert all(
+        kwargs["timeout"] == ruleset_mod._VM_PARTITION_QUERY_TIMEOUT
+        for _query, kwargs in partition_queries
+    )
 
 
 def test_empty_initial_sync_retries_cache_without_network_orchestration(monkeypatch):

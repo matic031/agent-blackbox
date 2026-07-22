@@ -305,6 +305,22 @@ def test_query_normalizes_bindings(monkeypatch):
     assert json.loads(cap["body"])["view"] == "verifiable-memory"
 
 
+def test_scoped_graph_query_can_omit_the_memory_view(monkeypatch):
+    cap = _capture(monkeypatch, '{"bindings": []}')
+    client = dkg_client.DkgClient(url="http://node", token="t")
+
+    client.query(
+        "SELECT * WHERE { GRAPH ?g { ?s ?p ?o } }",
+        "cg",
+        view=None,
+    )
+
+    assert json.loads(cap["body"]) == {
+        "sparql": "SELECT * WHERE { GRAPH ?g { ?s ?p ?o } }",
+        "contextGraphId": "cg",
+    }
+
+
 def test_threat_count_uses_one_verifiable_memory_query(monkeypatch):
     cap = _capture(
         monkeypatch,

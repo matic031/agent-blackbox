@@ -22,19 +22,26 @@ OPENCLAW_DIR = Path(__file__).resolve().parents[2] / "integrations" / "openclaw"
 
 
 def test_refresh_queries_only_verifiable_memory(monkeypatch, tmp_path):
-    views = []
+    queries = []
 
     class Client:
-        def query(self, _query, _cg, **kwargs):
-            views.append(kwargs["view"])
+        def query(self, sparql, _cg, **kwargs):
+            queries.append((sparql, kwargs["view"]))
             return []
 
     monkeypatch.setattr(constants, "blackbox_home", lambda: tmp_path)
     monkeypatch.setattr(ruleset, "_memory_cache", None)
-    ruleset.refresh(config.BlackboxConfig(), Client())
+    cfg = config.BlackboxConfig()
+    ruleset.refresh(cfg, Client())
 
-    assert views
-    assert set(views) == {constants.VIEW_VERIFIABLE_MEMORY}
+    assert queries
+    metadata_query, metadata_view = queries[0]
+    assert metadata_view is None
+    assert "dkg:assertionGraph" in metadata_query
+    assert "/_meta>" in metadata_query
+    data_graph = f"did:dkg:context-graph:{cfg.context_graph_id}"
+    assert {view for _query, view in queries[1:]} == {None}
+    assert all(f"GRAPH <{data_graph}>" in query for query, _view in queries[1:])
 
 
 def test_cached_community_rules_are_discarded():
