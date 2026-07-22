@@ -1299,6 +1299,8 @@ def _catchup_authoritative_vm(
     backpressure_notice_printed = False
     backpressure_retries = 0
     empty_public_passes = 0
+    incomplete_empty_passes = 0
+    last_incomplete_safe_current: Optional[int] = None
     heartbeat_seconds = 10.0
 
     try:
@@ -1341,6 +1343,7 @@ def _catchup_authoritative_vm(
                 int(max(1.0, remaining - 10) * 1_000),
             ),
         )
+        request_still_active = False
         try:
             # The DKG endpoint is synchronous and its final verification/store
             # phase can outlive a socket inactivity timeout. Run it behind a
@@ -1365,9 +1368,19 @@ def _catchup_authoritative_vm(
                 daemon=True,
             )
             worker.start()
+            request_started = time.monotonic()
             request_deadline = min(
                 deadline,
-                time.monotonic() + (budget_ms / 1_000) + 60.0,
+                request_started
+                + max(
+                    (budget_ms / 1_000) + 60.0,
+                    constants.GRAPH_SYNC_SETTLEMENT_TIMEOUT_S
+                    + constants.GRAPH_SYNC_WATCHDOG_HEADROOM_S,
+                ),
+            )
+            request_timeout_seconds = max(
+                1,
+                int(request_deadline - request_started),
             )
             heartbeat = 0
             while True:
@@ -1376,9 +1389,15 @@ def _catchup_authoritative_vm(
                     max(0.0, request_deadline - time.monotonic()),
                 )
                 if wait_for <= 0:
+                    request_still_active = worker.is_alive()
                     raise DkgError(
-                        f"verifiable VM sync exceeded its "
-                        f"{budget_ms / 1_000:.0f}s request budget"
+                        "verifiable VM sync watchdog reached its "
+                        f"{request_timeout_seconds}s settlement deadline"
+                        + (
+                            " while the DKG request remains active"
+                            if request_still_active
+                            else ""
+                        )
                     )
                 try:
                     outcome_kind, outcome_value = outcome.get(timeout=wait_for)
@@ -1402,7 +1421,7 @@ def _catchup_authoritative_vm(
             result = outcome_value
         except DkgError as exc:
             error = str(exc)
-            retryable = any(
+            retryable = not request_still_active and any(
                 marker in error.lower()
                 for marker in (
                     "backpressure",
@@ -1494,7 +1513,55 @@ def _catchup_authoritative_vm(
             ),
             inserted_durable_triples=inserted,
         )
+        durable_progress = read_durable_progress(
+            str(getattr(client, "dkg_home", "") or ""),
+            context_graph_id,
+        )
         if inserted <= 0:
+            expected = int(durable_progress.get("expected_triples") or 0)
+            safe_current = int(durable_progress.get("safe_current_triples") or 0)
+            if expected > 0 and safe_current < expected:
+                public_progress_seen = public_progress_seen or safe_current > 0
+                if (
+                    last_incomplete_safe_current is None
+                    or safe_current > last_incomplete_safe_current
+                ):
+                    incomplete_empty_passes = 1
+                else:
+                    incomplete_empty_passes += 1
+                last_incomplete_safe_current = safe_current
+                if incomplete_empty_passes >= _MAX_EMPTY_PUBLIC_PASSES:
+                    error = (
+                        "public VM manifest made no durable progress after "
+                        f"{incomplete_empty_passes} pinned passes "
+                        f"({safe_current:,}/{expected:,})"
+                    )
+                    sync_state.write(
+                        "failed",
+                        context_graph_id=context_graph_id,
+                        graph_peer_id=graph_peer_id,
+                        phase="stalled-verifiable-memory",
+                        inserted_durable_triples=0,
+                        error=error,
+                        **durable_progress,
+                    )
+                    print(f"  {error}")
+                    return False
+                sync_state.write(
+                    "running",
+                    context_graph_id=context_graph_id,
+                    graph_peer_id=graph_peer_id,
+                    phase="recovering-verifiable-memory",
+                    inserted_durable_triples=0,
+                    **durable_progress,
+                )
+                print(
+                    "  verifiable VM pass settled without committed triples; "
+                    f"snapshot remains incomplete ({safe_current:,}/{expected:,}); "
+                    "retrying the pinned source"
+                )
+                time.sleep(min(2.0, max(0.2, deadline - time.monotonic())))
+                continue
             count_threats = getattr(client, "threat_count", None)
             local_threats: Optional[int] = None
             if callable(count_threats):
@@ -1530,6 +1597,10 @@ def _catchup_authoritative_vm(
             print("  verifiable VM sync settled (no new triples)")
             return True
         empty_public_passes = 0
+        incomplete_empty_passes = 0
+        last_incomplete_safe_current = int(
+            durable_progress.get("safe_current_triples") or 0
+        )
         print(f"  verifiable VM sync advanced ({inserted:,} triples inserted)")
         if on_progress is not None:
             on_progress(inserted)
@@ -1541,10 +1612,6 @@ def _catchup_authoritative_vm(
         # only after verification and store materialization settle, so combine
         # that successful response with the managed daemon's safe graph boundary
         # to recognize completion without downloading the snapshot again.
-        durable_progress = read_durable_progress(
-            str(getattr(client, "dkg_home", "") or ""),
-            context_graph_id,
-        )
         if durable_progress.get("snapshot_complete") is True:
             expected = int(durable_progress.get("expected_triples") or 0)
             sync_state.write(
@@ -1576,6 +1643,9 @@ def _peer_discovery_pending(exc: DkgError) -> bool:
             "peerresolver returned no addresses",
             "no addresses for",
             "failed to find peer",
+            "dial_failed",
+            "all multiaddr dials failed",
+            "transport error: timed out",
         )
     )
 

@@ -116,10 +116,23 @@ DEFAULT_GRAPH_PEER_ID = "12D3KooWBJskzr2unXQG9mR3LRZFUJoxWr1PN6hTbyWyKndHXjZM"
 #: verification.
 INITIAL_GRAPH_SYNC_PASS_BUDGET_MS = 30_000
 
-#: Once the first verified rules are locally usable, prefer DKG's normal
-#: per-peer durable budget. Larger follow-up passes avoid repeatedly paying the
-#: metadata/session/verification overhead that made complete fresh syncs slow.
-DEFAULT_GRAPH_SYNC_PASS_BUDGET_MS = 110_000
+#: Keep follow-up batches small enough for exact-graph verification and atomic
+#: materialization to finish before DKG's ten-minute responder session expires.
+#: A larger fetch can settle successfully but still lose its numeric checkpoint
+#: before the next pass, forcing the snapshot back to offset zero.
+DEFAULT_GRAPH_SYNC_PASS_BUDGET_MS = 60_000
+
+#: Durable network fetching is bounded by the pass budget above, but DKG must
+#: still verify complete graphs and atomically materialize them afterward. A
+#: large fresh-node pass can spend many minutes in that correctness-critical
+#: settlement phase, so the HTTP caller and its watchdog must wait longer than
+#: the fetch budget.
+GRAPH_SYNC_SETTLEMENT_TIMEOUT_S = 3_600.0
+
+#: Let the HTTP client report its own timeout before the outer CLI watchdog
+#: fires. This prevents a retry from overlapping a request that is still
+#: blocked inside urllib at the settlement boundary.
+GRAPH_SYNC_WATCHDOG_HEADROOM_S = 15.0
 
 #: Previous bootstrap peers transparently replaced during config loading.
 LEGACY_GRAPH_PEER_IDS = frozenset({

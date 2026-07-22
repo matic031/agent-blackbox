@@ -650,8 +650,8 @@ def test_authoritative_recovery_retries_fresh_node_peer_discovery(monkeypatch, c
             connects.append(peer_id)
             if len(connects) == 1:
                 raise cli_mod.DkgError(
-                    'POST /api/connect -> 404: {"code":"PEER_NOT_FOUND",'
-                    '"error":"PeerResolver returned no addresses"}'
+                    'POST /api/connect -> 502: {"code":"DIAL_FAILED",'
+                    '"error":"All multiaddr dials failed"}'
                 )
             return {"connected": True}
 
@@ -1016,6 +1016,149 @@ def test_authoritative_recovery_retries_empty_fresh_public_pass(
     assert "retrying the pinned source" in capsys.readouterr().out
 
 
+def test_authoritative_recovery_retries_zero_insert_with_incomplete_manifest(
+    monkeypatch, tmp_path, capsys
+):
+    graph = "owner/public-vm"
+
+    class FakeClient:
+        dkg_home = str(tmp_path)
+
+        def __init__(self):
+            self.calls = 0
+
+        def catchup_from_peer(self, cg_id, peer_id, *, budget_ms):
+            self.calls += 1
+            previous, current, inserted = (
+                (0, 500, 0) if self.calls == 1 else (500, 1_000, 250)
+            )
+            with (tmp_path / "daemon.log").open("a", encoding="utf-8") as handle:
+                handle.write(
+                    f'Rootless durable progress for "{graph}": '
+                    f'5 complete graph(s), safe offset {previous}->{current} '
+                    'of 1000 (raw 1000)\n'
+                )
+            return {
+                "ok": True,
+                "includeDurable": True,
+                "includeSharedMemory": False,
+                "peersAttempted": 1,
+                "totalDurableInsertedTriples": inserted,
+                "results": [{"peerId": peer_id}],
+            }
+
+        def threat_count(self, _cg_id):
+            return 100
+
+    client = FakeClient()
+    monkeypatch.setattr(cli_mod.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(cli_mod.sync_state, "write", lambda *_args, **_kwargs: {})
+
+    assert cli_mod._catchup_authoritative_vm(
+        client,
+        graph,
+        "publisher",
+        cli_mod.time.monotonic() + 60,
+    )
+    assert client.calls == 2
+    assert "snapshot remains incomplete (500/1,000)" in capsys.readouterr().out
+
+
+def test_authoritative_recovery_bounds_unchanged_incomplete_manifest(
+    monkeypatch, tmp_path, capsys
+):
+    graph = "owner/public-vm"
+
+    class FakeClient:
+        dkg_home = str(tmp_path)
+
+        def __init__(self):
+            self.calls = 0
+
+        def catchup_from_peer(self, cg_id, peer_id, *, budget_ms):
+            self.calls += 1
+            with (tmp_path / "daemon.log").open("a", encoding="utf-8") as handle:
+                handle.write(
+                    f'Rootless durable progress for "{graph}": '
+                    "5 complete graph(s), safe offset 500->500 "
+                    "of 1000 (raw 1000)\n"
+                )
+            return {
+                "ok": True,
+                "includeDurable": True,
+                "includeSharedMemory": False,
+                "peersAttempted": 1,
+                "totalDurableInsertedTriples": 0,
+                "results": [{"peerId": peer_id}],
+            }
+
+    client = FakeClient()
+    states = []
+    monkeypatch.setattr(cli_mod.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        cli_mod.sync_state,
+        "write",
+        lambda status, **details: states.append((status, details)) or details,
+    )
+
+    assert not cli_mod._catchup_authoritative_vm(
+        client,
+        graph,
+        "publisher",
+        cli_mod.time.monotonic() + 60,
+    )
+    assert client.calls == cli_mod._MAX_EMPTY_PUBLIC_PASSES
+    assert any(
+        status == "failed" and details.get("phase") == "stalled-verifiable-memory"
+        for status, details in states
+    )
+    assert "made no durable progress after 3 pinned passes" in capsys.readouterr().out
+
+
+def test_authoritative_recovery_allows_advancing_zero_insert_manifest(
+    monkeypatch, tmp_path
+):
+    graph = "owner/public-vm"
+    safe_offsets = iter((250, 500, 750, 1_000))
+
+    class FakeClient:
+        dkg_home = str(tmp_path)
+
+        def __init__(self):
+            self.calls = 0
+
+        def catchup_from_peer(self, cg_id, peer_id, *, budget_ms):
+            self.calls += 1
+            current = next(safe_offsets)
+            previous = current - 250
+            with (tmp_path / "daemon.log").open("a", encoding="utf-8") as handle:
+                handle.write(
+                    f'Rootless durable progress for "{graph}": '
+                    f"5 complete graph(s), safe offset {previous}->{current} "
+                    "of 1000 (raw 1000)\n"
+                )
+            return {
+                "ok": True,
+                "includeDurable": True,
+                "includeSharedMemory": False,
+                "peersAttempted": 1,
+                "totalDurableInsertedTriples": 250 if current == 1_000 else 0,
+                "results": [{"peerId": peer_id}],
+            }
+
+    client = FakeClient()
+    monkeypatch.setattr(cli_mod.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(cli_mod.sync_state, "write", lambda *_args, **_kwargs: {})
+
+    assert cli_mod._catchup_authoritative_vm(
+        client,
+        graph,
+        "publisher",
+        cli_mod.time.monotonic() + 60,
+    )
+    assert client.calls == 4
+
+
 def test_authoritative_recovery_bounds_empty_fresh_public_passes(
     monkeypatch, capsys
 ):
@@ -1146,6 +1289,46 @@ def test_authoritative_recovery_has_wall_clock_guard_and_heartbeats(
     output = capsys.readouterr().out
     assert "still active" in output
     assert any(status == "failed" for status, _details in states)
+
+
+def test_authoritative_recovery_does_not_overlap_active_watchdog_worker(monkeypatch):
+    release = threading.Event()
+
+    class FakeClient:
+        def __init__(self):
+            self.calls = 0
+
+        def catchup_from_peer(self, _cg_id, _peer_id, *, budget_ms):
+            self.calls += 1
+            release.wait(1.0)
+            return {}
+
+    class EmptyQueue:
+        def put(self, _value):
+            return None
+
+        def get(self, *, timeout):
+            raise cli_mod.queue.Empty
+
+    clock = {"value": 0.0}
+
+    def monotonic():
+        clock["value"] += 11.0
+        return clock["value"]
+
+    client = FakeClient()
+    monkeypatch.setattr(cli_mod.queue, "Queue", lambda **_kwargs: EmptyQueue())
+    monkeypatch.setattr(cli_mod.time, "monotonic", monotonic)
+    monkeypatch.setattr(cli_mod.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(cli_mod.sync_state, "write", lambda *_args, **_kwargs: {})
+
+    try:
+        assert not cli_mod._catchup_authoritative_vm(
+            client, "owner/public", "curator", 45.0
+        )
+        assert client.calls == 1
+    finally:
+        release.set()
 
 
 def test_blackbox_sync_ctrl_c_records_cancellation_and_returns_130(monkeypatch, capsys):

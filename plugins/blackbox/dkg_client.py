@@ -299,10 +299,14 @@ class DkgClient:
                 "hostCatchupFallback": False,
                 "perPeerDurableBudgetMs": bounded_budget,
             },
-            # DKG may need a short finalization window after its bounded data
-            # phase records resumable progress. Do not let the HTTP client
-            # abandon that response at the exact data-phase boundary.
-            timeout=(bounded_budget / 1_000) + 45,
+            # The budget bounds network fetching, not exact-graph verification
+            # and atomic store materialization. Large fresh-node batches can
+            # spend many minutes settling after the fetch deadline, and the
+            # route deliberately waits for that work before responding.
+            timeout=max(
+                (bounded_budget / 1_000) + 45,
+                constants.GRAPH_SYNC_SETTLEMENT_TIMEOUT_S,
+            ),
         )
 
     def context_graph_participants(self, cg_id: str) -> Dict[str, Any]:

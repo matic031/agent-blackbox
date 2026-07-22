@@ -194,7 +194,7 @@ def test_authoritative_catchup_pins_publisher_for_durable_vm_recovery(monkeypatc
         "hostCatchupFallback": False,
         "perPeerDurableBudgetMs": 300_000,
     }
-    assert cap["timeout"] == 345
+    assert cap["timeout"] == dkg_client.constants.GRAPH_SYNC_SETTLEMENT_TIMEOUT_S
 
 
 def test_context_graph_has_agent_uses_local_participants_metadata(monkeypatch):
