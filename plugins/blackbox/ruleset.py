@@ -1005,6 +1005,12 @@ def _dedupe_threat_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 _EMPTY_RULESET_RETRY_S = 30.0
 _NONEMPTY_REFRESH_MIN_S = 15 * 60.0
+_WINDOWS_FILE_LOCK_TIMEOUT_S = 30.0
+_WINDOWS_FILE_LOCK_POLL_S = 0.05
+
+
+def _is_windows_platform() -> bool:
+    return os.name == "nt"
 
 
 @contextmanager
@@ -1022,7 +1028,7 @@ def _ruleset_refresh_lock(*, blocking: bool):
             home = constants.blackbox_home()
             home.mkdir(parents=True, exist_ok=True)
             lock_fh = open(_lock_path(), "a+b")  # windows-footgun: ok - binary byte lock
-            if os.name == "nt":  # pragma: no cover - exercised via helper
+            if _is_windows_platform():  # pragma: no cover - exercised via helper
                 if _lock_path().stat().st_size == 0:
                     lock_fh.write(b"0")
                     lock_fh.flush()
@@ -1047,7 +1053,7 @@ def _ruleset_refresh_lock(*, blocking: bool):
             yield False
             return
         except OSError:
-            if os.name == "nt":
+            if _is_windows_platform():
                 if lock_fh is not None:
                     lock_fh.close()
                     lock_fh = None
@@ -1060,7 +1066,7 @@ def _ruleset_refresh_lock(*, blocking: bool):
             if lock_fh is not None:
                 lock_fh.close()
                 lock_fh = None
-            if os.name == "nt":
+            if _is_windows_platform():
                 yield False
                 return
             # Retain the in-process guard on platforms without a usable file
@@ -1071,7 +1077,7 @@ def _ruleset_refresh_lock(*, blocking: bool):
         if lock_fh is not None:
             try:
                 if file_acquired:
-                    if os.name == "nt":  # pragma: no cover - exercised on Windows
+                    if _is_windows_platform():  # pragma: no cover - exercised on Windows
                         import msvcrt
 
                         lock_fh.seek(0)
@@ -1090,12 +1096,15 @@ def _acquire_windows_file_lock(
     *,
     blocking: bool,
     msvcrt_module: Any = None,
+    timeout_s: float = _WINDOWS_FILE_LOCK_TIMEOUT_S,
+    monotonic: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], None] = time.sleep,
 ) -> bool:
-    """Acquire one Windows byte lock without mistaking contention for success."""
+    """Acquire one Windows byte lock within a bounded contention window."""
     if msvcrt_module is None:  # pragma: no cover - imported only on Windows
         import msvcrt as msvcrt_module
 
+    deadline = monotonic() + max(0.0, timeout_s)
     while True:
         lock_fh.seek(0)
         try:
@@ -1110,7 +1119,10 @@ def _acquire_windows_file_lock(
                 return False
             if exc.errno not in {errno.EACCES, errno.EAGAIN, errno.EDEADLK}:
                 return False
-            sleep(0.05)
+            remaining = deadline - monotonic()
+            if remaining <= 0:
+                return False
+            sleep(min(_WINDOWS_FILE_LOCK_POLL_S, remaining))
 
 
 def refresh(

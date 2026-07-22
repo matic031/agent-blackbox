@@ -36,6 +36,10 @@ Quad = Dict[str, str]
 class DkgError(RuntimeError):
     """Raised for any non-2xx daemon response or transport failure."""
 
+    def __init__(self, message: str, *, status_code: Optional[int] = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
 
 def _validate_quads_literal_sizes(quads: List[Quad]) -> None:
     """Mirror DKG's writable-literal preflight before sending write payloads."""
@@ -156,7 +160,10 @@ class DkgClient:
                 raw = resp.read()
         except urllib.error.HTTPError as exc:
             detail = exc.read(1024).decode("utf-8", errors="replace")
-            raise DkgError(f"{method} {path} -> {exc.code}: {detail}") from exc
+            raise DkgError(
+                f"{method} {path} -> {exc.code}: {detail}",
+                status_code=exc.code,
+            ) from exc
         except (urllib.error.URLError, OSError, TimeoutError) as exc:
             raise DkgError(f"{method} {path} transport error: {exc}") from exc
         if not raw:

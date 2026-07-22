@@ -1872,10 +1872,12 @@ def _catchup_status(
             # not yet accept the keyword. Do not hide unrelated TypeErrors.
             if "job_id" not in str(exc):
                 raise
-        except DkgError:
+        except DkgError as exc:
             # The daemon bounds its job history. If the exact job was evicted,
-            # inspect the latest job and adopt it in the caller.
-            pass
+            # inspect the latest job and adopt it in the caller. Transport and
+            # server failures must keep the caller pinned to this exact job.
+            if exc.status_code not in {404, 410}:
+                raise
     return client.catchup_status(context_graph_id), False
 
 

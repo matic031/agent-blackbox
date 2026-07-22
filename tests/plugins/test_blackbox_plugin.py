@@ -490,6 +490,80 @@ def test_custom_public_sync_polls_original_job_when_latest_changes(monkeypatch):
     assert status_jobs == [None, "fresh"]
 
 
+@pytest.mark.parametrize(
+    ("status_code", "message"),
+    [(None, "transport error: connection reset"), (500, "internal server error")],
+)
+def test_custom_public_sync_retries_exact_job_after_transient_status_error(
+    monkeypatch,
+    status_code,
+    message,
+):
+    status_jobs = []
+    exact_attempts = {"value": 0}
+
+    class FakeClient:
+        def __init__(self, url, **_kwargs):
+            self.url = url
+
+        def subscribe_context_graph(self, _cg_id):
+            return {"catchup": {"jobId": "fresh", "status": "queued"}}
+
+        def catchup_status(self, _cg_id, *, job_id=None):
+            status_jobs.append(job_id)
+            if job_id == "fresh":
+                exact_attempts["value"] += 1
+                if exact_attempts["value"] == 1:
+                    raise cli_mod.DkgError(message, status_code=status_code)
+                return {"jobId": "fresh", "status": "done"}
+            if len(status_jobs) == 1:
+                return {"jobId": "old", "status": "done"}
+            return {"jobId": "newer-unrelated", "status": "running"}
+
+    class FakeRuleset:
+        def counts(self):
+            return {
+                "injection": 1,
+                "escalation": 0,
+                "dependency": 0,
+                "fileaccess": 0,
+                "skill": 0,
+            }
+
+        def graph_count(self, source):
+            return 1 if source == "public" else 0
+
+    monkeypatch.setattr(cli_mod, "DkgClient", FakeClient)
+    monkeypatch.setattr(
+        cli_mod,
+        "load_blackbox_config",
+        lambda: config_mod.BlackboxConfig(context_graph_id="owner/custom"),
+    )
+    monkeypatch.setattr(cli_mod.ruleset, "refresh", lambda *_args: FakeRuleset())
+    monkeypatch.setattr(cli_mod.time, "sleep", lambda _seconds: None)
+
+    args = argparse.Namespace(wait=True, timeout=30, require_rules=True)
+    assert cli_mod._cmd_sync(args) == 0
+    assert status_jobs == [None, "fresh", "fresh"]
+
+
+def test_catchup_status_adopts_latest_only_when_exact_job_is_missing():
+    status_jobs = []
+
+    class FakeClient:
+        def catchup_status(self, _cg_id, *, job_id=None):
+            status_jobs.append(job_id)
+            if job_id:
+                raise cli_mod.DkgError("job evicted", status_code=404)
+            return {"jobId": "replacement", "status": "running"}
+
+    status, exact = cli_mod._catchup_status(FakeClient(), "owner/custom", "evicted")
+
+    assert status == {"jobId": "replacement", "status": "running"}
+    assert not exact
+    assert status_jobs == ["evicted", None]
+
+
 def test_blackbox_sync_waits_for_public_vm_when_community_arrives_first(monkeypatch, capsys):
     refreshes = []
     events = []

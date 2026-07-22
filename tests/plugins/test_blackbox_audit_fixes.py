@@ -315,6 +315,59 @@ def test_windows_blocking_lock_retries_until_acquired(tmp_path):
     assert sleeps == [0.05, 0.05]
 
 
+def test_windows_blocking_lock_times_out_under_contention(tmp_path):
+    class FakeMsvcrt:
+        LK_NBLCK = 1
+
+        def __init__(self):
+            self.attempts = 0
+
+        def locking(self, _fd, _mode, _size):
+            self.attempts += 1
+            raise OSError(errno.EACCES, "lock violation")
+
+    fake = FakeMsvcrt()
+    clock = {"value": 10.0}
+    sleeps = []
+
+    def monotonic():
+        return clock["value"]
+
+    def sleep(seconds):
+        sleeps.append(seconds)
+        clock["value"] += seconds
+
+    with (tmp_path / "ruleset.lock").open("a+b") as handle:
+        assert not ruleset_mod._acquire_windows_file_lock(
+            handle,
+            blocking=True,
+            msvcrt_module=fake,
+            timeout_s=0.1,
+            monotonic=monotonic,
+            sleep=sleep,
+        )
+
+    assert fake.attempts == 3
+    assert len(sleeps) == 2
+    assert abs(sum(sleeps) - 0.1) < 1e-9
+
+
+def test_windows_ruleset_lock_does_not_claim_acquisition_after_timeout(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setattr(constants, "blackbox_home", lambda: tmp_path)
+    monkeypatch.setattr(ruleset_mod, "_is_windows_platform", lambda: True)
+    monkeypatch.setattr(
+        ruleset_mod,
+        "_acquire_windows_file_lock",
+        lambda *_args, **_kwargs: False,
+    )
+
+    with ruleset_mod._ruleset_refresh_lock(blocking=True) as acquired:
+        assert not acquired
+
+
 def test_empty_initial_sync_retries_cache_without_network_orchestration(monkeypatch):
     monkeypatch.setattr(ruleset_mod, "_write_cache", lambda rs: None)
     monkeypatch.setattr(ruleset_mod, "_memory_cache", None)

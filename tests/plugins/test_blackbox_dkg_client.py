@@ -385,8 +385,9 @@ def test_write_path_raises_dkg_error_on_http_error(monkeypatch):
 
     monkeypatch.setattr(dkg_client.urllib.request, "urlopen", raise_http)
     client = dkg_client.DkgClient(url="http://node", token="t")
-    with pytest.raises(dkg_client.DkgError):
+    with pytest.raises(dkg_client.DkgError) as exc_info:
         client.share_knowledge_asset("cg", "n", [])
+    assert exc_info.value.status_code == 403
 
 
 def test_share_is_idempotent_on_already_finalized(monkeypatch):
