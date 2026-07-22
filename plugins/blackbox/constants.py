@@ -129,6 +129,11 @@ DEFAULT_GRAPH_SYNC_PASS_BUDGET_MS = 60_000
 #: the fetch budget.
 GRAPH_SYNC_SETTLEMENT_TIMEOUT_S = 3_600.0
 
+#: Let the HTTP client report its own timeout before the outer CLI watchdog
+#: fires. This prevents a retry from overlapping a request that is still
+#: blocked inside urllib at the settlement boundary.
+GRAPH_SYNC_WATCHDOG_HEADROOM_S = 15.0
+
 #: Previous bootstrap peers transparently replaced during config loading.
 LEGACY_GRAPH_PEER_IDS = frozenset({
     "12D3KooWAuEHYTWbD3R3yPTcECCYZnrjHNpJmrUw5b4D5T3m5Kr3",
