@@ -6,13 +6,14 @@ feature and is neither queried nor matched by the current release.
 
 It is cached to ``$BLACKBOX_HOME/ruleset.json`` and refreshed lazily:
 :func:`get` returns the cached ruleset immediately and, if the cache is older
-than ``sync_interval``, kicks off a single non-blocking background refresh
-(guarded by a file lock so only one refresher runs across processes). Every
-path fails open to the last-good (or empty) ruleset.
+than ``sync_interval``, kicks off a single non-blocking background refresh.
+Every refresh path shares a file lock so only one ruleset generation is built
+across processes. Every path fails open to the last-good (or empty) ruleset.
 """
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 import json
 import logging
 import os
@@ -793,6 +794,7 @@ def _read_cache() -> Optional[Ruleset]:
 # ---------------------------------------------------------------------------
 
 _memory_lock = threading.Lock()
+_refresh_lock = threading.Lock()
 _memory_cache: Optional[Ruleset] = None
 _memory_cache_stamp: Optional[int] = None
 _refreshing = False
@@ -980,13 +982,111 @@ _EMPTY_RULESET_RETRY_S = 30.0
 _NONEMPTY_REFRESH_MIN_S = 15 * 60.0
 
 
-def refresh(config: Optional[BlackboxConfig] = None, client: Optional[DkgClient] = None) -> Ruleset:
+@contextmanager
+def _ruleset_refresh_lock(*, blocking: bool):
+    """Serialize expensive VM reads across threads and Blackbox processes."""
+    thread_acquired = _refresh_lock.acquire(blocking=blocking)
+    if not thread_acquired:
+        yield False
+        return
+
+    lock_fh = None
+    file_acquired = False
+    try:
+        try:
+            home = constants.blackbox_home()
+            home.mkdir(parents=True, exist_ok=True)
+            lock_fh = open(_lock_path(), "a+b")
+            if os.name == "nt":  # pragma: no cover - exercised on Windows
+                import msvcrt
+
+                if _lock_path().stat().st_size == 0:
+                    lock_fh.write(b"0")
+                    lock_fh.flush()
+                lock_fh.seek(0)
+                mode = msvcrt.LK_LOCK if blocking else msvcrt.LK_NBLCK
+                msvcrt.locking(lock_fh.fileno(), mode, 1)
+            else:
+                import fcntl
+
+                operation = fcntl.LOCK_EX
+                if not blocking:
+                    operation |= fcntl.LOCK_NB
+                fcntl.flock(lock_fh.fileno(), operation)
+            file_acquired = True
+        except BlockingIOError:
+            if lock_fh is not None:
+                lock_fh.close()
+                lock_fh = None
+            yield False
+            return
+        except OSError:
+            if not blocking and os.name == "nt":  # Windows lock contention
+                if lock_fh is not None:
+                    lock_fh.close()
+                    lock_fh = None
+                yield False
+                return
+            if lock_fh is not None:
+                lock_fh.close()
+                lock_fh = None
+        except Exception:
+            # Retain the in-process guard on platforms without a usable file
+            # lock. Ruleset refreshes are fail-open by design.
+            if lock_fh is not None:
+                lock_fh.close()
+                lock_fh = None
+
+        yield True
+    finally:
+        if lock_fh is not None:
+            try:
+                if file_acquired:
+                    if os.name == "nt":  # pragma: no cover - exercised on Windows
+                        import msvcrt
+
+                        lock_fh.seek(0)
+                        msvcrt.locking(lock_fh.fileno(), msvcrt.LK_UNLCK, 1)
+                    else:
+                        import fcntl
+
+                        fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
+            finally:
+                lock_fh.close()
+        _refresh_lock.release()
+
+
+def refresh(
+    config: Optional[BlackboxConfig] = None,
+    client: Optional[DkgClient] = None,
+    *,
+    wait_for_lock: bool = True,
+) -> Ruleset:
     """Query the node, rebuild the ruleset, and persist it. Fail-open.
 
     Reads only the verified public graph (VM), fully paginated (no cap). If its
     query fails, the last-good public rules are preserved. On total
     failure, returns the last-good cache or an empty ruleset — never raises.
     """
+    initial_stamp = _cache_file_stamp()
+    with _ruleset_refresh_lock(blocking=wait_for_lock) as acquired:
+        if not acquired:
+            return _latest_cached_ruleset() or Ruleset()
+        # If another process completed while this caller waited, its atomic
+        # replacement is the requested fresh generation. Reuse it instead of
+        # immediately issuing the same large query sequence again.
+        if _cache_file_stamp() != initial_stamp:
+            latest = _latest_cached_ruleset()
+            if latest is not None:
+                return latest
+        return _refresh_unlocked(config, client)
+
+
+def _refresh_unlocked(
+    config: Optional[BlackboxConfig] = None,
+    client: Optional[DkgClient] = None,
+) -> Ruleset:
+    """Refresh while the caller holds :func:`_ruleset_refresh_lock`."""
     global _memory_cache, _memory_cache_stamp
     config = config or load_blackbox_config()
     client = client or DkgClient(url=config.dkg_url, dkg_home=config.dkg_home)
@@ -1083,33 +1183,12 @@ def _restore_tiers(rs: Ruleset, prior: Ruleset, tiers: List[str]) -> None:
 
 def _background_refresh(config: BlackboxConfig) -> None:
     global _refreshing
-    # Cross-process single-refresher guard via an exclusive lock file.
-    lock_fh = None
     try:
-        import fcntl
-
-        home = constants.blackbox_home()
-        home.mkdir(parents=True, exist_ok=True)
-        lock_fh = open(_lock_path(), "w", encoding="utf-8")
-        try:
-            fcntl.flock(lock_fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except (OSError, BlockingIOError):
-            lock_fh.close()
-            _refreshing = False  # release the in-process guard for the next attempt
-            return  # another process is already refreshing
-    except Exception:
-        lock_fh = None  # platform without fcntl — fall back to in-process guard only
-    try:
-        refresh(config)
+        refresh(config, wait_for_lock=False)
     except Exception as exc:  # pragma: no cover - fail open
         logger.debug("blackbox: background refresh failed: %s", exc)
     finally:
         _refreshing = False
-        if lock_fh is not None:
-            try:
-                lock_fh.close()
-            except Exception:
-                pass
 
 
 def get(config: Optional[BlackboxConfig] = None) -> Ruleset:

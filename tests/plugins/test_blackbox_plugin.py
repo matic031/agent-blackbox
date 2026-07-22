@@ -270,6 +270,105 @@ def test_blackbox_sync_public_graph_subscribes_without_join(monkeypatch):
     assert join_calls == []
 
 
+def test_blackbox_sync_waits_for_custom_public_graph_catchup(monkeypatch):
+    events = []
+    statuses = iter([
+        {"jobId": "old", "status": "done"},
+        {"jobId": "old", "status": "done"},
+        {"jobId": "fresh", "status": "running"},
+        {"jobId": "fresh", "status": "done"},
+    ])
+
+    class FakeClient:
+        def __init__(self, url, **_kwargs):
+            self.url = url
+
+        def subscribe_context_graph(self, cg_id):
+            events.append(("subscribe", cg_id))
+            return {"catchup": {"jobId": "fresh", "status": "running"}}
+
+        def catchup_status(self, cg_id):
+            events.append(("status", cg_id))
+            return next(statuses)
+
+    class FakeRuleset:
+        def __init__(self, public):
+            self.public = public
+
+        def counts(self):
+            return {
+                "injection": self.public,
+                "escalation": 0,
+                "dependency": 0,
+                "fileaccess": 0,
+                "skill": 0,
+            }
+
+        def graph_count(self, source):
+            return self.public if source == "public" else 0
+
+    refreshes = []
+    peeks = []
+    monkeypatch.setattr(cli_mod, "DkgClient", FakeClient)
+    monkeypatch.setattr(
+        cli_mod,
+        "load_blackbox_config",
+        lambda: config_mod.BlackboxConfig(
+            context_graph_id="0xabc/custom-public-graph",
+            dkg_url=constants.DEFAULT_DKG_URL,
+        ),
+    )
+    monkeypatch.setattr(
+        cli_mod.ruleset,
+        "refresh",
+        lambda _cfg, _client: refreshes.append(True) or FakeRuleset(2),
+    )
+    monkeypatch.setattr(
+        cli_mod.ruleset,
+        "peek",
+        lambda _cfg: peeks.append(True) or FakeRuleset(1),
+    )
+    monkeypatch.setattr(cli_mod.time, "sleep", lambda _seconds: None)
+
+    args = argparse.Namespace(wait=True, timeout=30, require_rules=True)
+    assert cli_mod._cmd_sync_impl(args) == 0
+    assert events == [
+        ("status", "0xabc/custom-public-graph"),
+        ("subscribe", "0xabc/custom-public-graph"),
+        ("status", "0xabc/custom-public-graph"),
+        ("status", "0xabc/custom-public-graph"),
+        ("status", "0xabc/custom-public-graph"),
+    ]
+    assert len(peeks) == 2
+    assert len(refreshes) == 1
+
+
+def test_blackbox_sync_wait_does_not_start_a_second_process(monkeypatch, capsys):
+    class BusyLock:
+        def __enter__(self):
+            return False
+
+        def __exit__(self, *_args):
+            return False
+
+    monkeypatch.setattr(
+        cli_mod,
+        "load_blackbox_config",
+        lambda: config_mod.BlackboxConfig(context_graph_id="0xabc/custom-public-graph"),
+    )
+    monkeypatch.setattr(cli_mod, "_uses_managed_dkg", lambda _cfg, _args: False)
+    monkeypatch.setattr(cli_mod, "_managed_sync_lock", BusyLock)
+    monkeypatch.setattr(
+        cli_mod,
+        "_cmd_sync_impl",
+        lambda _args: (_ for _ in ()).throw(AssertionError("second sync must not start")),
+    )
+
+    args = argparse.Namespace(wait=True, timeout=30, require_rules=True)
+    assert cli_mod._cmd_sync(args) == 0
+    assert "already running" in capsys.readouterr().out
+
+
 def test_blackbox_sync_waits_for_public_vm_when_community_arrives_first(monkeypatch, capsys):
     refreshes = []
     events = []

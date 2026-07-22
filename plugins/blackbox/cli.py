@@ -462,9 +462,15 @@ def _cmd_sync(args: argparse.Namespace) -> int:
     """Run a ruleset sync, translating an interactive cancellation cleanly."""
     try:
         cfg = load_blackbox_config()
-        if not _uses_managed_dkg(cfg, args):
-            return _cmd_sync_impl(args)
-        return _cmd_sync_with_managed_dkg(cfg, args)
+        if _uses_managed_dkg(cfg, args):
+            return _cmd_sync_with_managed_dkg(cfg, args)
+        if getattr(args, "wait", False):
+            with _managed_sync_lock() as acquired:
+                if not acquired:
+                    print("Blackbox sync is already running; no second transfer was queued.")
+                    return 0
+                return _cmd_sync_impl(args)
+        return _cmd_sync_impl(args)
     except KeyboardInterrupt:
         try:
             current_transfer = sync_state.read()
@@ -788,6 +794,7 @@ def _cmd_sync_impl(args: argparse.Namespace) -> int:
     baseline_catchup_known = False
     baseline_catchup_job_id = ""
     fresh_catchup_seen = False
+    fresh_catchup_job_id = ""
     authoritative_attempted = False
     authoritative_recovered = False
     authoritative_complete = False
@@ -824,7 +831,7 @@ def _cmd_sync_impl(args: argparse.Namespace) -> int:
     except (DkgError, AttributeError):
         pass
 
-    if managed_graph:
+    if getattr(args, "wait", False):
         try:
             baseline_catchup = client.catchup_status(cfg.context_graph_id)
             baseline_catchup_known = True
@@ -958,6 +965,7 @@ def _cmd_sync_impl(args: argparse.Namespace) -> int:
                     or subscription_job_id != baseline_catchup_job_id
                 ):
                     fresh_catchup_seen = True
+                    fresh_catchup_job_id = subscription_job_id
                 if not private_graph:
                     admitted = True
                     pending_approval = False
@@ -984,7 +992,8 @@ def _cmd_sync_impl(args: argparse.Namespace) -> int:
 
         catchup_state = ""
         catchup_includes_swm = False
-        if managed_graph and subscribed:
+        catchup_job_id = ""
+        if getattr(args, "wait", False) and subscribed:
             try:
                 catchup = client.catchup_status(cfg.context_graph_id)
                 last_catchup = catchup
@@ -996,13 +1005,32 @@ def _cmd_sync_impl(args: argparse.Namespace) -> int:
                     or catchup_job_id != baseline_catchup_job_id
                 ):
                     fresh_catchup_seen = True
+                    if not fresh_catchup_job_id:
+                        fresh_catchup_job_id = catchup_job_id
                 if _catchup_denied(catchup):
                     pending_approval = True
                     admitted = False
             except DkgError:
                 pass
+        fresh_job_complete = catchup_state == "done" and (
+            not fresh_catchup_job_id or catchup_job_id == fresh_catchup_job_id
+        )
+        catchup_pending = not authoritative_recovered and (
+            catchup_state in {"queued", "running"}
+            or (
+                getattr(args, "wait", False)
+                and (catchup_restarted or fresh_catchup_seen)
+                and not fresh_job_complete
+                and catchup_state not in {"failed", "cancelled", "denied"}
+            )
+        )
+        catchup_failed = (
+            not authoritative_recovered
+            and (catchup_restarted or fresh_catchup_seen)
+            and catchup_state in {"failed", "cancelled", "denied"}
+        )
         if subscribed:
-            if catchup_state in {"queued", "running"}:
+            if catchup_pending or catchup_failed:
                 # DKG applies durable catch-up atomically. A full VM query here
                 # cannot expose useful partial rules and competes with the
                 # Blazegraph write that must finish first. Poll only the cheap
@@ -1055,13 +1083,11 @@ def _cmd_sync_impl(args: argparse.Namespace) -> int:
                 not catchup_active
                 and (
                     not (catchup_restarted or fresh_catchup_seen)
-                    or catchup_state == "done"
+                    or fresh_job_complete
                 )
             )
         )
-        base_sync_complete = (
-            public_count > 0 if managed_graph else sum(counts.values()) > 0
-        ) and fresh_catchup_complete
+        base_sync_complete = public_count > 0 and fresh_catchup_complete
         # A clean local store has no public rows yet.  Waiting for
         # ``base_sync_complete`` before contacting the configured release
         # source deadlocks that exact first-sync case when generic peers do
@@ -1112,7 +1138,7 @@ def _cmd_sync_impl(args: argparse.Namespace) -> int:
                     "the required ruleset is unavailable."
                 )
                 break
-        subscription_ready = not managed_graph or subscribed
+        subscription_ready = subscribed
         sync_complete = (
             base_sync_complete
             and (not authoritative_attempted or authoritative_complete)
@@ -1149,7 +1175,7 @@ def _cmd_sync_impl(args: argparse.Namespace) -> int:
 
         now = time.monotonic()
         if not getattr(args, "wait", False) or now >= deadline:
-            if managed_graph and not subscribed:
+            if not subscribed:
                 error = "required DKG subscription could not be persisted"
                 if last_subscribe_error:
                     error = f"{error}: {last_subscribe_error}"
@@ -1227,7 +1253,7 @@ def _cmd_sync_impl(args: argparse.Namespace) -> int:
                 logger.debug("blackbox: subscribe pending: %s", last_subscribe_error)
             if _catchup_denied(last_catchup):
                 print("  DKG catch-up is denied until the curator confirms this node.")
-        elif release_graph and not subscribed:
+        elif not subscribed:
             print("  Required public VM subscription could not be persisted.")
             if last_subscribe_error:
                 print(f"  DKG subscription error: {last_subscribe_error}")

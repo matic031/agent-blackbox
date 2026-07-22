@@ -12,6 +12,8 @@ One test per confirmed finding so the fixes can't silently regress:
 """
 
 import re
+import threading
+import time
 
 from _blackbox_loader import load_blackbox
 
@@ -139,6 +141,56 @@ def test_ruleset_sync_is_uncapped(monkeypatch):
         kwargs["timeout"] == ruleset_mod._VM_PARTITION_QUERY_TIMEOUT
         for _query, kwargs in partition_queries
     )
+
+
+def test_concurrent_ruleset_refresh_reuses_completed_generation(monkeypatch, tmp_path):
+    started = threading.Event()
+    release = threading.Event()
+    second_started = threading.Event()
+    calls = []
+    results = []
+    row = {
+        "threat": "urn:defender:signal:serialized",
+        "rdfType": "urn:defender:DependencySignal",
+        "packageEcosystem": "npm",
+        "packageName": "serialized",
+        "packageVersion": "1.0.0",
+    }
+
+    def slow_fetch(*_args, **_kwargs):
+        calls.append(True)
+        started.set()
+        assert release.wait(5)
+        return [row]
+
+    monkeypatch.setattr(ruleset_mod.constants, "blackbox_home", lambda: tmp_path)
+    monkeypatch.setattr(ruleset_mod, "_memory_cache", None)
+    monkeypatch.setattr(ruleset_mod, "_memory_cache_stamp", None)
+    monkeypatch.setattr(ruleset_mod, "_fetch_tier", slow_fetch)
+
+    first = threading.Thread(
+        target=lambda: results.append(ruleset_mod.refresh(config_mod.BlackboxConfig(), object()))
+    )
+
+    def second_refresh():
+        second_started.set()
+        results.append(ruleset_mod.refresh(config_mod.BlackboxConfig(), object()))
+
+    second = threading.Thread(target=second_refresh)
+    first.start()
+    assert started.wait(5)
+    second.start()
+    assert second_started.wait(5)
+    time.sleep(0.05)
+    release.set()
+    first.join(5)
+    second.join(5)
+
+    assert not first.is_alive()
+    assert not second.is_alive()
+    assert len(calls) == 1
+    assert len(results) == 2
+    assert all(result.source_count("public") == 1 for result in results)
 
 
 def test_empty_initial_sync_retries_cache_without_network_orchestration(monkeypatch):
