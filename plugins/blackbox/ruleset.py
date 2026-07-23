@@ -1130,12 +1130,15 @@ def refresh(
     client: Optional[DkgClient] = None,
     *,
     wait_for_lock: bool = True,
+    force_query: bool = False,
 ) -> Ruleset:
     """Query the node, rebuild the ruleset, and persist it. Fail-open.
 
     Reads only the verified public graph (VM), fully paginated (no cap). If its
     query fails, the last-good public rules are preserved. On total
     failure, returns the last-good cache or an empty ruleset — never raises.
+    ``force_query`` is reserved for callers that have crossed a DKG completion
+    barrier and must not adopt a generation started before that barrier.
     """
     config = config or load_blackbox_config()
     context_graph_id = config.context_graph_id
@@ -1148,7 +1151,7 @@ def refresh(
         # If another process completed while this caller waited, its atomic
         # replacement is the requested fresh generation. Reuse it instead of
         # immediately issuing the same large query sequence again.
-        if _cache_file_stamp() != initial_stamp:
+        if not force_query and _cache_file_stamp() != initial_stamp:
             latest = _latest_cached_ruleset(context_graph_id)
             if latest is not None:
                 return latest

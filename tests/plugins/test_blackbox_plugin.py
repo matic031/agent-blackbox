@@ -230,7 +230,11 @@ def test_blackbox_sync_require_rules_fails_empty_ruleset(monkeypatch, capsys):
         "load_blackbox_config",
         lambda: config_mod.BlackboxConfig(context_graph_id="cg", dkg_url=constants.DEFAULT_DKG_URL),
     )
-    monkeypatch.setattr(cli_mod.ruleset, "refresh", lambda cfg, client: FakeRuleset())
+    monkeypatch.setattr(
+        cli_mod.ruleset,
+        "refresh",
+        lambda cfg, client, **_kwargs: FakeRuleset(),
+    )
 
     args = argparse.Namespace(wait=False, timeout=180, require_rules=True)
     assert cli_mod._cmd_sync(args) == 2
@@ -264,7 +268,11 @@ def test_blackbox_sync_public_graph_subscribes_without_join(monkeypatch):
         "load_blackbox_config",
         lambda: config_mod.BlackboxConfig(context_graph_id="cg", dkg_url=constants.DEFAULT_DKG_URL),
     )
-    monkeypatch.setattr(cli_mod.ruleset, "refresh", lambda cfg, client: FakeRuleset())
+    monkeypatch.setattr(
+        cli_mod.ruleset,
+        "refresh",
+        lambda cfg, client, **_kwargs: FakeRuleset(),
+    )
 
     args = argparse.Namespace(wait=False, timeout=180, require_rules=True)
     assert cli_mod._cmd_sync(args) == 0
@@ -322,7 +330,7 @@ def test_blackbox_sync_waits_for_custom_public_graph_catchup(monkeypatch):
     monkeypatch.setattr(
         cli_mod.ruleset,
         "refresh",
-        lambda _cfg, _client: refreshes.append(True) or FakeRuleset(2),
+        lambda _cfg, _client, **kwargs: refreshes.append(kwargs) or FakeRuleset(2),
     )
     monkeypatch.setattr(
         cli_mod.ruleset,
@@ -341,7 +349,7 @@ def test_blackbox_sync_waits_for_custom_public_graph_catchup(monkeypatch):
         ("status", "0xabc/custom-public-graph"),
     ]
     assert len(peeks) == 2
-    assert len(refreshes) == 1
+    assert refreshes == [{"force_query": True}]
 
 
 def test_blackbox_sync_wait_require_rules_fails_closed_when_busy(monkeypatch, capsys):
@@ -426,7 +434,11 @@ def test_custom_public_sync_retries_terminal_job_and_adopts_replacement(
         lambda: config_mod.BlackboxConfig(context_graph_id="owner/custom"),
     )
     monkeypatch.setattr(cli_mod.ruleset, "peek", lambda _cfg: FakeRuleset(1))
-    monkeypatch.setattr(cli_mod.ruleset, "refresh", lambda *_args: FakeRuleset(2))
+    monkeypatch.setattr(
+        cli_mod.ruleset,
+        "refresh",
+        lambda *_args, **_kwargs: FakeRuleset(2),
+    )
     monkeypatch.setattr(cli_mod.time, "monotonic", monotonic)
     monkeypatch.setattr(cli_mod.time, "sleep", lambda _seconds: None)
 
@@ -483,7 +495,11 @@ def test_custom_public_sync_polls_original_job_when_latest_changes(monkeypatch):
         "load_blackbox_config",
         lambda: config_mod.BlackboxConfig(context_graph_id="owner/custom"),
     )
-    monkeypatch.setattr(cli_mod.ruleset, "refresh", lambda *_args: FakeRuleset())
+    monkeypatch.setattr(
+        cli_mod.ruleset,
+        "refresh",
+        lambda *_args, **_kwargs: FakeRuleset(),
+    )
 
     args = argparse.Namespace(wait=True, timeout=30, require_rules=True)
     assert cli_mod._cmd_sync(args) == 0
@@ -539,7 +555,11 @@ def test_custom_public_sync_retries_exact_job_after_transient_status_error(
         "load_blackbox_config",
         lambda: config_mod.BlackboxConfig(context_graph_id="owner/custom"),
     )
-    monkeypatch.setattr(cli_mod.ruleset, "refresh", lambda *_args: FakeRuleset())
+    monkeypatch.setattr(
+        cli_mod.ruleset,
+        "refresh",
+        lambda *_args, **_kwargs: FakeRuleset(),
+    )
     monkeypatch.setattr(cli_mod.time, "sleep", lambda _seconds: None)
 
     args = argparse.Namespace(wait=True, timeout=30, require_rules=True)
@@ -610,7 +630,7 @@ def test_blackbox_sync_waits_for_public_vm_when_community_arrives_first(monkeypa
         def graph_count(self, source):
             return self.public if source == "public" else 5
 
-    def fake_refresh(cfg, client):
+    def fake_refresh(cfg, client, **_kwargs):
         refreshes.append((cfg, client))
         return FakeRuleset(public=2 if len(refreshes) > 1 else 0)
 
@@ -724,7 +744,7 @@ def test_blackbox_sync_recovers_curator_snapshot_then_waits_for_vm(
     )
     last_public = {"value": 6_875}
 
-    def refresh(_cfg, _client):
+    def refresh(_cfg, _client, **_kwargs):
         events.append(("refresh",))
         try:
             last_public["value"] = next(public_counts)
@@ -824,8 +844,8 @@ def test_blackbox_sync_uses_authoritative_publisher_for_empty_local_store(
         ),
     )
 
-    def refresh(_cfg, _client):
-        refresh_calls.append(True)
+    def refresh(_cfg, _client, **kwargs):
+        refresh_calls.append(kwargs)
         return FakeRuleset(25_000)
 
     monkeypatch.setattr(cli_mod.ruleset, "refresh", refresh)
@@ -837,6 +857,7 @@ def test_blackbox_sync_uses_authoritative_publisher_for_empty_local_store(
     assert ("subscribe", constants.DEFAULT_CONTEXT_GRAPH_ID) in events
     assert curator_events[0][1] == constants.DEFAULT_CONTEXT_GRAPH_ID
     assert len(refresh_calls) == 2
+    assert {"force_query": True} in refresh_calls
     assert "25,000 public VM" in capsys.readouterr().out
 
 
@@ -907,7 +928,11 @@ def test_required_release_sync_fails_when_subscription_cannot_be_persisted(
             graph_peer_id=constants.DEFAULT_GRAPH_PEER_ID,
         ),
     )
-    monkeypatch.setattr(cli_mod.ruleset, "refresh", lambda *_args: PublicRuleset())
+    monkeypatch.setattr(
+        cli_mod.ruleset,
+        "refresh",
+        lambda *_args, **_kwargs: PublicRuleset(),
+    )
     monkeypatch.setattr(cli_mod.ruleset, "peek", lambda *_args: PublicRuleset())
     monkeypatch.setattr(cli_mod.sync_state, "read", lambda: dict(state))
     monkeypatch.setattr(cli_mod.sync_state, "write", write_state)
@@ -981,7 +1006,11 @@ def test_blackbox_sync_fails_instead_of_waiting_on_empty_zero_insert_snapshot(
         ),
     )
     monkeypatch.setattr(cli_mod.ruleset, "peek", lambda _cfg: EmptyRuleset())
-    monkeypatch.setattr(cli_mod.ruleset, "refresh", lambda _cfg, _client: EmptyRuleset())
+    monkeypatch.setattr(
+        cli_mod.ruleset,
+        "refresh",
+        lambda _cfg, _client, **_kwargs: EmptyRuleset(),
+    )
     monkeypatch.setattr(
         cli_mod.sync_state,
         "write",
@@ -1059,7 +1088,9 @@ def test_required_release_sync_persists_subscription_after_direct_connect_failur
     )
     monkeypatch.setattr(cli_mod.ruleset, "peek", lambda _cfg: EmptyRuleset())
     monkeypatch.setattr(
-        cli_mod.ruleset, "refresh", lambda _cfg, _client: EmptyRuleset()
+        cli_mod.ruleset,
+        "refresh",
+        lambda _cfg, _client, **_kwargs: EmptyRuleset(),
     )
 
     args = argparse.Namespace(wait=True, timeout=3_600, require_rules=True)
@@ -1112,7 +1143,16 @@ def test_authoritative_recovery_retries_fresh_node_peer_discovery(
         FakeClient(), "owner/public", "publisher", cli_mod.time.monotonic() + 30
     )
     assert connects == ["publisher", "publisher"]
-    assert any(details.get("phase") == "discovering-verifiable-source" for _, details in states)
+    discovery_states = [
+        details
+        for _, details in states
+        if details.get("phase") == "discovering-verifiable-source"
+    ]
+    assert discovery_states
+    assert all(
+        details.get("context_graph_id") == "owner/public"
+        for details in discovery_states
+    )
     assert "fresh-node warm-up" in capsys.readouterr().out
 
 
@@ -1141,7 +1181,10 @@ def test_fresh_node_discovery_uses_configured_relay_circuit_fallback(tmp_path):
             return {"connected": True}
 
     cli_mod._connect_verifiable_source(
-        FakeClient(), "publisher", cli_mod.time.monotonic() + 30
+        FakeClient(),
+        "owner/public",
+        "publisher",
+        cli_mod.time.monotonic() + 30,
     )
 
     assert attempted == [
@@ -1219,7 +1262,11 @@ def test_blackbox_sync_does_not_accept_deferred_catchup_as_complete(
             graph_peer_id=constants.DEFAULT_GRAPH_PEER_ID,
         ),
     )
-    monkeypatch.setattr(cli_mod.ruleset, "refresh", lambda _cfg, _client: FakeRuleset())
+    monkeypatch.setattr(
+        cli_mod.ruleset,
+        "refresh",
+        lambda _cfg, _client, **_kwargs: FakeRuleset(),
+    )
     monkeypatch.setattr(
         cli_mod.sync_state,
         "write",
@@ -1276,7 +1323,7 @@ def test_blackbox_sync_does_not_fall_back_to_generic_running_catchup(monkeypatch
     monkeypatch.setattr(
         cli_mod.ruleset,
         "refresh",
-        lambda *_args: (_ for _ in ()).throw(
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
             AssertionError("VM must not be queried during durable catch-up")
         ),
     )
@@ -1941,7 +1988,9 @@ def test_blackbox_sync_ctrl_c_records_cancellation_and_returns_130(monkeypatch, 
     monkeypatch.setattr(
         cli_mod.ruleset,
         "refresh",
-        lambda _cfg, _client: (_ for _ in ()).throw(KeyboardInterrupt()),
+        lambda _cfg, _client, **_kwargs: (_ for _ in ()).throw(
+            KeyboardInterrupt()
+        ),
     )
     monkeypatch.setattr(cli_mod.sync_state, "write", write_state)
     monkeypatch.setattr(cli_mod.sync_state, "read", lambda: dict(state))
@@ -2047,7 +2096,11 @@ def test_blackbox_sync_does_not_accept_stale_public_rows_after_fresh_catchup_fai
             graph_peer_id=constants.DEFAULT_GRAPH_PEER_ID,
         ),
     )
-    monkeypatch.setattr(cli_mod.ruleset, "refresh", lambda cfg, client: FakeRuleset())
+    monkeypatch.setattr(
+        cli_mod.ruleset,
+        "refresh",
+        lambda cfg, client, **_kwargs: FakeRuleset(),
+    )
 
     args = argparse.Namespace(wait=True, timeout=30, require_rules=True)
     assert cli_mod._cmd_sync(args) == 2
@@ -2118,7 +2171,7 @@ def test_blackbox_sync_uses_curator_when_generic_catchup_peer_fails(monkeypatch,
     )
     last_public = {"value": 2}
 
-    def refresh(_cfg, _client):
+    def refresh(_cfg, _client, **_kwargs):
         try:
             last_public["value"] = next(public_counts)
         except StopIteration:
@@ -2187,7 +2240,7 @@ def test_blackbox_sync_private_waits_for_approval_then_subscribes(monkeypatch):
         join_calls.append((args, kwargs))
         return ("join delivered; approval pending", len(join_calls) >= 2)
 
-    def fake_refresh(cfg, client):
+    def fake_refresh(cfg, client, **_kwargs):
         refresh_calls.append((cfg, client))
         rs = FakeRuleset()
         if len(refresh_calls) >= 4:
@@ -2267,7 +2320,11 @@ def test_blackbox_sync_restarts_stale_empty_catchup_after_approval(monkeypatch, 
             graph_peer_id=constants.DEFAULT_GRAPH_PEER_ID,
         ),
     )
-    monkeypatch.setattr(cli_mod.ruleset, "refresh", lambda cfg, client: FakeRuleset())
+    monkeypatch.setattr(
+        cli_mod.ruleset,
+        "refresh",
+        lambda cfg, client, **_kwargs: FakeRuleset(),
+    )
 
     args = argparse.Namespace(wait=False, timeout=180, require_rules=True)
     assert cli_mod._cmd_sync(args) == 2
@@ -2322,7 +2379,7 @@ def test_blackbox_sync_waits_for_fresh_dkg_catchup_without_restarting(monkeypatc
         def graph_count(self, source):
             return self.public if source == "public" else 0
 
-    def fake_refresh(cfg, client):
+    def fake_refresh(cfg, client, **_kwargs):
         refreshes.append((cfg, client))
         return FakeRuleset(public=2 if len(refreshes) > 1 else 0)
 
@@ -2389,7 +2446,11 @@ def test_blackbox_sync_reports_pending_approval_when_catchup_is_denied(monkeypat
         "_request_join",
         lambda *args, **kwargs: ("Join request sent; approval is pending.", False),
     )
-    monkeypatch.setattr(cli_mod.ruleset, "refresh", lambda cfg, client: FakeRuleset())
+    monkeypatch.setattr(
+        cli_mod.ruleset,
+        "refresh",
+        lambda cfg, client, **_kwargs: FakeRuleset(),
+    )
 
     args = argparse.Namespace(wait=False, timeout=180, require_rules=True)
     assert cli_mod._cmd_sync(args) == 2

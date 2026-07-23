@@ -206,6 +206,77 @@ def test_concurrent_ruleset_refresh_reuses_completed_generation(monkeypatch, tmp
     assert all(result.source_count("public") == 1 for result in results)
 
 
+def test_post_barrier_refresh_does_not_reuse_pre_barrier_generation(
+    monkeypatch,
+    tmp_path,
+):
+    stale_query_started = threading.Event()
+    barrier_stamp_read = threading.Event()
+    release_stale_query = threading.Event()
+    results = {}
+    fetch_count = 0
+    real_cache_stamp = ruleset_mod._cache_file_stamp
+
+    def row(name):
+        return {
+            "threat": f"urn:defender:signal:{name}",
+            "rdfType": "urn:defender:DependencySignal",
+            "packageEcosystem": "npm",
+            "packageName": name,
+            "packageVersion": "1.0.0",
+        }
+
+    def staged_fetch(*_args, **_kwargs):
+        nonlocal fetch_count
+        fetch_count += 1
+        if fetch_count == 1:
+            stale_query_started.set()
+            assert release_stale_query.wait(5)
+            return [row("stale")]
+        return [row("fresh")]
+
+    def observed_cache_stamp():
+        stamp = real_cache_stamp()
+        if threading.current_thread().name == "barrier-refresh":
+            barrier_stamp_read.set()
+        return stamp
+
+    cfg = config_mod.BlackboxConfig(context_graph_id="owner/public")
+    monkeypatch.setattr(ruleset_mod.constants, "blackbox_home", lambda: tmp_path)
+    monkeypatch.setattr(ruleset_mod, "_memory_cache", None)
+    monkeypatch.setattr(ruleset_mod, "_memory_cache_stamp", None)
+    monkeypatch.setattr(ruleset_mod, "_fetch_tier", staged_fetch)
+    monkeypatch.setattr(ruleset_mod, "_cache_file_stamp", observed_cache_stamp)
+
+    stale = threading.Thread(
+        name="pre-barrier-refresh",
+        target=lambda: results.setdefault(
+            "stale",
+            ruleset_mod.refresh(cfg, object()),
+        ),
+    )
+    barrier = threading.Thread(
+        name="barrier-refresh",
+        target=lambda: results.setdefault(
+            "fresh",
+            ruleset_mod.refresh(cfg, object(), force_query=True),
+        ),
+    )
+    stale.start()
+    assert stale_query_started.wait(5)
+    barrier.start()
+    assert barrier_stamp_read.wait(5)
+    release_stale_query.set()
+    stale.join(5)
+    barrier.join(5)
+
+    assert not stale.is_alive()
+    assert not barrier.is_alive()
+    assert fetch_count == 2
+    assert "npm:stale@1.0.0" in results["stale"].dependency
+    assert "npm:fresh@1.0.0" in results["fresh"].dependency
+
+
 def test_ruleset_cache_never_crosses_custom_context_graphs(monkeypatch, tmp_path):
     row = {
         "threat": "urn:defender:signal:graph-a",

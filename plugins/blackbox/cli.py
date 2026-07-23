@@ -799,6 +799,7 @@ def _cmd_sync_impl(args: argparse.Namespace) -> int:
     baseline_catchup_job_id = ""
     fresh_catchup_seen = False
     fresh_catchup_job_id = ""
+    refreshed_catchup_job_id = ""
     catchup_retry_attempts = 0
     next_catchup_retry_at = 0.0
     authoritative_attempted = False
@@ -943,7 +944,7 @@ def _cmd_sync_impl(args: argparse.Namespace) -> int:
             # pass settled, do not launch a competing full-store query merely
             # to decide whether to persist the background subscription.
             rs = (
-                ruleset.refresh(cfg, client)
+                ruleset.refresh(cfg, client, force_query=True)
                 if authoritative_recovered
                 else ruleset.peek(cfg)
             )
@@ -1076,7 +1077,16 @@ def _cmd_sync_impl(args: argparse.Namespace) -> int:
                 # job status until the transfer reaches a terminal state.
                 rs = ruleset.peek(cfg)
             else:
-                rs = ruleset.refresh(cfg, client)
+                barrier_job_id = (
+                    catchup_job_id or fresh_catchup_job_id or "<unscoped>"
+                )
+                force_query = (
+                    fresh_job_complete
+                    and barrier_job_id != refreshed_catchup_job_id
+                )
+                rs = ruleset.refresh(cfg, client, force_query=force_query)
+                if force_query:
+                    refreshed_catchup_job_id = barrier_job_id
         counts = rs.counts()
         public_count = _ruleset_graph_count(rs, "public")
         community_count = _ruleset_graph_count(rs, "community")
@@ -1149,7 +1159,7 @@ def _cmd_sync_impl(args: argparse.Namespace) -> int:
                 deadline,
                 on_progress=_record_verified_pass,
             )
-            rs = ruleset.refresh(cfg, client)
+            rs = ruleset.refresh(cfg, client, force_query=True)
             counts = rs.counts()
             public_count = max(public_count, _ruleset_graph_count(rs, "public"))
             community_count = _ruleset_graph_count(rs, "community")
@@ -1354,7 +1364,12 @@ def _catchup_authoritative_vm(
     heartbeat_seconds = 10.0
 
     try:
-        _connect_verifiable_source(client, graph_peer_id, deadline)
+        _connect_verifiable_source(
+            client,
+            context_graph_id,
+            graph_peer_id,
+            deadline,
+        )
     except DkgError as exc:
         error = f"verifiable graph source is unreachable: {exc}"
         sync_state.write(
@@ -1788,6 +1803,7 @@ def _configured_publisher_circuits(client: DkgClient, peer_id: str) -> List[str]
 
 def _connect_verifiable_source(
     client: DkgClient,
+    context_graph_id: str,
     graph_peer_id: str,
     deadline: float,
 ) -> None:
@@ -1824,6 +1840,7 @@ def _connect_verifiable_source(
             break
         sync_state.write(
             "running",
+            context_graph_id=context_graph_id,
             graph_peer_id=graph_peer_id,
             phase="discovering-verifiable-source",
         )
