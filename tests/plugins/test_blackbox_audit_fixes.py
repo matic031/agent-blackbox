@@ -299,6 +299,48 @@ def test_forced_refresh_reports_lock_exhaustion(monkeypatch):
         )
 
 
+@pytest.mark.parametrize(
+    ("fresh_result", "error"),
+    [
+        (None, "failed for public"),
+        ([], "empty snapshot"),
+    ],
+)
+def test_forced_refresh_rejects_incomplete_vm_query_without_restamping_cache(
+    monkeypatch,
+    tmp_path,
+    fresh_result,
+    error,
+):
+    row = {
+        "threat": "urn:defender:signal:last-good",
+        "rdfType": "urn:defender:DependencySignal",
+        "packageEcosystem": "npm",
+        "packageName": "last-good",
+        "packageVersion": "1.0.0",
+    }
+    cfg = config_mod.BlackboxConfig(context_graph_id="owner/public")
+    monkeypatch.setattr(ruleset_mod.constants, "blackbox_home", lambda: tmp_path)
+    monkeypatch.setattr(ruleset_mod, "_memory_cache", None)
+    monkeypatch.setattr(ruleset_mod, "_memory_cache_stamp", None)
+    monkeypatch.setattr(ruleset_mod, "_fetch_tier", lambda *_args, **_kwargs: [row])
+
+    prior = ruleset_mod.refresh(cfg, object())
+    cache_before = ruleset_mod._cache_path().read_bytes()
+
+    monkeypatch.setattr(
+        ruleset_mod,
+        "_fetch_tier",
+        lambda *_args, **_kwargs: fresh_result,
+    )
+    with pytest.raises(ruleset_mod.RulesetRefreshIncomplete, match=error):
+        ruleset_mod.refresh(cfg, object(), force_query=True)
+
+    assert ruleset_mod._cache_path().read_bytes() == cache_before
+    assert ruleset_mod.peek(cfg).synced_at == prior.synced_at
+    assert "npm:last-good@1.0.0" in ruleset_mod.peek(cfg).dependency
+
+
 def test_ruleset_cache_never_crosses_custom_context_graphs(monkeypatch, tmp_path):
     row = {
         "threat": "urn:defender:signal:graph-a",

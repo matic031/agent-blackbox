@@ -407,6 +407,58 @@ def test_custom_public_sync_retries_forced_refresh_lock_contention(monkeypatch):
     ]
 
 
+def test_custom_public_sync_retries_incomplete_forced_query(monkeypatch):
+    refreshes = []
+
+    class FakeClient:
+        def __init__(self, url, **_kwargs):
+            self.url = url
+
+        def subscribe_context_graph(self, _cg_id):
+            return {"catchup": {"jobId": "fresh", "status": "done"}}
+
+        def catchup_status(self, _cg_id, *, job_id=None):
+            if job_id:
+                return {"jobId": job_id, "status": "done"}
+            return {"jobId": "old", "status": "done"}
+
+    class FakeRuleset:
+        def counts(self):
+            return {
+                "injection": 2,
+                "escalation": 0,
+                "dependency": 0,
+                "fileaccess": 0,
+                "skill": 0,
+            }
+
+        def graph_count(self, source):
+            return 2 if source == "public" else 0
+
+    def refresh(_cfg, _client, **kwargs):
+        refreshes.append(kwargs)
+        if len(refreshes) == 1:
+            raise ruleset_mod.RulesetRefreshIncomplete("empty snapshot")
+        return FakeRuleset()
+
+    monkeypatch.setattr(cli_mod, "DkgClient", FakeClient)
+    monkeypatch.setattr(
+        cli_mod,
+        "load_blackbox_config",
+        lambda: config_mod.BlackboxConfig(context_graph_id="owner/custom"),
+    )
+    monkeypatch.setattr(cli_mod.ruleset, "peek", lambda _cfg: FakeRuleset())
+    monkeypatch.setattr(cli_mod.ruleset, "refresh", refresh)
+    monkeypatch.setattr(cli_mod.time, "sleep", lambda _seconds: None)
+
+    args = argparse.Namespace(wait=True, timeout=30, require_rules=True)
+    assert cli_mod._cmd_sync_impl(args) == 0
+    assert refreshes == [
+        {"force_query": True},
+        {"force_query": True},
+    ]
+
+
 def test_blackbox_sync_wait_require_rules_fails_closed_when_busy(monkeypatch, capsys):
     class BusyLock:
         def __enter__(self):

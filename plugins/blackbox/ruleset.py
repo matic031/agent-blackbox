@@ -1009,8 +1009,16 @@ _WINDOWS_FILE_LOCK_TIMEOUT_S = 30.0
 _WINDOWS_FILE_LOCK_POLL_S = 0.05
 
 
-class RulesetRefreshLockUnavailable(RuntimeError):
+class RulesetRefreshUnavailable(RuntimeError):
+    """A required post-barrier refresh did not produce a fresh snapshot."""
+
+
+class RulesetRefreshLockUnavailable(RulesetRefreshUnavailable):
     """A required post-barrier refresh could not acquire its process lock."""
+
+
+class RulesetRefreshIncomplete(RulesetRefreshUnavailable):
+    """A required post-barrier refresh could not read a complete VM snapshot."""
 
 
 def _is_windows_platform() -> bool:
@@ -1141,10 +1149,11 @@ def refresh(
     Reads only the verified public graph (VM), fully paginated (no cap). If its
     query fails, the last-good public rules are preserved. On total
     failure, returns the last-good cache or an empty ruleset. ``force_query``
-    raises :class:`RulesetRefreshLockUnavailable` if its serialization lock
-    cannot be acquired, allowing completion-barrier callers to fail closed.
-    ``force_query`` is reserved for callers that have crossed a DKG completion
-    barrier and must not adopt a generation started before that barrier.
+    raises :class:`RulesetRefreshUnavailable` unless it can acquire the
+    serialization lock and read a non-empty VM snapshot, allowing
+    completion-barrier callers to fail closed. ``force_query`` is reserved for
+    callers that have crossed a DKG completion barrier and must not adopt a
+    generation started before that barrier.
     """
     config = config or load_blackbox_config()
     context_graph_id = config.context_graph_id
@@ -1165,12 +1174,14 @@ def refresh(
             latest = _latest_cached_ruleset(context_graph_id)
             if latest is not None:
                 return latest
-        return _refresh_unlocked(config, client)
+        return _refresh_unlocked(config, client, require_complete=force_query)
 
 
 def _refresh_unlocked(
     config: Optional[BlackboxConfig] = None,
     client: Optional[DkgClient] = None,
+    *,
+    require_complete: bool = False,
 ) -> Ruleset:
     """Refresh while the caller holds :func:`_ruleset_refresh_lock`."""
     global _memory_cache, _memory_cache_stamp
@@ -1184,6 +1195,18 @@ def _refresh_unlocked(
     # admission, and catch-up are DKG daemon responsibilities; a cache read must
     # never restart network recovery.
     empty_success = all(rows == [] for rows in fetched.values())
+    failed_tiers = [tier for tier, rows in fetched.items() if rows is None]
+
+    if require_complete:
+        if failed_tiers:
+            raise RulesetRefreshIncomplete(
+                "post-barrier VM query failed for "
+                + ", ".join(sorted(failed_tiers))
+            )
+        if empty_success:
+            raise RulesetRefreshIncomplete(
+                "post-barrier VM query returned an empty snapshot"
+            )
 
     if empty_success:
         # Snapshot replacement is atomic from the user's perspective. A
@@ -1232,7 +1255,7 @@ def _refresh_unlocked(
         retry_after = min(_EMPTY_RULESET_RETRY_S, interval)
         rs.synced_at = time.time() - interval + retry_after
 
-    errored = [tier for tier, view_rows in fetched.items() if view_rows is None]
+    errored = failed_tiers
     if errored:
         prior = _latest_cached_ruleset(context_graph_id)
         if prior is not None:

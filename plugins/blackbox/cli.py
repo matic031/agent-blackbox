@@ -947,7 +947,7 @@ def _cmd_sync_impl(args: argparse.Namespace) -> int:
             if authoritative_recovered:
                 try:
                     rs = ruleset.refresh(cfg, client, force_query=True)
-                except ruleset.RulesetRefreshLockUnavailable:
+                except ruleset.RulesetRefreshUnavailable:
                     rs = ruleset.peek(cfg)
                 else:
                     authoritative_cache_refreshed = True
@@ -1096,7 +1096,7 @@ def _cmd_sync_impl(args: argparse.Namespace) -> int:
                 force_query = force_catchup_query or force_authoritative_query
                 try:
                     rs = ruleset.refresh(cfg, client, force_query=force_query)
-                except ruleset.RulesetRefreshLockUnavailable:
+                except ruleset.RulesetRefreshUnavailable:
                     rs = ruleset.peek(cfg)
                 else:
                     if force_catchup_query:
@@ -1185,7 +1185,7 @@ def _cmd_sync_impl(args: argparse.Namespace) -> int:
             if authoritative_recovered:
                 try:
                     rs = ruleset.refresh(cfg, client, force_query=True)
-                except ruleset.RulesetRefreshLockUnavailable:
+                except ruleset.RulesetRefreshUnavailable:
                     rs = ruleset.peek(cfg)
                 else:
                     authoritative_cache_refreshed = True
