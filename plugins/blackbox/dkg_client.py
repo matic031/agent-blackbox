@@ -36,6 +36,10 @@ Quad = Dict[str, str]
 class DkgError(RuntimeError):
     """Raised for any non-2xx daemon response or transport failure."""
 
+    def __init__(self, message: str, *, status_code: Optional[int] = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
 
 def _validate_quads_literal_sizes(quads: List[Quad]) -> None:
     """Mirror DKG's writable-literal preflight before sending write payloads."""
@@ -156,7 +160,10 @@ class DkgClient:
                 raw = resp.read()
         except urllib.error.HTTPError as exc:
             detail = exc.read(1024).decode("utf-8", errors="replace")
-            raise DkgError(f"{method} {path} -> {exc.code}: {detail}") from exc
+            raise DkgError(
+                f"{method} {path} -> {exc.code}: {detail}",
+                status_code=exc.code,
+            ) from exc
         except (urllib.error.URLError, OSError, TimeoutError) as exc:
             raise DkgError(f"{method} {path} transport error: {exc}") from exc
         if not raw:
@@ -250,17 +257,27 @@ class DkgClient:
             include_shared_memory=include_shared_memory,
         )
 
-    def catchup_status(self, cg_id: str) -> Dict[str, Any]:
-        """Return the latest asynchronous catch-up job for ``cg_id``.
+    def catchup_status(
+        self,
+        cg_id: str,
+        *,
+        job_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Return an asynchronous catch-up job for ``cg_id``.
 
         The daemon applies a recovered graph snapshot atomically, so consumers
         cannot count partial rows while it is running.  This status lets UI
         callers distinguish that active transfer from a genuinely empty graph.
+        Once subscribe returns a job id, pass it here so a concurrent newer job
+        cannot replace the status being awaited.
         """
-        encoded = urllib.parse.quote(cg_id, safe="")
+        if job_id:
+            query = f"jobId={urllib.parse.quote(job_id, safe='')}"
+        else:
+            query = f"contextGraphId={urllib.parse.quote(cg_id, safe='')}"
         return self._request(
             "GET",
-            f"/api/sync/catchup-status?contextGraphId={encoded}",
+            f"/api/sync/catchup-status?{query}",
         )
 
     def context_graphs(self) -> List[Dict[str, Any]]:
