@@ -1009,6 +1009,10 @@ _WINDOWS_FILE_LOCK_TIMEOUT_S = 30.0
 _WINDOWS_FILE_LOCK_POLL_S = 0.05
 
 
+class RulesetRefreshLockUnavailable(RuntimeError):
+    """A required post-barrier refresh could not acquire its process lock."""
+
+
 def _is_windows_platform() -> bool:
     return os.name == "nt"
 
@@ -1136,7 +1140,9 @@ def refresh(
 
     Reads only the verified public graph (VM), fully paginated (no cap). If its
     query fails, the last-good public rules are preserved. On total
-    failure, returns the last-good cache or an empty ruleset — never raises.
+    failure, returns the last-good cache or an empty ruleset. ``force_query``
+    raises :class:`RulesetRefreshLockUnavailable` if its serialization lock
+    cannot be acquired, allowing completion-barrier callers to fail closed.
     ``force_query`` is reserved for callers that have crossed a DKG completion
     barrier and must not adopt a generation started before that barrier.
     """
@@ -1145,6 +1151,10 @@ def refresh(
     initial_stamp = _cache_file_stamp()
     with _ruleset_refresh_lock(blocking=wait_for_lock) as acquired:
         if not acquired:
+            if force_query:
+                raise RulesetRefreshLockUnavailable(
+                    "post-barrier ruleset refresh lock is unavailable"
+                )
             return _latest_cached_ruleset(context_graph_id) or Ruleset(
                 context_graph_id=context_graph_id
             )

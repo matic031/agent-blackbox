@@ -11,12 +11,15 @@ One test per confirmed finding so the fixes can't silently regress:
 ``HERMES_HOME``/``BLACKBOX_HOME`` are per-test tmpdirs (root conftest).
 """
 
+from contextlib import contextmanager
 import errno
 import multiprocessing
 from pathlib import Path
 import re
 import threading
 import time
+
+import pytest
 
 from _blackbox_loader import load_blackbox
 
@@ -275,6 +278,25 @@ def test_post_barrier_refresh_does_not_reuse_pre_barrier_generation(
     assert fetch_count == 2
     assert "npm:stale@1.0.0" in results["stale"].dependency
     assert "npm:fresh@1.0.0" in results["fresh"].dependency
+
+
+def test_forced_refresh_reports_lock_exhaustion(monkeypatch):
+    @contextmanager
+    def unavailable_lock(*, blocking):
+        assert blocking
+        yield False
+
+    monkeypatch.setattr(ruleset_mod, "_ruleset_refresh_lock", unavailable_lock)
+
+    with pytest.raises(
+        ruleset_mod.RulesetRefreshLockUnavailable,
+        match="post-barrier",
+    ):
+        ruleset_mod.refresh(
+            config_mod.BlackboxConfig(context_graph_id="owner/public"),
+            object(),
+            force_query=True,
+        )
 
 
 def test_ruleset_cache_never_crosses_custom_context_graphs(monkeypatch, tmp_path):

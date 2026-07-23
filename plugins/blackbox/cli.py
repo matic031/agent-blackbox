@@ -804,6 +804,7 @@ def _cmd_sync_impl(args: argparse.Namespace) -> int:
     next_catchup_retry_at = 0.0
     authoritative_attempted = False
     authoritative_recovered = False
+    authoritative_cache_refreshed = False
     authoritative_complete = False
     authoritative_target = 0
     sync_complete = False
@@ -943,11 +944,15 @@ def _cmd_sync_impl(args: argparse.Namespace) -> int:
             # ``_record_verified_pass``. If the pinned source failed before a
             # pass settled, do not launch a competing full-store query merely
             # to decide whether to persist the background subscription.
-            rs = (
-                ruleset.refresh(cfg, client, force_query=True)
-                if authoritative_recovered
-                else ruleset.peek(cfg)
-            )
+            if authoritative_recovered:
+                try:
+                    rs = ruleset.refresh(cfg, client, force_query=True)
+                except ruleset.RulesetRefreshLockUnavailable:
+                    rs = ruleset.peek(cfg)
+                else:
+                    authoritative_cache_refreshed = True
+            else:
+                rs = ruleset.peek(cfg)
             counts = rs.counts()
             public_count = max(public_count, _ruleset_graph_count(rs, "public"))
             community_count = _ruleset_graph_count(rs, "community")
@@ -958,7 +963,9 @@ def _cmd_sync_impl(args: argparse.Namespace) -> int:
                 # owns future updates and restart-safe reconciliation.
                 fresh_catchup_seen = True
                 authoritative_complete = (
-                    authoritative_target > 0 and public_count >= authoritative_target
+                    authoritative_cache_refreshed
+                    and authoritative_target > 0
+                    and public_count >= authoritative_target
                 )
 
         may_probe_private = private_graph and not getattr(args, "wait", False)
@@ -1055,6 +1062,7 @@ def _cmd_sync_impl(args: argparse.Namespace) -> int:
             or not fresh_catchup_job_id
             or catchup_job_id == fresh_catchup_job_id
         )
+        barrier_job_id = catchup_job_id or fresh_catchup_job_id or "<unscoped>"
         catchup_pending = not authoritative_recovered and (
             catchup_state in {"queued", "running"}
             or (
@@ -1077,16 +1085,24 @@ def _cmd_sync_impl(args: argparse.Namespace) -> int:
                 # job status until the transfer reaches a terminal state.
                 rs = ruleset.peek(cfg)
             else:
-                barrier_job_id = (
-                    catchup_job_id or fresh_catchup_job_id or "<unscoped>"
-                )
-                force_query = (
+                force_catchup_query = (
                     fresh_job_complete
                     and barrier_job_id != refreshed_catchup_job_id
                 )
-                rs = ruleset.refresh(cfg, client, force_query=force_query)
-                if force_query:
-                    refreshed_catchup_job_id = barrier_job_id
+                force_authoritative_query = (
+                    authoritative_recovered
+                    and not authoritative_cache_refreshed
+                )
+                force_query = force_catchup_query or force_authoritative_query
+                try:
+                    rs = ruleset.refresh(cfg, client, force_query=force_query)
+                except ruleset.RulesetRefreshLockUnavailable:
+                    rs = ruleset.peek(cfg)
+                else:
+                    if force_catchup_query:
+                        refreshed_catchup_job_id = barrier_job_id
+                    if force_authoritative_query:
+                        authoritative_cache_refreshed = True
         counts = rs.counts()
         public_count = _ruleset_graph_count(rs, "public")
         community_count = _ruleset_graph_count(rs, "community")
@@ -1124,12 +1140,19 @@ def _cmd_sync_impl(args: argparse.Namespace) -> int:
         # idempotent source-pinned recovery is: it has independently
         # verified the durable VM snapshot and may satisfy this gate on the
         # following loop iteration.
-        authoritative_fallback_ready = authoritative_recovered
+        authoritative_fallback_ready = (
+            authoritative_recovered and authoritative_cache_refreshed
+        )
         catchup_active = catchup_state in {"queued", "running"}
+        catchup_cache_refreshed = (
+            not fresh_job_complete
+            or refreshed_catchup_job_id == barrier_job_id
+        )
         fresh_catchup_complete = authoritative_fallback_ready or (
             not getattr(args, "wait", False)
             or (
                 not catchup_active
+                and catchup_cache_refreshed
                 and (
                     not (catchup_restarted or fresh_catchup_seen)
                     or fresh_job_complete
@@ -1159,7 +1182,15 @@ def _cmd_sync_impl(args: argparse.Namespace) -> int:
                 deadline,
                 on_progress=_record_verified_pass,
             )
-            rs = ruleset.refresh(cfg, client, force_query=True)
+            if authoritative_recovered:
+                try:
+                    rs = ruleset.refresh(cfg, client, force_query=True)
+                except ruleset.RulesetRefreshLockUnavailable:
+                    rs = ruleset.peek(cfg)
+                else:
+                    authoritative_cache_refreshed = True
+            else:
+                rs = ruleset.refresh(cfg, client)
             counts = rs.counts()
             public_count = max(public_count, _ruleset_graph_count(rs, "public"))
             community_count = _ruleset_graph_count(rs, "community")
@@ -1168,7 +1199,9 @@ def _cmd_sync_impl(args: argparse.Namespace) -> int:
             authoritative_target = public_count
         if authoritative_recovered:
             authoritative_complete = (
-                authoritative_target > 0 and public_count >= authoritative_target
+                authoritative_cache_refreshed
+                and authoritative_target > 0
+                and public_count >= authoritative_target
             )
             if authoritative_target <= 0:
                 error = "authoritative VM returned no public threat entries"
